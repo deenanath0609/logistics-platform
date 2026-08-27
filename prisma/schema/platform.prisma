@@ -1,0 +1,178 @@
+// ============================================================
+// PLATFORM
+//
+// Cross-cutting infrastructure: audit trail, transactional
+// outbox, file assets, config, and job bookkeeping.
+// ============================================================
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  LOGIN
+  LOGOUT
+  PERMISSION_CHANGE
+  EXPORT
+  OVERRIDE
+  APPROVE
+  CANCEL
+}
+
+/// Every meaningful change, with before/after. Immutable: the
+/// database grants no UPDATE or DELETE on this table.
+model AuditLog {
+  id        String      @id @default(cuid())
+  /// Required: a row that cannot say whose change it was cannot be
+  /// filtered safely, so there is no such thing as a tenant-less entry.
+  orgId     String
+  userId    String?
+  action    AuditAction
+  /// Model name, e.g. "Shipment".
+  entity    String
+  entityId  String
+  /// Human-readable identifier for search, e.g. "CL202608250001".
+  entityRef String?
+  branchId  String?
+  before    Json?
+  after     Json?
+  /// Populated for OVERRIDE and STATUS_CORRECTION.
+  reason    String?
+  ipAddress String?
+  userAgent String?
+  deviceId  String?
+  createdAt DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([orgId])
+  @@index([entity, entityId, createdAt])
+  @@index([userId, createdAt])
+  @@index([entityRef])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+  DEAD
+}
+
+/// Written in the same transaction as the change that caused it, so
+/// a dead SMS gateway can never fail a dock scan. A worker drains
+/// it and fans out to notifications, webhooks, and automations.
+model OutboxEvent {
+  id            String       @id @default(cuid())
+  /// The drain fans out to per-tenant notifications and webhooks, so the
+  /// event has to carry the tenant it belongs to.
+  orgId         String
+  /// e.g. "shipment.delivered", "vehicle.arrived"
+  eventType     String
+  aggregate     String
+  aggregateId   String
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  maxAttempts   Int          @default(10)
+  nextAttemptAt DateTime     @default(now())
+  lastError     String?
+  processedAt   DateTime?
+  createdAt     DateTime     @default(now())
+
+  @@index([orgId])
+  @@index([status, nextAttemptAt])
+  @@index([aggregate, aggregateId])
+  @@map("outbox_event")
+}
+
+enum FileKind {
+  POD_SIGNATURE
+  POD_PHOTO
+  PACKAGE_PHOTO
+  DAMAGE_PHOTO
+  EXPENSE_BILL
+  VEHICLE_DOCUMENT
+  DRIVER_DOCUMENT
+  CUSTOMER_DOCUMENT
+  SHIPMENT_DOCUMENT
+  BULK_UPLOAD_SOURCE
+  GENERATED_PDF
+  OTHER
+}
+
+/// Pointer to an object in S3/MinIO. Binary never touches Postgres.
+model FileAsset {
+  id           String    @id @default(cuid())
+  orgId        String
+  kind         FileKind
+  bucket       String
+  objectKey    String    @unique
+  fileName     String
+  contentType  String
+  sizeBytes    Int
+  checksum     String?
+  /// What this file belongs to, e.g. ("Shipment", "<id>").
+  ownerEntity  String?
+  ownerId      String?
+  /// Files captured in the field carry where and when they were taken.
+  capturedAt   DateTime?
+  latitude     Decimal?  @db.Decimal(10, 7)
+  longitude    Decimal?  @db.Decimal(10, 7)
+  uploadedById String?
+  createdAt    DateTime  @default(now())
+  deletedAt    DateTime?
+
+  @@index([orgId])
+  @@index([ownerEntity, ownerId])
+  @@index([kind, createdAt])
+  @@map("file_asset")
+}
+
+/// Runtime settings operations can change without a deploy.
+model SystemConfig {
+  id          String   @id @default(cuid())
+  /// Deliberately nullable, unlike every other model here: the null row is
+  /// the platform-wide default that a tenant row overrides, and
+  /// `@@unique([orgId, key])` below is what lets both exist for one key.
+  orgId       String?
+  key         String
+  value       Json
+  description String?
+  /// Grouping for the settings UI.
+  category    String   @default("general")
+  isSecret    Boolean  @default(false)
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([orgId, key])
+  @@index([category])
+  @@map("system_config")
+}
+
+enum JobStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+/// Bookkeeping for scheduled workers (GPS ingest, SLA scan, outbox
+/// drain). Lets the ops dashboard answer "is the system alive?".
+model JobRun {
+  id             String    @id @default(cuid())
+  jobName        String
+  status         JobStatus @default(RUNNING)
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  durationMs     Int?
+  itemsProcessed Int       @default(0)
+  itemsFailed    Int       @default(0)
+  error          String?
+  metadata       Json?
+
+  @@index([jobName, startedAt])
+  @@map("job_run")
+}

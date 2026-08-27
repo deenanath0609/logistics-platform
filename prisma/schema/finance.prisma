@@ -1,0 +1,562 @@
+// ============================================================
+// RATING, BILLING & SETTLEMENT  (Phase 6)
+//
+// Two sides of the same trip: what the customer is charged, and what
+// the vendor is paid. Margin is only knowable when both are modelled.
+// ============================================================
+
+// ────────────────────────────────────────────────────────────
+// Vendors — transporters, brokers, attached-vehicle owners
+// ────────────────────────────────────────────────────────────
+
+enum VendorKind {
+  TRANSPORTER
+  BROKER
+  ATTACHED_OWNER
+  SERVICE
+}
+
+model Vendor {
+  id        String     @id @default(cuid())
+  orgId     String
+  code      String
+  name      String
+  legalName String?
+  kind      VendorKind @default(TRANSPORTER)
+
+  phone   String
+  email   String?
+  gstin   String?
+  pan     String?
+  address String?
+  cityId  String?
+
+  /// Days from bill date to payment due.
+  paymentTermDays Int?
+  /// TDS 194C is 1% for individuals/HUF, 2% otherwise.
+  tdsPercent      Decimal? @db.Decimal(5, 2)
+
+  isActive  Boolean   @default(true)
+  isBlocked Boolean   @default(false)
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  bankAccounts  VendorBankAccount[]
+  rateContracts VendorRateContract[]
+  bills         VendorBill[]
+  payments      VendorPayment[]
+  vehicles      Vehicle[]
+  drivers       Driver[]
+  trips         Trip[]
+
+  @@unique([orgId, code])
+  @@index([kind, isActive])
+  @@map("vendor")
+}
+
+model VendorBankAccount {
+  id            String   @id @default(cuid())
+  vendorId      String
+  accountName   String
+  accountNumber String
+  ifsc          String
+  bankName      String?
+  isPrimary     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([vendorId])
+  @@map("vendor_bank_account")
+}
+
+// ────────────────────────────────────────────────────────────
+// Customer rate cards
+// ────────────────────────────────────────────────────────────
+
+/// A rate card belongs to a customer, or is the published tariff when
+/// `customerId` is null. Versioned so a historical invoice always
+/// reprices at what was agreed on its date.
+model RateCard {
+  id         String  @id @default(cuid())
+  orgId      String
+  code       String
+  name       String
+  customerId String?
+  isDefault  Boolean @default(false)
+  isActive   Boolean @default(true)
+  notes      String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+
+  customer Customer?         @relation(fields: [customerId], references: [id])
+  versions RateCardVersion[]
+
+  @@unique([orgId, code])
+  @@index([customerId, isActive])
+  @@map("rate_card")
+}
+
+model RateCardVersion {
+  id            String    @id @default(cuid())
+  rateCardId    String
+  version       Int
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+  /// A draft can be edited; once approved it is frozen, because invoices
+  /// already reference it.
+  isApproved    Boolean   @default(false)
+  approvedAt    DateTime?
+  approvedById  String?
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  rateCard RateCard     @relation(fields: [rateCardId], references: [id], onDelete: Cascade)
+  slabs    RateSlab[]
+  rules    ChargeRule[]
+
+  @@unique([rateCardId, version])
+  @@index([effectiveFrom])
+  @@map("rate_card_version")
+}
+
+enum RateBasis {
+  PER_KG
+  PER_PACKAGE
+  FLAT
+  PER_KM
+  PER_TRIP
+  PER_VEHICLE
+}
+
+/// One priced lane. Resolution runs most-specific-first; see
+/// src/lib/pricing.
+model RateSlab {
+  id        String @id @default(cuid())
+  versionId String
+
+  serviceTypeId String?
+  mode          ShipmentMode?
+
+  /// Null on either side means "any". Zone beats city beats any.
+  originZoneId      String?
+  destinationZoneId String?
+  originCityId      String?
+  destinationCityId String?
+  vehicleTypeId     String?
+
+  /// Weight band, inclusive of from, exclusive of to.
+  weightFromKg Decimal? @db.Decimal(10, 3)
+  weightToKg   Decimal? @db.Decimal(10, 3)
+
+  basis               RateBasis @default(PER_KG)
+  rate                Decimal   @db.Decimal(12, 4)
+  /// Floor per shipment, applied after the slab calculation.
+  minimumCharge       Decimal?  @db.Decimal(14, 2)
+  /// Rate cards may set their own floor on chargeable weight.
+  minimumChargeableKg Decimal?  @db.Decimal(10, 3)
+
+  transitHours Int?
+  priority     Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  version RateCardVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@index([versionId])
+  @@index([serviceTypeId])
+  @@map("rate_slab")
+}
+
+/// Everything that is not base freight: surcharges, handling, ODA,
+/// insurance, COD fee. Bound to a charge head so the invoice line names
+/// something operations already knows.
+model ChargeRule {
+  id            String      @id @default(cuid())
+  versionId     String
+  chargeTypeId  String
+  basis         ChargeBasis
+  rate          Decimal     @db.Decimal(12, 4)
+  minimumAmount Decimal?    @db.Decimal(14, 2)
+  maximumAmount Decimal?    @db.Decimal(14, 2)
+  /// Only apply when the shipment matches — e.g. ODA only for ODA PINs.
+  appliesWhen   Json?
+  isAutomatic   Boolean     @default(true)
+  sortOrder     Int         @default(0)
+  createdAt     DateTime    @default(now())
+
+  version    RateCardVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  chargeType ChargeType      @relation(fields: [chargeTypeId], references: [id])
+
+  @@index([versionId])
+  @@map("charge_rule")
+}
+
+/// Diesel moves; the surcharge follows. A dated rule rather than a
+/// constant, so a revision is a data change.
+model FuelSurchargeRule {
+  id            String    @id @default(cuid())
+  orgId         String
+  percent       Decimal   @db.Decimal(6, 3)
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+  notes         String?
+  createdAt     DateTime  @default(now())
+  createdById   String?
+
+  @@index([effectiveFrom])
+  @@map("fuel_surcharge_rule")
+}
+
+/// Why a shipment was priced the way it was.
+///
+/// Stored at booking and again at invoicing. "Why is this ₹4,280?" has to
+/// be answerable in one click, months later, without re-running anything.
+model FreightCalculation {
+  id               String   @id @default(cuid())
+  shipmentId       String
+  versionId        String?
+  /// Every rule considered, matched or skipped, and why.
+  trace            Json
+  chargeableWeight Decimal  @db.Decimal(10, 3)
+  freightAmount    Decimal  @db.Decimal(14, 2)
+  chargesTotal     Decimal  @db.Decimal(14, 2)
+  taxAmount        Decimal  @db.Decimal(14, 2)
+  grandTotal       Decimal  @db.Decimal(14, 2)
+  /// BOOKING or INVOICE — the second one may differ after a reweigh.
+  stage            String
+  createdAt        DateTime @default(now())
+  createdById      String?
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([shipmentId, createdAt])
+  @@map("freight_calculation")
+}
+
+// ────────────────────────────────────────────────────────────
+// Invoicing & receivables
+// ────────────────────────────────────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+  CREDITED
+}
+
+model Invoice {
+  id     String        @id @default(cuid())
+  orgId  String
+  /// Issued from the organisation's own NumberSeries, so every document
+  /// number in this file is unique per tenant rather than globally.
+  number String
+  status InvoiceStatus @default(DRAFT)
+
+  customerId String
+  branchId   String
+
+  invoiceDate DateTime  @db.Date
+  dueDate     DateTime  @db.Date
+  periodFrom  DateTime? @db.Date
+  periodTo    DateTime? @db.Date
+
+  subtotal   Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount  Decimal @default(0) @db.Decimal(14, 2)
+  roundOff   Decimal @default(0) @db.Decimal(6, 2)
+  total      Decimal @default(0) @db.Decimal(14, 2)
+  amountPaid Decimal @default(0) @db.Decimal(14, 2)
+  /// total - amountPaid, kept denormalised for ageing queries.
+  amountDue  Decimal @default(0) @db.Decimal(14, 2)
+
+  /// GTA under reverse charge: the customer pays the tax, not us.
+  isReverseCharge Boolean @default(false)
+  placeOfSupply   String?
+  customerGstin   String?
+
+  notes           String?
+  documentAssetId String?
+  issuedAt        DateTime?
+  issuedById      String?
+  cancelledAt     DateTime?
+  cancelReason    String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+
+  customer    Customer            @relation(fields: [customerId], references: [id])
+  branch      Branch              @relation(fields: [branchId], references: [id])
+  lines       InvoiceLine[]
+  creditNotes CreditNote[]
+  allocations PaymentAllocation[]
+
+  @@unique([orgId, number])
+  @@index([customerId, status])
+  @@index([status, dueDate])
+  @@index([invoiceDate])
+  @@map("invoice")
+}
+
+model InvoiceLine {
+  id           String  @id @default(cuid())
+  invoiceId    String
+  /// Every line traces to the consignment it came from.
+  shipmentId   String?
+  chargeTypeId String?
+
+  description String
+  quantity    Decimal  @default(1) @db.Decimal(12, 3)
+  rate        Decimal  @db.Decimal(12, 4)
+  amount      Decimal  @db.Decimal(14, 2)
+  taxPercent  Decimal? @db.Decimal(6, 3)
+  taxAmount   Decimal  @default(0) @db.Decimal(14, 2)
+  hsnSac      String?
+  sortOrder   Int      @default(0)
+
+  invoice  Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  shipment Shipment? @relation(fields: [shipmentId], references: [id])
+
+  @@index([invoiceId])
+  @@index([shipmentId])
+  @@map("invoice_line")
+}
+
+model CreditNote {
+  id              String   @id @default(cuid())
+  orgId           String
+  number          String
+  invoiceId       String
+  customerId      String
+  reason          String
+  amount          Decimal  @db.Decimal(14, 2)
+  taxAmount       Decimal  @default(0) @db.Decimal(14, 2)
+  total           Decimal  @db.Decimal(14, 2)
+  issuedAt        DateTime @default(now())
+  issuedById      String?
+  documentAssetId String?
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@unique([orgId, number])
+  @@index([invoiceId])
+  @@map("credit_note")
+}
+
+enum PaymentMode {
+  CASH
+  CHEQUE
+  NEFT
+  RTGS
+  UPI
+  CARD
+  ADJUSTMENT
+}
+
+model Payment {
+  id         String  @id @default(cuid())
+  orgId      String
+  number     String
+  customerId String
+  branchId   String?
+
+  amount     Decimal     @db.Decimal(14, 2)
+  /// Deducted at source by the customer; reduces what we can allocate.
+  tdsAmount  Decimal     @default(0) @db.Decimal(14, 2)
+  mode       PaymentMode @default(NEFT)
+  reference  String?
+  receivedOn DateTime    @db.Date
+
+  /// amount - sum(allocations). A payment can sit unallocated.
+  unallocated Decimal @default(0) @db.Decimal(14, 2)
+
+  notes       String?
+  createdAt   DateTime @default(now())
+  createdById String?
+
+  customer    Customer            @relation(fields: [customerId], references: [id])
+  allocations PaymentAllocation[]
+
+  @@unique([orgId, number])
+  @@index([customerId, receivedOn])
+  @@map("payment")
+}
+
+model PaymentAllocation {
+  id        String   @id @default(cuid())
+  paymentId String
+  invoiceId String
+  amount    Decimal  @db.Decimal(14, 2)
+  createdAt DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+  @@map("payment_allocation")
+}
+
+// ────────────────────────────────────────────────────────────
+// Vendor payable & driver settlement
+// ────────────────────────────────────────────────────────────
+
+model VendorRateContract {
+  id            String    @id @default(cuid())
+  vendorId      String
+  code          String
+  name          String
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+
+  vendor Vendor           @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  lines  VendorRateLine[]
+
+  @@unique([vendorId, code])
+  @@map("vendor_rate_contract")
+}
+
+model VendorRateLine {
+  id                  String    @id @default(cuid())
+  contractId          String
+  originBranchId      String?
+  destinationBranchId String?
+  vehicleTypeId       String?
+  basis               RateBasis @default(PER_TRIP)
+  rate                Decimal   @db.Decimal(12, 4)
+  minimumAmount       Decimal?  @db.Decimal(14, 2)
+  createdAt           DateTime  @default(now())
+
+  contract VendorRateContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId])
+  @@map("vendor_rate_line")
+}
+
+enum VendorBillStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  DISPUTED
+  CANCELLED
+}
+
+model VendorBill {
+  id       String           @id @default(cuid())
+  orgId    String
+  number   String
+  vendorId String
+  status   VendorBillStatus @default(DRAFT)
+
+  billDate DateTime  @db.Date
+  dueDate  DateTime? @db.Date
+
+  subtotal        Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount       Decimal @default(0) @db.Decimal(14, 2)
+  tdsAmount       Decimal @default(0) @db.Decimal(14, 2)
+  /// Damage, shortage, fines withheld from this bill.
+  deductions      Decimal @default(0) @db.Decimal(14, 2)
+  advanceAdjusted Decimal @default(0) @db.Decimal(14, 2)
+  total           Decimal @default(0) @db.Decimal(14, 2)
+  amountPaid      Decimal @default(0) @db.Decimal(14, 2)
+  amountDue       Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Contract rate vs billed amount; a mismatch is flagged before payment.
+  varianceAmount Decimal? @db.Decimal(14, 2)
+  varianceNote   String?
+
+  approvedAt   DateTime?
+  approvedById String?
+  notes        String?
+  createdAt    DateTime  @default(now())
+  createdById  String?
+
+  vendor Vendor           @relation(fields: [vendorId], references: [id])
+  lines  VendorBillLine[]
+
+  @@unique([orgId, number])
+  @@index([vendorId, status])
+  @@index([status, dueDate])
+  @@map("vendor_bill")
+}
+
+model VendorBillLine {
+  id          String   @id @default(cuid())
+  billId      String
+  tripId      String?
+  description String
+  amount      Decimal  @db.Decimal(14, 2)
+  taxPercent  Decimal? @db.Decimal(6, 3)
+  taxAmount   Decimal  @default(0) @db.Decimal(14, 2)
+  sortOrder   Int      @default(0)
+
+  bill VendorBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([billId])
+  @@map("vendor_bill_line")
+}
+
+model VendorPayment {
+  id          String      @id @default(cuid())
+  orgId       String
+  number      String
+  vendorId    String
+  amount      Decimal     @db.Decimal(14, 2)
+  mode        PaymentMode @default(NEFT)
+  reference   String?
+  paidOn      DateTime    @db.Date
+  notes       String?
+  createdAt   DateTime    @default(now())
+  createdById String?
+
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+
+  @@unique([orgId, number])
+  @@index([vendorId, paidOn])
+  @@map("vendor_payment")
+}
+
+enum SettlementStatus {
+  DRAFT
+  APPROVED
+  PAID
+  CANCELLED
+}
+
+/// Trip earning less advances, expenses and deductions.
+model DriverSettlement {
+  id       String           @id @default(cuid())
+  orgId    String
+  number   String
+  driverId String
+  tripId   String?
+  status   SettlementStatus @default(DRAFT)
+
+  tripEarning     Decimal @default(0) @db.Decimal(14, 2)
+  advancesPaid    Decimal @default(0) @db.Decimal(14, 2)
+  expensesClaimed Decimal @default(0) @db.Decimal(14, 2)
+  deductions      Decimal @default(0) @db.Decimal(14, 2)
+  deductionNote   String?
+  netPayable      Decimal @default(0) @db.Decimal(14, 2)
+
+  approvedAt   DateTime?
+  approvedById String?
+  paidAt       DateTime?
+  createdAt    DateTime  @default(now())
+  createdById  String?
+
+  driver Driver @relation(fields: [driverId], references: [id])
+
+  @@unique([orgId, number])
+  @@index([driverId, status])
+  @@map("driver_settlement")
+}

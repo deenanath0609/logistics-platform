@@ -1,0 +1,191 @@
+// ============================================================
+// HUB OPERATIONS  (Phase 3)
+//
+// The dock is a scanning console, not a form. Every scan writes a
+// ScanRecord at package granularity — which is the only reason a
+// manifest of 17 that arrives as 15 can name the missing two.
+// ============================================================
+
+enum ScanType {
+  INBOUND
+  OUTBOUND
+  SORT
+  LOAD
+  UNLOAD
+  DELIVERY_OUT
+  DELIVERY_IN
+  AUDIT
+}
+
+/// One row per physical barcode read. Deliberately separate from
+/// ShipmentEvent: one consignment-level event ("received at hub") can be
+/// the result of seventeen package scans, and shortage detection needs
+/// the individual rows.
+model ScanRecord {
+  id             String   @id @default(cuid())
+  scanType       ScanType
+  barcode        String
+  packageId      String?
+  shipmentId     String?
+  branchId       String
+  userId         String?
+  deviceId       String?
+  manifestId     String?
+  tripId         String?
+  loadingSheetId String?
+  receiptId      String?
+
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+
+  /// Device clock at the scan; differs from recordedAt after offline work.
+  scannedAt      DateTime
+  recordedAt     DateTime @default(now())
+  /// Client-generated, so an offline queue can retry safely.
+  idempotencyKey String   @unique
+
+  /// False when the barcode did not match anything expected here — an
+  /// unexpected scan is an operational fact worth keeping, not an error
+  /// to swallow.
+  isExpected Boolean @default(true)
+  remarks    String?
+
+  package  ShipmentPackage? @relation(fields: [packageId], references: [id])
+  shipment Shipment?        @relation(fields: [shipmentId], references: [id])
+  branch   Branch           @relation(fields: [branchId], references: [id])
+  user     User?            @relation(fields: [userId], references: [id])
+
+  @@index([branchId, scannedAt])
+  @@index([barcode, scannedAt])
+  @@index([shipmentId])
+  @@index([manifestId, scanType])
+  @@map("scan_record")
+}
+
+enum ReceiptStatus {
+  OPEN
+  CLOSED
+  RECONCILED
+}
+
+/// Receiving an arriving manifest. Closing it is what turns unscanned
+/// lines into a shortage and unexpected scans into an excess.
+model InboundReceipt {
+  id         String        @id @default(cuid())
+  /// Carried on the row rather than inherited through branchId, because a
+  /// receipt is addressed directly by id at /hub/inbound/[id].
+  orgId      String
+  branchId   String
+  manifestId String?
+  tripId     String?
+  status     ReceiptStatus @default(OPEN)
+
+  expectedShipments Int @default(0)
+  expectedPackages  Int @default(0)
+  scannedPackages   Int @default(0)
+  shortPackages     Int @default(0)
+  excessPackages    Int @default(0)
+  damagedPackages   Int @default(0)
+
+  sealIntact Boolean?
+  openedAt   DateTime  @default(now())
+  openedById String?
+  closedAt   DateTime?
+  closedById String?
+  remarks    String?
+
+  branch        Branch               @relation(fields: [branchId], references: [id])
+  manifest      Manifest?            @relation(fields: [manifestId], references: [id])
+  lines         InboundReceiptLine[]
+  discrepancies ReceiptDiscrepancy[]
+
+  @@index([orgId])
+  @@index([branchId, status])
+  @@map("inbound_receipt")
+}
+
+model InboundReceiptLine {
+  id               String   @id @default(cuid())
+  receiptId        String
+  shipmentId       String
+  expectedPackages Int
+  scannedPackages  Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  receipt  InboundReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  shipment Shipment       @relation(fields: [shipmentId], references: [id])
+
+  @@unique([receiptId, shipmentId])
+  @@map("inbound_receipt_line")
+}
+
+enum DiscrepancyKind {
+  SHORT
+  EXCESS
+  DAMAGED
+  MISROUTED
+  SEAL_BROKEN
+}
+
+model ReceiptDiscrepancy {
+  id            String          @id @default(cuid())
+  receiptId     String
+  kind          DiscrepancyKind
+  shipmentId    String?
+  packageId     String?
+  barcode       String?
+  quantity      Int             @default(1)
+  reasonCodeId  String?
+  /// The branch that dispatched it owns the problem by default.
+  ownerBranchId String?
+  photoAssetId  String?
+  remarks       String?
+  resolvedAt    DateTime?
+  resolvedById  String?
+  resolution    String?
+  createdAt     DateTime        @default(now())
+  createdById   String?
+
+  receipt  InboundReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  shipment Shipment?      @relation(fields: [shipmentId], references: [id])
+
+  @@index([receiptId, kind])
+  @@index([shipmentId])
+  @@map("receipt_discrepancy")
+}
+
+/// Where a package physically sits on the floor.
+model SortBin {
+  id                  String   @id @default(cuid())
+  branchId            String
+  code                String
+  name                String
+  /// Bin dedicated to a destination branch, when it is a route bin.
+  destinationBranchId String?
+  capacity            Int?
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  branch    Branch            @relation(fields: [branchId], references: [id])
+  locations PackageLocation[]
+
+  @@unique([branchId, code])
+  @@map("sort_bin")
+}
+
+model PackageLocation {
+  id         String    @id @default(cuid())
+  packageId  String    @unique
+  branchId   String
+  binId      String?
+  placedAt   DateTime  @default(now())
+  placedById String?
+  removedAt  DateTime?
+
+  package ShipmentPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  bin     SortBin?        @relation(fields: [binId], references: [id])
+
+  @@index([branchId, binId])
+  @@map("package_location")
+}

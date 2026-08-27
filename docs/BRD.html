@@ -1,0 +1,1843 @@
+<title>City Logistics Blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+
+<style>
+:root {
+  --ground: #EDF1F2;
+  --surface: #FFFFFF;
+  --surface-2: #F4F8F8;
+  --ink: #0E1719;
+  --ink-2: #33474C;
+  --muted: #5E7378;
+  --rule: #D2DDDE;
+  --rule-strong: #B0C2C4;
+  --accent: #0E6C73;
+  --accent-text: #0A5257;
+  --accent-soft: #DBEDEE;
+  --ok: #1A6B47;
+  --ok-soft: #DAEEE3;
+  --warn: #8A5A05;
+  --warn-soft: #F5EAD2;
+  --bad: #A5271C;
+  --bad-soft: #F5DEDA;
+  --shadow: 0 1px 2px rgba(14,23,25,.05), 0 8px 24px -12px rgba(14,23,25,.14);
+
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --f-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0B1113;
+    --surface: #121B1D;
+    --surface-2: #172225;
+    --ink: #E5EDEE;
+    --ink-2: #B3C4C6;
+    --muted: #8AA0A4;
+    --rule: #223134;
+    --rule-strong: #33474B;
+    --accent: #55C3CB;
+    --accent-text: #7BD5DB;
+    --accent-soft: #0F3134;
+    --ok: #63C494;
+    --ok-soft: #102F26;
+    --warn: #DCA847;
+    --warn-soft: #322511;
+    --bad: #EB7C70;
+    --bad-soft: #381B18;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0B1113;
+  --surface: #121B1D;
+  --surface-2: #172225;
+  --ink: #E5EDEE;
+  --ink-2: #B3C4C6;
+  --muted: #8AA0A4;
+  --rule: #223134;
+  --rule-strong: #33474B;
+  --accent: #55C3CB;
+  --accent-text: #7BD5DB;
+  --accent-soft: #0F3134;
+  --ok: #63C494;
+  --ok-soft: #102F26;
+  --warn: #DCA847;
+  --warn-soft: #322511;
+  --bad: #EB7C70;
+  --bad-soft: #381B18;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: 16.5px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- masthead ---------- */
+.masthead {
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+}
+.masthead-inner {
+  max-width: 1220px;
+  margin: 0 auto;
+  padding: clamp(2.2rem, 6vw, 4rem) clamp(1.1rem, 4vw, 2.5rem) clamp(1.6rem, 4vw, 2.4rem);
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+.eyebrow {
+  font-family: var(--f-mono);
+  font-size: .705rem;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+.masthead h1 {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: clamp(2.1rem, 6.2vw, 3.65rem);
+  line-height: 1.04;
+  letter-spacing: -.022em;
+  margin: 0;
+  text-wrap: balance;
+}
+.standfirst {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 1.115rem;
+  color: var(--ink-2);
+}
+.factstrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  margin-top: .4rem;
+}
+.fact {
+  background: var(--surface);
+  padding: .8rem .95rem;
+  display: flex;
+  flex-direction: column;
+  gap: .18rem;
+}
+.fact dt {
+  font-family: var(--f-mono);
+  font-size: .655rem;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fact dd {
+  margin: 0;
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: .945rem;
+  letter-spacing: -.005em;
+}
+
+/* ---------- shell ---------- */
+.shell {
+  max-width: 1220px;
+  margin: 0 auto;
+  padding: 0 clamp(1.1rem, 4vw, 2.5rem) 6rem;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  gap: clamp(1.6rem, 4vw, 3.4rem);
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------- contents rail ---------- */
+.rail {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 2.2rem 0;
+  font-family: var(--f-display);
+  font-size: .845rem;
+  line-height: 1.42;
+}
+@media (max-width: 1000px) {
+  .rail {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding: 1.6rem 0 0;
+    border-bottom: 1px solid var(--rule);
+  }
+}
+.rail h2 {
+  font-family: var(--f-mono);
+  font-size: .655rem;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 .85rem;
+}
+.rail ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .1rem; }
+.rail .rail-part {
+  margin-top: 1.15rem;
+  padding-top: .7rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--f-mono);
+  font-size: .65rem;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.rail .rail-part:first-child { margin-top: 0; border-top: 0; padding-top: 0; }
+.rail a {
+  color: var(--ink-2);
+  text-decoration: none;
+  display: block;
+  padding: .21rem 0;
+  border-left: 2px solid transparent;
+  padding-left: .6rem;
+  margin-left: -.6rem;
+}
+.rail a:hover { color: var(--accent-text); border-left-color: var(--accent); }
+.rail a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- document body ---------- */
+.doc {
+  padding: 2.2rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3.1rem;
+  min-width: 0;
+}
+.doc section { display: flex; flex-direction: column; gap: 1rem; scroll-margin-top: 1.4rem; min-width: 0; }
+
+.part-head {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  padding: 1.15rem 0 .9rem;
+  border-top: 3px solid var(--ink);
+  border-bottom: 1px solid var(--rule-strong);
+}
+.part-head .kicker {
+  font-family: var(--f-mono);
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.part-head h2 {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: clamp(1.5rem, 3.6vw, 2.05rem);
+  letter-spacing: -.018em;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.doc h3 {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: 1.34rem;
+  letter-spacing: -.012em;
+  line-height: 1.22;
+  margin: 0;
+  text-wrap: balance;
+  display: flex;
+  gap: .62rem;
+  align-items: baseline;
+}
+.doc h3 .num {
+  font-family: var(--f-mono);
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  letter-spacing: .02em;
+  flex: none;
+}
+.doc h4 {
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: 1rem;
+  letter-spacing: .002em;
+  margin: .55rem 0 -.3rem;
+  color: var(--ink);
+}
+.doc p { margin: 0; max-width: 70ch; }
+.doc p.lead { color: var(--ink-2); font-size: 1.045rem; }
+.doc ul, .doc ol.list { margin: 0; padding-left: 1.15rem; max-width: 70ch; display: flex; flex-direction: column; gap: .3rem; }
+.doc li { padding-left: .15rem; }
+.doc li::marker { color: var(--muted); }
+.doc a { color: var(--accent-text); text-underline-offset: 2px; }
+
+code, .mono { font-family: var(--f-mono); font-size: .845em; }
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: .05em .32em;
+  white-space: nowrap;
+}
+strong { font-weight: 600; }
+
+/* ---------- tables ---------- */
+.scroller {
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--f-display);
+  font-size: .845rem;
+  line-height: 1.45;
+  min-width: 520px;
+}
+table.wide { min-width: 780px; }
+table.xwide { min-width: 940px; }
+thead th {
+  text-align: left;
+  font-family: var(--f-mono);
+  font-size: .645rem;
+  font-weight: 600;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-2);
+  padding: .62rem .8rem;
+  border-bottom: 1px solid var(--rule-strong);
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+tbody td, tbody th {
+  padding: .58rem .8rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  text-align: left;
+  font-weight: 400;
+}
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+tbody th { font-weight: 600; color: var(--ink); }
+td .mono, th .mono { color: var(--ink-2); }
+.num-col { font-variant-numeric: tabular-nums; white-space: nowrap; }
+caption {
+  caption-side: bottom;
+  text-align: left;
+  padding: .6rem .1rem 0;
+  font-size: .8rem;
+  color: var(--muted);
+  font-family: var(--f-display);
+}
+
+/* ---------- chips ---------- */
+.chip {
+  display: inline-block;
+  font-family: var(--f-mono);
+  font-size: .63rem;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  padding: .16em .46em;
+  border-radius: 3px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.chip.core { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent); }
+.chip.mvp { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+.chip.later { background: var(--surface-2); color: var(--muted); border-color: var(--rule-strong); }
+.chip.exc { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
+.chip.auto { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+
+/* ---------- callouts ---------- */
+.note {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  padding: .95rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+  max-width: 74ch;
+}
+.note.warn { border-left-color: var(--warn); }
+.note.decide { border-left-color: var(--bad); }
+.note .note-label {
+  font-family: var(--f-mono);
+  font-size: .645rem;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.note p { font-size: .95rem; }
+
+/* ---------- lifecycle rail ---------- */
+.lifecycle {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  padding: 1.4rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  counter-reset: step;
+}
+.step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: .85rem;
+  position: relative;
+  padding-bottom: .95rem;
+}
+.step:last-child { padding-bottom: 0; }
+.step .node {
+  grid-column: 1;
+  width: 26px;
+  display: flex;
+  justify-content: center;
+  position: relative;
+}
+.step .node::before {
+  content: "";
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-top: .42rem;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 0 0 3px var(--surface);
+}
+.step:not(:last-child) .node::after {
+  content: "";
+  position: absolute;
+  top: .42rem; bottom: -1rem;
+  width: 1px;
+  background: var(--rule-strong);
+}
+.step .body { display: flex; flex-direction: column; gap: .18rem; min-width: 0; }
+.step .title {
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: .95rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+.step .title .code { font-family: var(--f-mono); font-size: .72rem; color: var(--muted); font-weight: 500; }
+.step .desc { font-size: .885rem; color: var(--ink-2); }
+.step.exception .node::before { background: var(--bad); }
+.step.system .node::before { background: var(--warn); }
+
+/* ---------- figures ---------- */
+figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+figure .frame {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  padding: 1.2rem 1rem;
+  overflow-x: auto;
+}
+figure svg { display: block; max-width: 100%; height: auto; margin: 0 auto; color: var(--ink-2); }
+figcaption { font-size: .855rem; color: var(--muted); max-width: 70ch; }
+.svg-title { font-family: "Archivo", sans-serif; font-weight: 700; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.svg-label { font-family: "Archivo", sans-serif; font-weight: 600; font-size: 12.5px; }
+.svg-sub { font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .04em; }
+.svg-edge { font-family: "IBM Plex Mono", monospace; font-size: 9.5px; letter-spacing: .03em; }
+
+/* ---------- phase cards ---------- */
+.phases { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); box-shadow: var(--shadow); }
+.phase {
+  background: var(--surface);
+  padding: 1rem 1.15rem;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) 88px;
+  gap: 1rem;
+  align-items: start;
+}
+@media (max-width: 620px) {
+  .phase { grid-template-columns: minmax(0, 1fr); gap: .45rem; }
+  .phase .dur { text-align: left; }
+}
+.phase .idx {
+  font-family: var(--f-mono);
+  font-size: .65rem;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  padding-top: .18rem;
+}
+.phase .content { display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.phase .content h4 { margin: 0; font-size: 1.02rem; }
+.phase .content p { font-size: .89rem; color: var(--ink-2); }
+.phase .content .exit { font-size: .845rem; color: var(--muted); }
+.phase .content .exit b { color: var(--ink-2); font-weight: 600; }
+.phase .dur {
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: .855rem;
+  text-align: right;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  padding-top: .2rem;
+}
+
+/* ---------- tree ---------- */
+pre.tree {
+  font-family: var(--f-mono);
+  font-size: .765rem;
+  line-height: 1.62;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.2rem;
+  overflow-x: auto;
+  margin: 0;
+  color: var(--ink-2);
+}
+pre.tree b { color: var(--accent-text); font-weight: 600; }
+pre.tree i { color: var(--muted); font-style: normal; }
+
+/* ---------- footer ---------- */
+.colophon {
+  border-top: 1px solid var(--rule-strong);
+  margin-top: 1rem;
+  padding-top: 1.2rem;
+  font-size: .855rem;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  max-width: 70ch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <p class="eyebrow">Business Requirements &amp; Technical Plan · v1.0 · 25 Aug 2026</p>
+    <h1>City Logistics Blueprint</h1>
+    <p class="standfirst">A logistics <em>operations</em> platform — not a tracking screen. Every status the customer sees is produced by a real operational transaction: a scan at the dock, a load into a truck, a signature at the door. This document specifies that system end to end, and the order in which to build it.</p>
+    <dl class="factstrip">
+      <div class="fact"><dt>Scope</dt><dd>FTL · PTL · Courier</dd></div>
+      <div class="fact"><dt>Portals</dt><dd>Ops · Customer · Field PWA</dd></div>
+      <div class="fact"><dt>Data model</dt><dd>~105 tables</dd></div>
+      <div class="fact"><dt>Full build</dt><dd>29 weeks</dd></div>
+      <div class="fact"><dt>MVP live</dt><dd>Week 19</dd></div>
+      <div class="fact"><dt>Repository</dt><dd class="mono">D:\Projects\Logistics</dd></div>
+    </dl>
+  </div>
+</header>
+
+<div class="shell">
+
+  <nav class="rail" aria-label="Contents">
+    <h2>Contents</h2>
+    <ol>
+      <li class="rail-part">Front matter</li>
+      <li><a href="#objective">Objective &amp; scope</a></li>
+      <li><a href="#decisions">Decisions taken</a></li>
+      <li><a href="#cleanup">Repository cleanup</a></li>
+
+      <li class="rail-part">Part A · Business</li>
+      <li><a href="#thesis">The operating thesis</a></li>
+      <li><a href="#lifecycle">Shipment lifecycle</a></li>
+      <li><a href="#events">Event &amp; scan catalogue</a></li>
+      <li><a href="#booking">Booking</a></li>
+      <li><a href="#pickup">Pickup</a></li>
+      <li><a href="#hub">Hub &amp; branch operations</a></li>
+      <li><a href="#ptl-ftl">PTL vs FTL</a></li>
+      <li><a href="#fleet">Vehicles &amp; drivers</a></li>
+      <li><a href="#tracking">GPS, geofencing, ETA</a></li>
+      <li><a href="#lastmile">Last mile &amp; POD</a></li>
+      <li><a href="#exceptions">Exceptions &amp; SLA</a></li>
+      <li><a href="#finance">Rating, billing, COD</a></li>
+      <li><a href="#vendor">Vendors &amp; settlement</a></li>
+      <li><a href="#portal">Customer portal</a></li>
+      <li><a href="#notify">Notifications</a></li>
+      <li><a href="#roles">Roles &amp; permissions</a></li>
+      <li><a href="#reports">Reports &amp; dashboards</a></li>
+      <li><a href="#masters">Master data</a></li>
+
+      <li class="rail-part">Part B · Technical</li>
+      <li><a href="#stack">Stack &amp; architecture</a></li>
+      <li><a href="#datamodel">Data model</a></li>
+      <li><a href="#numbering">Numbering &amp; barcodes</a></li>
+      <li><a href="#statemachine">State machine &amp; events</a></li>
+      <li><a href="#offline">Offline-first field PWA</a></li>
+      <li><a href="#gps-tech">GPS pipeline</a></li>
+      <li><a href="#pricing-tech">Freight engine</a></li>
+      <li><a href="#security">Security &amp; audit</a></li>
+      <li><a href="#integrations">Integrations</a></li>
+      <li><a href="#nfr">Non-functional targets</a></li>
+      <li><a href="#repo">Repository layout</a></li>
+
+      <li class="rail-part">Part C · Delivery</li>
+      <li><a href="#phases">Phase plan</a></li>
+      <li><a href="#mvp">MVP cut line</a></li>
+      <li><a href="#acceptance">Acceptance criteria</a></li>
+      <li><a href="#team">Team &amp; assumptions</a></li>
+      <li><a href="#risks">Risks</a></li>
+      <li><a href="#open">Open decisions</a></li>
+    </ol>
+  </nav>
+
+  <main class="doc">
+
+    <!-- ============ FRONT MATTER ============ -->
+
+    <div class="part-head">
+      <span class="kicker">Front matter</span>
+      <h2>What this is and what has been decided</h2>
+    </div>
+
+    <section id="objective">
+      <h3><span class="num">0.1</span> Objective &amp; scope</h3>
+      <p class="lead">Build a single platform that runs the company's freight operation — booking through settlement — with a permanent, auditable record of custody for every consignment.</p>
+      <p>Three shipment modes are in scope from day one, because they use the same spine but diverge sharply in the middle of the journey:</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Mode</th><th>Unit sold</th><th>Hub handling</th><th>Manifest</th><th>Rating basis</th></tr></thead>
+          <tbody>
+            <tr><th>FTL — Full Truck Load</th><td>One vehicle, point to point</td><td>None (direct)</td><td>Not required; the trip <em>is</em> the document</td><td>Per trip / per km / vehicle type</td></tr>
+            <tr><th>PTL — Part Load</th><td>Weight &amp; volume on a shared vehicle</td><td>Sort, consolidate, transship</td><td>Required per trip leg</td><td>Chargeable weight × lane rate</td></tr>
+            <tr><th>Courier / parcel</th><td>Individual packages</td><td>Full sort, bin allocation</td><td>Required, high line count</td><td>Slab rate + surcharges</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Out of scope for this document: warehousing-as-a-service (3PL inventory ownership), international freight forwarding, customs, and air/rail multimodal. The data model leaves room for them but no requirement here assumes them.</p>
+    </section>
+
+    <section id="decisions">
+      <h3><span class="num">0.2</span> Decisions already taken</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Decision</th><th>Choice</th><th>Consequence</th></tr></thead>
+          <tbody>
+            <tr><th>Codebase</th><td>Brand-new project, fully separate from AccuBooks</td><td>Own schema, own release cycle, own database. Accounting integration later via API, not shared tables.</td></tr>
+            <tr><th>Location</th><td><code>D:\Projects\Logistics</code>, cleaned first</td><td>Existing half-built "City Logistics" on-demand booking app is retired. See §0.3.</td></tr>
+            <tr><th>Field apps</th><td>PWA first, native later</td><td>One codebase, no app-store cycle, camera + GPS + offline all available. Background GPS while the app is closed is the one thing a PWA cannot do — covered instead by the vehicle GPS device.</td></tr>
+            <tr><th>COD</th><td>In scope</td><td>Collection, deposit, and settlement ledgers in Phase 6.</td></tr>
+            <tr><th>Third-party transporters</th><td>In scope</td><td>Vendor master, rate contracts, freight payable, driver settlement.</td></tr>
+            <tr><th>GPS + geofencing</th><td>In scope</td><td>Provider-agnostic adapter; automatic arrival/departure events.</td></tr>
+            <tr><th>Courier / small shipments</th><td>In scope</td><td>Package-level barcodes and bulk upload are core, not optional.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <span class="note-label">Recommendation — one decision I'd add</span>
+        <p>Build it single-company, but carry an <code>orgId</code> column and a tenant guard on every table from day one. It costs about two days now. If you ever want to sell this platform to another transporter, or run a sister company on it, that column is the difference between a weekend and a rewrite.</p>
+      </div>
+    </section>
+
+    <section id="cleanup">
+      <h3><span class="num">0.3</span> Repository cleanup — what I will and will not delete</h3>
+      <p><code>D:\Projects\Logistics</code> currently holds an incomplete Porter-style on-demand vehicle booking app: Next.js 14, a 472-line Prisma schema with 18 models, a pricing engine with tests, and OTP auth. <strong>It is not under git.</strong> Deleting is permanent, so nothing gets removed until you say go.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Item</th><th>Action</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><th class="mono">city_logistics_logo.png / .jpg, favicon</th><td class="chip mvp">Keep</td><td>Brand assets — move to <code>public/brand/</code>.</td></tr>
+            <tr><th class="mono">.env, .env.example</th><td class="chip mvp">Keep</td><td>Database credentials and provider keys carry over; rewritten for the new variable set.</td></tr>
+            <tr><th class="mono">src/lib/pricing.ts + tests</th><td class="chip auto">Archive</td><td>Distance-slab logic is reusable reference for the FTL rate card. Not imported as-is.</td></tr>
+            <tr><th class="mono">prisma/, src/app/, src/lib/ (rest)</th><td class="chip exc">Replace</td><td>Models a different product (on-demand ride matching, driver search radius). Retaining it would fight the new design.</td></tr>
+            <tr><th class="mono">node_modules, .next, tsconfig.tsbuildinfo</th><td class="chip exc">Delete</td><td>Build artefacts.</td></tr>
+            <tr><th class="mono">ChatGPT Image *.png/.jpg</th><td class="chip auto">Archive</td><td>Unidentified reference images — you confirm before they go.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Before anything is deleted I will zip the whole folder to <code>D:\Projects\_archive\Logistics-pre-rebuild.zip</code> and <code>git init</code> the new project on its first commit, so this is the last time the code is unrecoverable.</p>
+      <div class="note warn">
+        <span class="note-label">Untouched</span>
+        <p><code>D:\Projects\GantLogistics</code> is a separate project with its own git history. I will not touch it.</p>
+      </div>
+    </section>
+
+    <!-- ============ PART A ============ -->
+
+    <div class="part-head">
+      <span class="kicker">Part A</span>
+      <h2>Business requirements</h2>
+    </div>
+
+    <section id="thesis">
+      <h3><span class="num">A.1</span> The operating thesis</h3>
+      <p class="lead">The failure mode to design against is a system where an operator opens a shipment and types the new status into a dropdown. That produces a tracking board that is always slightly fictional, and it answers no dispute.</p>
+      <p>Instead: <strong>operators perform operations, and status is a consequence.</strong> A hub clerk scans a package into the dock — the system now knows the shipment arrived, at which branch, at what minute, by whose hands. A dispatcher loads that package onto a manifest — the system now knows which vehicle is carrying it. The vehicle's GPS moves — the system knows where the goods physically are. A delivery agent captures an OTP and a photograph — the system knows custody transferred and can prove it.</p>
+
+      <figure>
+        <div class="frame">
+          <svg viewBox="0 0 880 300" role="img" aria-label="Operational actions write immutable events; status, tracking, billing and reports are all projections read from that single event log.">
+            <defs>
+              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+              </marker>
+            </defs>
+
+            <text x="20" y="26" class="svg-title" fill="currentColor" opacity=".62">Operators act</text>
+            <text x="358" y="26" class="svg-title" fill="#0E6C73">One event log</text>
+            <text x="672" y="26" class="svg-title" fill="currentColor" opacity=".62">Everything reads</text>
+
+            <g stroke="currentColor" stroke-width="1" fill="none" opacity=".45">
+              <rect x="20" y="44" width="196" height="38"/>
+              <rect x="20" y="92" width="196" height="38"/>
+              <rect x="20" y="140" width="196" height="38"/>
+              <rect x="20" y="188" width="196" height="38"/>
+              <rect x="20" y="236" width="196" height="38"/>
+            </g>
+            <g class="svg-label" fill="currentColor">
+              <text x="34" y="68">Scan at dock</text>
+              <text x="34" y="116">Load onto manifest</text>
+              <text x="34" y="164">Depart / arrive</text>
+              <text x="34" y="212">GPS ping</text>
+              <text x="34" y="260">OTP + photo at door</text>
+            </g>
+
+            <rect x="358" y="44" width="164" height="230" fill="none" stroke="#0E6C73" stroke-width="2"/>
+            <text x="440" y="140" text-anchor="middle" class="svg-label" fill="#0E6C73">shipment_event</text>
+            <text x="440" y="160" text-anchor="middle" class="svg-sub" fill="#0E6C73">append-only</text>
+            <text x="440" y="178" text-anchor="middle" class="svg-sub" fill="#0E6C73">never updated</text>
+            <text x="440" y="196" text-anchor="middle" class="svg-sub" fill="#0E6C73">never deleted</text>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".55" marker-end="url(#ar)">
+              <line x1="216" y1="63" x2="352" y2="90"/>
+              <line x1="216" y1="111" x2="352" y2="112"/>
+              <line x1="216" y1="159" x2="352" y2="140"/>
+              <line x1="216" y1="207" x2="352" y2="176"/>
+              <line x1="216" y1="255" x2="352" y2="215"/>
+            </g>
+            <text x="250" y="82" class="svg-edge" fill="currentColor" opacity=".7">writes</text>
+
+            <g stroke="currentColor" stroke-width="1" fill="none" opacity=".45">
+              <rect x="664" y="44" width="196" height="38"/>
+              <rect x="664" y="92" width="196" height="38"/>
+              <rect x="664" y="140" width="196" height="38"/>
+              <rect x="664" y="188" width="196" height="38"/>
+              <rect x="664" y="236" width="196" height="38"/>
+            </g>
+            <g class="svg-label" fill="currentColor">
+              <text x="678" y="68">Shipment status</text>
+              <text x="678" y="116">Customer tracking</text>
+              <text x="678" y="164">Chain of custody</text>
+              <text x="678" y="212">SLA &amp; exceptions</text>
+              <text x="678" y="260">Billing triggers</text>
+            </g>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".55" marker-end="url(#ar)">
+              <line x1="526" y1="90" x2="658" y2="63"/>
+              <line x1="526" y1="112" x2="658" y2="111"/>
+              <line x1="526" y1="140" x2="658" y2="159"/>
+              <line x1="526" y1="176" x2="658" y2="207"/>
+              <line x1="526" y1="215" x2="658" y2="255"/>
+            </g>
+            <text x="556" y="82" class="svg-edge" fill="currentColor" opacity=".7">projects</text>
+          </svg>
+        </div>
+        <figcaption>Nothing writes status directly. <code>shipment.currentStatus</code> is a cached projection that can be rebuilt from the event log at any time — which is what makes the audit trail trustworthy rather than decorative.</figcaption>
+      </figure>
+
+      <p>Three consequences follow, and they shape most of Part B:</p>
+      <ul>
+        <li><strong>Events are append-only.</strong> A correction is a new compensating event with a reason code, never an edit. The history in §A.11 is therefore always complete.</li>
+        <li><strong>Every event carries who, where, when, and on what device.</strong> That is the chain of custody, and it is what settles a damage claim six months later.</li>
+        <li><strong>Offline capture is safe.</strong> Because events are additive and idempotent, a delivery agent in a basement can queue five scans and sync them an hour later without corrupting anything.</li>
+      </ul>
+    </section>
+
+    <section id="lifecycle">
+      <h3><span class="num">A.2</span> Shipment lifecycle</h3>
+      <p>Every consignment carries one LR/AWB number — <code>CL202608250001</code> — and moves through the track below. The right-hand column names what actually causes the transition, because that is the requirement; the status itself is just a label.</p>
+
+      <div class="lifecycle">
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Booked <span class="code">BOOKED</span></div><div class="desc">Booking saved by an executive, a customer in the portal, a bulk upload, or the API. LR number issued.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Pickup Assigned <span class="code">PICKUP_ASSIGNED</span></div><div class="desc">Ops assigns executive + vehicle + slot. Task appears in the field PWA.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Picked Up <span class="code">PICKED_UP</span></div><div class="desc">Field confirmation: package count, weight, photo, signature or OTP. Discrepancies against booking are recorded, not silently overwritten.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Received at Origin <span class="code">RECEIVED_AT_ORIGIN</span></div><div class="desc">Inbound scan at the origin branch. First formal custody transfer to the network.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Processed <span class="code">PROCESSED</span></div><div class="desc">Weighed, measured, labelled, routed, binned. Chargeable weight is finalised here — this is the number that bills.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Manifest Created <span class="code">MANIFESTED</span></div><div class="desc">Added to a manifest for a specific trip leg. PTL and courier only; FTL skips straight to loading.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Dispatched <span class="code">DISPATCHED</span></div><div class="desc">Loading sheet closed, vehicle gate-out recorded, trip started.</div></div></div>
+        <div class="step system"><div class="node"></div><div class="body"><div class="title">In Transit <span class="code">IN_TRANSIT</span> <span class="chip auto">automatic</span></div><div class="desc">Set by the system once the vehicle leaves the origin geofence, or on a timer if no GPS is attached.</div></div></div>
+        <div class="step system"><div class="node"></div><div class="body"><div class="title">Arrived at Hub <span class="code">ARRIVED_AT_HUB</span> <span class="chip auto">automatic</span></div><div class="desc">Geofence entry at the destination or transshipment hub. Manual fallback for non-GPS vehicles.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Received at Hub <span class="code">RECEIVED_AT_HUB</span></div><div class="desc">Physical inbound scan against the manifest. Short, excess, or damaged packages raise exceptions here automatically (§A.10).</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Assigned for Delivery <span class="code">ASSIGNED_FOR_DELIVERY</span></div><div class="desc">Attached to a delivery run for an agent, with route sequence and COD list.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Out for Delivery <span class="code">OUT_FOR_DELIVERY</span></div><div class="desc">Agent starts the run and scans the packages out. Custody now sits with a named person.</div></div></div>
+        <div class="step"><div class="node"></div><div class="body"><div class="title">Delivered <span class="code">DELIVERED</span></div><div class="desc">OTP verified or signature captured, photo taken, GPS stamped, COD recorded if applicable.</div></div></div>
+        <div class="step system"><div class="node"></div><div class="body"><div class="title">POD Uploaded <span class="code">POD_UPLOADED</span> <span class="chip auto">automatic</span></div><div class="desc">Fires when signature and photo assets finish syncing — which may be minutes after delivery on a weak connection.</div></div></div>
+        <div class="step system"><div class="node"></div><div class="body"><div class="title">Closed <span class="code">CLOSED</span> <span class="chip auto">automatic</span></div><div class="desc">POD complete, COD reconciled, no open exception. The shipment leaves the operational working set.</div></div></div>
+      </div>
+
+      <h4>Exception states run alongside, not instead</h4>
+      <p>A failed delivery attempt must not destroy the main status. If <code>DELIVERY_ATTEMPTED</code> overwrote <code>OUT_FOR_DELIVERY</code>, you lose the fact that the shipment is still out with an agent. The model is therefore <strong>one main status plus zero or more open exceptions plus counters</strong> (<code>attemptCount</code>, <code>holdReason</code>).</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Exception state</th><th>Raised by</th><th>Effect on main status</th></tr></thead>
+          <tbody>
+            <tr><th class="mono">DELIVERY_ATTEMPTED</th><td>Agent, with failure reason code</td><td>Returns to <code>RECEIVED_AT_HUB</code>, <code>attemptCount++</code>, reattempt task auto-created</td></tr>
+            <tr><th class="mono">SHORT_RECEIVED / EXCESS_RECEIVED</th><td>Hub inbound scan vs manifest</td><td>Main status holds; exception assigned to the dispatching branch</td></tr>
+            <tr><th class="mono">DAMAGED</th><td>Any scan point, photo mandatory</td><td>Main status holds; claim workflow opens</td></tr>
+            <tr><th class="mono">ON_HOLD</th><td>Ops, customer request, or payment block</td><td>Blocks dispatch and delivery assignment until released</td></tr>
+            <tr><th class="mono">MISROUTED</th><td>Hub scan at an off-route branch</td><td>Main status holds; re-routing task created</td></tr>
+            <tr><th class="mono">LOST</th><td>Ops, after investigation SLA</td><td>Terminal; triggers claim and write-off</td></tr>
+            <tr><th class="mono">RTO_INITIATED → RTO_DELIVERED</th><td>Ops after N failed attempts or refusal</td><td>Reverses direction; origin becomes destination, new leg chain</td></tr>
+            <tr><th class="mono">CANCELLED</th><td>Customer or ops, before pickup or in transit</td><td>Terminal; cancellation charges per rate card</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="events">
+      <h3><span class="num">A.3</span> Event &amp; scan catalogue</h3>
+      <p>Every row below is a physical act someone performs. Statuses in §A.2 are derived from these.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Event</th><th>Where</th><th>Captured by</th><th>Mandatory data</th></tr></thead>
+          <tbody>
+            <tr><th class="mono">BOOKING_CREATED</th><td>Branch / portal / API</td><td>Web</td><td>Consignor, consignee, packages, declared value</td></tr>
+            <tr><th class="mono">PICKUP_ASSIGNED</th><td>Branch</td><td>Web</td><td>Executive, vehicle, slot</td></tr>
+            <tr><th class="mono">PICKUP_ATTEMPTED</th><td>Consignor site</td><td>PWA</td><td>Failure reason code, GPS, remarks</td></tr>
+            <tr><th class="mono">PICKUP_COMPLETED</th><td>Consignor site</td><td>PWA</td><td>Package count, weight, photo, signature/OTP, GPS</td></tr>
+            <tr><th class="mono">INBOUND_SCAN</th><td>Any branch/hub dock</td><td>PWA scanner</td><td>Package barcode, branch, user, device</td></tr>
+            <tr><th class="mono">WEIGHT_CAPTURED</th><td>Origin hub</td><td>PWA / weighbridge</td><td>Actual kg, L×B×H, chargeable kg</td></tr>
+            <tr><th class="mono">SORTED</th><td>Hub</td><td>PWA scanner</td><td>Destination bin, route</td></tr>
+            <tr><th class="mono">MANIFEST_ADDED</th><td>Hub</td><td>Web</td><td>Manifest no., trip leg</td></tr>
+            <tr><th class="mono">LOADED</th><td>Dock</td><td>PWA scanner</td><td>Vehicle, loading sheet, seal no.</td></tr>
+            <tr><th class="mono">GATE_OUT / DEPARTED</th><td>Branch</td><td>Web / geofence</td><td>Odometer, seal, driver, departure time</td></tr>
+            <tr><th class="mono">GPS_PING</th><td>Road</td><td>Device</td><td>Lat, lng, speed, heading, timestamp</td></tr>
+            <tr><th class="mono">GEOFENCE_ENTER / EXIT</th><td>Any fenced site</td><td>System</td><td>Geofence id, dwell start/end</td></tr>
+            <tr><th class="mono">ARRIVED / GATE_IN</th><td>Hub</td><td>Geofence / web</td><td>Odometer, arrival time</td></tr>
+            <tr><th class="mono">UNLOADED</th><td>Hub dock</td><td>PWA scanner</td><td>Package barcode, seal-break witness</td></tr>
+            <tr><th class="mono">DISCREPANCY_RAISED</th><td>Hub dock</td><td>System</td><td>Expected vs received count, photos</td></tr>
+            <tr><th class="mono">DELIVERY_ASSIGNED</th><td>Destination branch</td><td>Web</td><td>Agent, run, sequence</td></tr>
+            <tr><th class="mono">RUN_STARTED / OUTSCAN</th><td>Branch</td><td>PWA scanner</td><td>Package barcode, agent, COD manifest</td></tr>
+            <tr><th class="mono">DELIVERY_ATTEMPTED</th><td>Consignee site</td><td>PWA</td><td>Reason code, GPS, photo, remarks</td></tr>
+            <tr><th class="mono">DELIVERED</th><td>Consignee site</td><td>PWA</td><td>Receiver name + relation, OTP or signature, photo, GPS</td></tr>
+            <tr><th class="mono">COD_COLLECTED</th><td>Consignee site</td><td>PWA</td><td>Amount, mode, reference</td></tr>
+            <tr><th class="mono">POD_SYNCED</th><td>—</td><td>System</td><td>Asset ids, checksums</td></tr>
+            <tr><th class="mono">EXCEPTION_OPENED / CLOSED</th><td>Anywhere</td><td>Web / system</td><td>Type, owner, priority, resolution</td></tr>
+            <tr><th class="mono">STATUS_CORRECTED</th><td>Ops</td><td>Web</td><td>Reason, approver — never an edit, always a new event</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <span class="note-label">Design rule</span>
+        <p>Events carry both <code>occurredAt</code> (device clock at the moment of the act) and <code>recordedAt</code> (server receipt). They differ by hours when a field device was offline. Every timeline sorts on <code>occurredAt</code>; every SLA calculation and dispute reads both.</p>
+      </div>
+    </section>
+
+    <section id="booking">
+      <h3><span class="num">A.4</span> Booking</h3>
+      <p>One booking screen serves all three modes, with the mode selector changing which blocks are required. Four entry paths write the same record: branch counter, customer portal, bulk upload, and API.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Block</th><th>Fields</th><th>Rules</th></tr></thead>
+          <tbody>
+            <tr><th>Consignor</th><td>Account, company, contact, phone, email, pickup address, GSTIN</td><td>Account lookup autofills address book; walk-in bookings allowed with a cash account</td></tr>
+            <tr><th>Consignee</th><td>Name, company, phone, email, address, city, state, PIN, landmark</td><td>PIN validated against serviceability master; unserviceable PIN blocks booking with an override permission</td></tr>
+            <tr><th>Shipment</th><td>LR no., date, origin, destination, service type, mode, package count, package type, actual weight, dimensions, volumetric weight, chargeable weight, declared value, goods description, e-way bill no., special instructions</td><td>Chargeable weight = max(actual, volumetric). Divisor configurable per service type. Declared value drives insurance and claim ceiling.</td></tr>
+            <tr><th>Packages</th><td>Per-package: type, weight, L×B×H, barcode, contents</td><td>Each package gets its own barcode — this is what makes shortage detection possible</td></tr>
+            <tr><th>Charges</th><td>Freight, fuel surcharge, handling, loading, unloading, ODA, insurance, other, GST, total</td><td>Auto-computed from the customer's rate card; manual override requires permission and stores the reason</td></tr>
+            <tr><th>Payment</th><td>Paid / To-Pay / TBB / COD, COD amount</td><td>To-Pay and COD control whether delivery may release the goods before collection</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>Bulk upload</h4>
+      <p>Corporate customers upload CSV/XLSX. Flow: <strong>upload → parse → validate row by row → show a marked-up grid with errors in place → fix inline or re-upload → confirm → create</strong>. Validation covers PIN serviceability, duplicate customer reference, weight/dimension sanity, rate-card coverage for the lane, and COD limits. Partial commit is allowed: valid rows book, invalid rows stay in the staging table for correction. Every upload keeps its source file for audit.</p>
+      <div class="note warn">
+        <span class="note-label">India-specific — do not skip</span>
+        <p>The LR is a <strong>consignment note</strong> under GST, which makes the service a GTA supply and usually puts it under <strong>reverse charge</strong>. Booking must capture consignor and consignee GSTINs and who bears the tax, because that decision changes the invoice. Separately, goods above the state threshold need an <strong>e-way bill</strong>, and Part-B carries the vehicle number — which changes at every transshipment. Both belong in the booking and dispatch screens from Phase 2, not bolted on later.</p>
+      </div>
+    </section>
+
+    <section id="pickup">
+      <h3><span class="num">A.5</span> Pickup</h3>
+      <p>Two triggers: a booking that needs collection, or a standalone pickup request raised by a customer in the portal before they know what they are shipping.</p>
+      <ul>
+        <li><strong>Assignment.</strong> Ops picks executive, vehicle, date, slot, and priority. The screen shows each executive's current load and area so assignment is informed rather than blind.</li>
+        <li><strong>Field task.</strong> The PWA lists today's pickups in sequence with customer, address, contact, expected packages, and one-tap navigate and call.</li>
+        <li><strong>Confirmation.</strong> Actual package count and weight are captured against expected. A mismatch does not silently overwrite the booking — it records both figures and flags the difference for the branch to reconcile, because that difference is money.</li>
+        <li><strong>Failure.</strong> Reason code from a configurable list, plus photo and remarks. The system auto-creates a re-pickup task per the branch's retry policy.</li>
+        <li><strong>Bulk pickup.</strong> One visit collecting many shipments produces one pickup event per shipment but a single visit record, so executive productivity reports are honest.</li>
+      </ul>
+    </section>
+
+    <section id="hub">
+      <h3><span class="num">A.6</span> Hub &amp; branch operations</h3>
+      <p>The hub screen is a scanning console, not a form. Everything is driven by a barcode gun or the phone camera, and the sequence is <strong>receive → scan → verify → weigh → sort → label → route</strong>.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Function</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><th>Inbound against manifest</th><td>Operator opens an arriving manifest; each scan ticks a line green. At close, unscanned lines become <code>SHORT_RECEIVED</code> and unexpected scans become <code>EXCESS_RECEIVED</code> — automatically, with the dispatching branch as exception owner.</td></tr>
+            <tr><th>Weighment</th><td>Actual and volumetric capture, with weighbridge integration where available. Revised chargeable weight flows to billing and notifies the customer if it exceeds booked weight by more than a configured tolerance.</td></tr>
+            <tr><th>Sorting &amp; bins</th><td>Scan assigns a destination bin by route. Bin occupancy is visible so the floor knows what is building up for which lane.</td></tr>
+            <tr><th>Labelling</th><td>Reprint LR labels, package labels, and route stickers to a thermal printer.</td></tr>
+            <tr><th>Outbound loading</th><td>Scan-to-load against a loading sheet; the sheet cannot close with a package scanned but not physically loaded, or vice versa.</td></tr>
+            <tr><th>Damage capture</th><td>Any scan can be flagged damaged; photos are mandatory and attach to the shipment permanently.</td></tr>
+            <tr><th>Branch dashboard</th><td>Inbound expected today, received, pending sort, awaiting dispatch, out for delivery, undelivered, vehicles arriving, vehicles departing, open exceptions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>Hub-to-hub chain</h4>
+      <p>Faridabad → Delhi → Jaipur → Ahmedabad → delivery branch is a chain of legs, each with its own manifest, trip, and inbound scan. The shipment timeline shows the full chain; the customer sees a simplified version. Because each leg is a separate record, transit time per leg is measurable — which is how you find the hub that is actually costing you your SLA.</p>
+    </section>
+
+    <section id="ptl-ftl">
+      <h3><span class="num">A.7</span> Part load vs full truck load</h3>
+      <p>These two share the booking screen and the event log and diverge everywhere in between. Modelling them as one flow with flags produces a system that does neither well.</p>
+
+      <figure>
+        <div class="frame">
+          <svg viewBox="0 0 880 320" role="img" aria-label="PTL routes many shipments through hub sorting and a manifest onto a shared trip; FTL binds one shipment to one dedicated trip with no manifest and no hub handling.">
+            <defs>
+              <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+              </marker>
+              <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#0E6C73"/>
+              </marker>
+            </defs>
+
+            <text x="20" y="24" class="svg-title" fill="currentColor" opacity=".62">PTL — part load</text>
+            <line x1="20" y1="32" x2="860" y2="32" stroke="currentColor" opacity=".2"/>
+
+            <g stroke="currentColor" stroke-width="1" fill="none" opacity=".5">
+              <rect x="20" y="48" width="96" height="26"/>
+              <rect x="20" y="82" width="96" height="26"/>
+              <rect x="20" y="116" width="96" height="26"/>
+            </g>
+            <g class="svg-sub" fill="currentColor">
+              <text x="32" y="65">CL…0001</text>
+              <text x="32" y="99">CL…0002</text>
+              <text x="32" y="133">CL…0003</text>
+            </g>
+
+            <rect x="176" y="60" width="104" height="70" fill="none" stroke="currentColor" stroke-width="1" opacity=".5"/>
+            <text x="228" y="90" text-anchor="middle" class="svg-label" fill="currentColor">Hub sort</text>
+            <text x="228" y="108" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">weigh · bin · route</text>
+
+            <rect x="340" y="60" width="104" height="70" fill="none" stroke="currentColor" stroke-width="1" opacity=".5"/>
+            <text x="392" y="90" text-anchor="middle" class="svg-label" fill="currentColor">Manifest</text>
+            <text x="392" y="108" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">M000145</text>
+
+            <rect x="504" y="60" width="104" height="70" fill="none" stroke="currentColor" stroke-width="1" opacity=".5"/>
+            <text x="556" y="90" text-anchor="middle" class="svg-label" fill="currentColor">Shared trip</text>
+            <text x="556" y="108" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">one leg of many</text>
+
+            <rect x="668" y="60" width="104" height="70" fill="none" stroke="currentColor" stroke-width="1" opacity=".5"/>
+            <text x="720" y="90" text-anchor="middle" class="svg-label" fill="currentColor">Dest. hub</text>
+            <text x="720" y="108" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">re-sort · last mile</text>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".55" marker-end="url(#ar2)">
+              <line x1="116" y1="61" x2="170" y2="80"/>
+              <line x1="116" y1="95" x2="170" y2="95"/>
+              <line x1="116" y1="129" x2="170" y2="110"/>
+              <line x1="280" y1="95" x2="334" y2="95"/>
+              <line x1="444" y1="95" x2="498" y2="95"/>
+              <line x1="608" y1="95" x2="662" y2="95"/>
+            </g>
+            <text x="286" y="86" class="svg-edge" fill="currentColor" opacity=".7">lists</text>
+            <text x="450" y="86" class="svg-edge" fill="currentColor" opacity=".7">loads onto</text>
+            <text x="614" y="86" class="svg-edge" fill="currentColor" opacity=".7">transships</text>
+
+            <text x="20" y="196" class="svg-title" fill="#0E6C73">FTL — full truck load</text>
+            <line x1="20" y1="204" x2="860" y2="204" stroke="#0E6C73" opacity=".3"/>
+
+            <rect x="20" y="228" width="96" height="26" fill="none" stroke="#0E6C73" stroke-width="1.4"/>
+            <text x="32" y="245" class="svg-sub" fill="#0E6C73">CL…0004</text>
+
+            <rect x="340" y="216" width="104" height="70" fill="none" stroke="#0E6C73" stroke-width="1.4"/>
+            <text x="392" y="246" text-anchor="middle" class="svg-label" fill="#0E6C73">Dedicated trip</text>
+            <text x="392" y="264" text-anchor="middle" class="svg-sub" fill="#0E6C73">TRIP-2026-00125</text>
+
+            <rect x="668" y="216" width="104" height="70" fill="none" stroke="#0E6C73" stroke-width="1.4"/>
+            <text x="720" y="246" text-anchor="middle" class="svg-label" fill="#0E6C73">Consignee</text>
+            <text x="720" y="264" text-anchor="middle" class="svg-sub" fill="#0E6C73">direct</text>
+
+            <g stroke="#0E6C73" stroke-width="1.6" marker-end="url(#ar3)">
+              <line x1="116" y1="241" x2="334" y2="248"/>
+              <line x1="444" y1="251" x2="662" y2="251"/>
+            </g>
+            <text x="150" y="234" class="svg-edge" fill="#0E6C73">binds 1:1 — no manifest, no sort</text>
+            <text x="500" y="243" class="svg-edge" fill="#0E6C73">door to door</text>
+          </svg>
+        </div>
+        <figcaption>The difference that matters: PTL's shipment is a <em>line on a manifest</em> and passes through hubs; FTL's shipment <em>is</em> the trip and never enters a sortation. Two boxes disappear entirely on the FTL path — which is why FTL needs a different screen, not a checkbox.</figcaption>
+      </figure>
+
+      <h4>PTL — manifest</h4>
+      <p>A manifest is the document for one trip leg. It carries manifest number, vehicle, driver, origin, destination, route, departure and expected arrival, seal number, and the shipment lines. The system totals packages, actual weight, chargeable weight, and volume, and shows capacity utilisation against the vehicle so a dispatcher can see they are sending out a half-empty truck before it leaves.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Manifest M000145 · HR-26-AB-1234 · Delhi → Jaipur</th><th class="num-col">Packages</th><th class="num-col">Weight</th><th>Destination</th></tr></thead>
+          <tbody>
+            <tr><th class="mono">CL202608250001</th><td class="num-col">5</td><td class="num-col">120 kg</td><td>Delhi</td></tr>
+            <tr><th class="mono">CL202608250002</th><td class="num-col">2</td><td class="num-col">40 kg</td><td>Gurgaon</td></tr>
+            <tr><th class="mono">CL202608250003</th><td class="num-col">10</td><td class="num-col">300 kg</td><td>Jaipur</td></tr>
+            <tr><th>Total · 62% of 750 kg capacity</th><td class="num-col"><strong>17</strong></td><td class="num-col"><strong>460 kg</strong></td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h4>FTL — trip</h4>
+      <p>Flow: booking → vehicle type and capacity confirmed → own vehicle or vendor assigned → driver assigned → vehicle reporting at loading point → loading → loading confirmation with photos and seal → dispatch → GPS tracking → unloading → POD → trip closure with expenses and settlement. Freight is negotiated per trip, so the FTL booking screen carries a rate-confirmation block with customer freight, vendor freight, and the margin visible to authorised roles only.</p>
+    </section>
+
+    <section id="fleet">
+      <h3><span class="num">A.8</span> Vehicles &amp; drivers</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Master</th><th>Fields</th><th>Automation</th></tr></thead>
+          <tbody>
+            <tr><th>Vehicle</th><td>Registration, type, capacity kg and CFT, body dimensions, ownership (own/vendor/attached), vendor, GPS device id, FASTag, status</td><td>Status machine: Available → Assigned → Loading → Dispatched → In Transit → At Hub → Unloading → Available; plus Maintenance and Inactive</td></tr>
+            <tr><th>Vehicle documents</th><td>RC, insurance, fitness, permit (national/state), PUC, road tax — each with number, issue and expiry, scanned copy</td><td>Expiry alerts at 30/15/7 days; a vehicle with an expired mandatory document cannot be assigned to a trip</td></tr>
+            <tr><th>Driver</th><td>Name, mobile, address, licence number and class, licence expiry, ID proof, photo, emergency contact, vendor, assigned vehicle</td><td>Licence expiry blocks assignment; duty-hours warning on consecutive long trips</td></tr>
+            <tr><th>Driver history</th><td>Trips, shipments carried, deliveries, exceptions, accidents, advances, settlements</td><td>Feeds the driver performance report and settlement screen</td></tr>
+            <tr><th>Maintenance</th><td>Service due by date or odometer, job cards, cost, downtime</td><td>Vehicle moves to Maintenance status and drops out of the assignable pool</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tracking">
+      <h3><span class="num">A.9</span> GPS, geofencing, ETA</h3>
+      <p>Tracking is a layer over the operation, deliberately isolated so a GPS provider can be swapped or a second one added without touching shipment logic.</p>
+      <ul>
+        <li><strong>Live map.</strong> All active vehicles, coloured by status and delay. Click a vehicle for current location, speed, last ping age, distance covered, distance remaining, ETA, driver, trip, and the shipments on board.</li>
+        <li><strong>Geofences.</strong> Circular or polygon fences around every hub, branch, warehouse, large customer site, and delivery zone. Entry and exit generate events automatically — which removes most manual arrival and departure updates and is the single highest-value automation in the system.</li>
+        <li><strong>Route deviation.</strong> Planned polyline per lane; sustained departure beyond a threshold raises an exception with the deviation point on a map.</li>
+        <li><strong>Stoppage detection.</strong> Stationary beyond a configured duration outside a known fence raises a stoppage alert with duration and location.</li>
+        <li><strong>Signal loss.</strong> No ping for N minutes raises a <code>NO_GPS_UPDATE</code> exception — the absence of data is itself an operational signal.</li>
+        <li><strong>Trip replay.</strong> Historical route playback with speed profile, for disputes and driver review.</li>
+      </ul>
+      <div class="note">
+        <span class="note-label">Fallback, always</span>
+        <p>Attached and vendor vehicles will not all have working GPS. Every automatic event must have a manual equivalent with the same permission and audit treatment, and reports must distinguish system-generated from manually-entered arrivals. A system that only works with perfect telematics will not survive contact with a mixed fleet.</p>
+      </div>
+    </section>
+
+    <section id="lastmile">
+      <h3><span class="num">A.10</span> Last mile, POD, and attempts</h3>
+      <h4>Delivery run</h4>
+      <p>The branch builds a run: agent, vehicle, date, and an ordered list of stops. Sequencing is manual with an optional optimise button in Phase 8. Each run carries a COD total the agent is accountable for at day end.</p>
+      <h4>Agent PWA</h4>
+      <p>Today's list with shipment, consignee, address, phone, package count, COD amount, and priority. Actions: navigate, call (through a masked number where privacy matters), start delivery, verify OTP, collect payment, capture signature, capture photo, mark delivered, or record a failed attempt.</p>
+      <h4>Attempts are a history, not a boolean</h4>
+      <p>Marking "not delivered" without a reason destroys the information you need. Every attempt writes a permanent row: attempt number, timestamp, GPS, agent, reason code, remarks, photo. Attempt 1 "consignee not available" and attempt 2 "delivered" both survive forever, and the first-attempt-success rate — one of the most important numbers in last-mile logistics — becomes measurable.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Failure reason</th><th>Auto-action</th><th>Chargeable</th></tr></thead>
+          <tbody>
+            <tr><th>Consignee unavailable</th><td>Reattempt next working day</td><td>After attempt 2, per contract</td></tr>
+            <tr><th>Wrong address</th><td>Exception to customer support for correction</td><td>Yes</td></tr>
+            <tr><th>Address incomplete</th><td>Auto-SMS to consignee requesting details</td><td>No</td></tr>
+            <tr><th>Consignee refused</th><td>Hold, then RTO after approval</td><td>Yes — RTO freight</td></tr>
+            <tr><th>Phone unreachable</th><td>Reattempt; notify consignor after attempt 2</td><td>No</td></tr>
+            <tr><th>Premises closed / holiday</th><td>Reattempt next working day</td><td>No</td></tr>
+            <tr><th>Payment not ready (To-Pay/COD)</th><td>Reattempt; notify consignor</td><td>Yes</td></tr>
+            <tr><th>Shipment damaged</th><td>Damage exception + claim workflow</td><td>No</td></tr>
+            <tr><th>Area inaccessible</th><td>ODA exception, reschedule</td><td>ODA charge</td></tr>
+          </tbody>
+        </table>
+        <caption>Reason codes are master data — operations can add, retire, and change the auto-action without a release.</caption>
+      </div>
+      <h4>Proof of delivery</h4>
+      <p>A POD record binds: receiver name and relationship to consignee, signature, delivery photograph, package photograph where required, timestamp, GPS coordinates, OTP reference, remarks, agent, and shipment. It renders to a branded PDF that the customer can download from the portal and that can be attached to an invoice. Assets upload in the background — a weak signal delays the PDF, never the delivery confirmation.</p>
+      <h4>COD</h4>
+      <p>Five states, each a ledger row: <strong>expected → collected → deposited → reconciled → settled</strong>. The agent's day-end screen shows collected versus deposited with the shortfall in red. Cash deposits post against a branch cash account; digital collections reconcile against the gateway settlement file. Remittance to the customer runs on their contracted cycle, with a remittance advice listing every shipment in the batch.</p>
+    </section>
+
+    <section id="exceptions">
+      <h3><span class="num">A.11</span> Exception control tower &amp; SLA</h3>
+      <p>One screen where the duty manager sees everything wrong in the network right now, sorted by severity and age. Each exception carries type, priority, owner, source shipment or vehicle, opened time, age, actions taken, resolution, and closed time. Nothing closes without a resolution note.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Exception</th><th>Detected by</th><th>Default owner</th><th>Escalates after</th></tr></thead>
+          <tbody>
+            <tr><th>SLA at risk (80% elapsed)</th><td>SLA scanner</td><td>Origin branch manager</td><td>Immediate visibility</td></tr>
+            <tr><th>SLA breached</th><td>SLA scanner</td><td>Operations manager</td><td>2 h → regional</td></tr>
+            <tr><th>No GPS update</th><td>Ping monitor</td><td>Transport desk</td><td>1 h</td></tr>
+            <tr><th>Vehicle stopped &gt; threshold</th><td>Stoppage monitor</td><td>Transport desk</td><td>2 h</td></tr>
+            <tr><th>Route deviation</th><td>Deviation monitor</td><td>Transport desk</td><td>30 min</td></tr>
+            <tr><th>Delivery failed</th><td>Agent PWA</td><td>Destination branch</td><td>After attempt 2</td></tr>
+            <tr><th>Short / excess received</th><td>Hub inbound scan</td><td>Dispatching branch</td><td>24 h</td></tr>
+            <tr><th>Damaged</th><td>Any scan</td><td>Claims desk</td><td>24 h</td></tr>
+            <tr><th>Pending POD &gt; 24 h</th><td>POD monitor</td><td>Destination branch</td><td>48 h</td></tr>
+            <tr><th>Shipment idle at hub &gt; N h</th><td>Dwell monitor</td><td>Hub in-charge</td><td>Configurable</td></tr>
+            <tr><th>Customer complaint</th><td>Portal / support</td><td>Customer support</td><td>Per complaint SLA</td></tr>
+            <tr><th>COD shortfall at day end</th><td>Settlement check</td><td>Branch accounts</td><td>Same day</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>SLA engine</h4>
+      <p>SLA is defined per service type and origin–destination zone pair — for example Delhi → Jaipur, express, 24 hours. Transit clocks run on a working calendar with branch holidays and cut-off times, so a booking after the evening cut-off starts its clock the next working morning. The scanner runs continuously, marks at-risk and breached shipments, and stamps the reason for breach where it can infer one from the event log (late dispatch, hub dwell, failed attempt). The dashboard reports on time, delayed, breached, and pending as counts and percentages by lane, branch, and customer.</p>
+      <h4>Complaints</h4>
+      <p>Categories: delay, damage, missing, wrong delivery, billing, POD, pickup, behaviour, other. Workflow: <strong>Open → Assigned → Investigation → Action → Resolved → Closed</strong>, with a per-category response and resolution SLA, a full message thread visible to the customer, and a reopen path.</p>
+    </section>
+
+    <section id="finance">
+      <h3><span class="num">A.12</span> Rating, billing, and receivables</h3>
+      <h4>Rate cards</h4>
+      <p>A rate card belongs to a customer (or to a default published tariff) and is versioned with effective-from and effective-to dates, so historical invoices always reprice to what was agreed at the time. Lookup dimensions: customer, service type, mode, origin zone or city, destination zone or city, weight slab, vehicle type for FTL, and volume.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Component</th><th>Basis</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><th>Base freight</th><td>Per kg by slab · per package · flat · per km · per trip</td><td>Minimum charge per shipment applies after slab calculation</td></tr>
+            <tr><th>Fuel surcharge</th><td>% of base freight</td><td>Rule with effective date so a diesel revision is a data change</td></tr>
+            <tr><th>Docket / handling</th><td>Flat per shipment</td><td/></tr>
+            <tr><th>Loading / unloading</th><td>Per package · per kg · flat</td><td>Often waived for FTL</td></tr>
+            <tr><th>ODA</th><td>Flat or per kg with a minimum</td><td>Triggered by destination PIN classification</td></tr>
+            <tr><th>Insurance / risk</th><td>% of declared value</td><td>Owner's risk vs carrier's risk changes claim liability</td></tr>
+            <tr><th>COD / DOD fee</th><td>% of COD value with a minimum</td><td/></tr>
+            <tr><th>Waiting / detention</th><td>Per hour beyond free time</td><td>FTL; measured from geofence dwell where GPS is available</td></tr>
+            <tr><th>GST</th><td>Rate by place of supply</td><td>Forward charge or reverse charge per the GTA decision on the booking</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>Invoicing</h4>
+      <p>Bill runs are generated per customer for a period or per shipment on delivery, depending on the contract. Each invoice line traces back to its shipment and to the stored calculation trace, so "why is this ₹4,280?" is answerable in one click. Supported: consolidated monthly invoices, branch-wise invoices, credit notes, debit notes for revised weight, and re-issue with a full amendment trail.</p>
+      <h4>Receivables</h4>
+      <p>Customer ledger, ageing buckets (0–30/31–60/61–90/90+), credit limit with a booking block when exceeded, payment recording with allocation across invoices, part payments, TDS deduction, and a customer statement of account. Outstanding is visible to the customer in the portal.</p>
+    </section>
+
+    <section id="vendor">
+      <h3><span class="num">A.13</span> Vendors, trip expenses, settlement</h3>
+      <ul>
+        <li><strong>Vendor master.</strong> Transporter, broker, or attached-vehicle owner, with PAN, GSTIN, bank details, service lanes, and rate contract.</li>
+        <li><strong>Vendor rate contract.</strong> Lane-wise or vehicle-type-wise payable rates, mirroring the customer rate card structure so margin per trip is computable.</li>
+        <li><strong>Trip expenses.</strong> Diesel, toll, parking, loading, unloading, driver allowance, repair, police/miscellaneous, each with amount, date, payment mode, bill photo, and approval state. Every expense binds to trip, vehicle, driver, and vendor.</li>
+        <li><strong>Advances.</strong> Cash or fuel-card advances to driver or vendor before or during a trip, tracked against the settlement.</li>
+        <li><strong>Driver settlement.</strong> Trip earning less advances, less approved expenses, less deductions (damage, shortage, fines), equals net payable, with an approval step before payout.</li>
+        <li><strong>Vendor bill and payable.</strong> Vendor raises or the system generates a payable per trip; reconciliation against the rate contract flags variances before payment.</li>
+        <li><strong>Profitability.</strong> Per trip and per shipment: revenue less vendor freight less trip expenses less allocated overhead.</li>
+      </ul>
+    </section>
+
+    <section id="portal">
+      <h3><span class="num">A.14</span> Customer portal &amp; public tracking</h3>
+      <p><strong>Public tracking</strong> needs no login: enter an LR or customer reference number and see a clean milestone list — Booked, Picked Up, Dispatched, In Transit, Reached destination city, Out for Delivery, Delivered — with dates and city names only. Internal branch names, vehicle numbers, driver identities, cost data, and internal exception notes are never exposed. Multi-shipment lookup and a shareable tracking link are included.</p>
+      <p><strong>Logged-in portal</strong> for corporate customers: create single and bulk bookings, request pickups, track everything, download POD PDFs and invoices, view outstanding and ageing, download shipment and performance reports, raise and follow complaints, manage saved addresses, and manage their own sub-users with per-branch visibility. Customer users are strictly scoped to their own account's data.</p>
+    </section>
+
+    <section id="notify">
+      <h3><span class="num">A.15</span> Notifications</h3>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Trigger</th><th>To consignor</th><th>To consignee</th><th>Internal</th><th>Channels</th></tr></thead>
+          <tbody>
+            <tr><th>Booking created</th><td>Confirmation + tracking link</td><td>—</td><td>—</td><td>SMS · Email</td></tr>
+            <tr><th>Pickup assigned</th><td>Executive name + slot</td><td>—</td><td>Pickup exec push</td><td>SMS · Push</td></tr>
+            <tr><th>Picked up</th><td>Count + weight captured</td><td>Shipment on its way</td><td>—</td><td>SMS · WhatsApp</td></tr>
+            <tr><th>Dispatched</th><td>Lane + expected date</td><td>Expected date</td><td>—</td><td>SMS · Email</td></tr>
+            <tr><th>Reached destination city</th><td>—</td><td>Arriving for delivery</td><td>Branch dashboard</td><td>SMS</td></tr>
+            <tr><th>Out for delivery</th><td>—</td><td>Agent name + masked phone + OTP</td><td>—</td><td>SMS · WhatsApp · Push</td></tr>
+            <tr><th>Delivery failed</th><td>Reason + next attempt</td><td>Reason + reschedule link</td><td>Exception tower</td><td>SMS · Email</td></tr>
+            <tr><th>Delivered</th><td>POD link</td><td>Receipt confirmation</td><td>—</td><td>SMS · WhatsApp · Email</td></tr>
+            <tr><th>SLA at risk / breached</th><td>—</td><td>—</td><td>Branch + ops manager</td><td>Push · Email</td></tr>
+            <tr><th>Document expiry</th><td>—</td><td>—</td><td>Transport desk</td><td>Email · In-app</td></tr>
+            <tr><th>Invoice raised / overdue</th><td>Invoice PDF, reminders</td><td>—</td><td>Accounts</td><td>Email · SMS</td></tr>
+            <tr><th>COD remittance</th><td>Remittance advice</td><td>—</td><td>Accounts</td><td>Email</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Every template is master data with per-channel variants and placeholder validation. Every send is logged with status, provider response, and cost, so failed deliveries are visible and per-customer notification spend is measurable. Customers and internal users can opt out per event type.</p>
+      <div class="note warn">
+        <span class="note-label">Lead-time warning</span>
+        <p>Indian transactional SMS requires DLT registration of the sender header and every template, and WhatsApp requires a Business API provider with template approval. Both take <strong>one to three weeks of external approval</strong>. Start registration in Phase 1, not in the phase where notifications get built.</p>
+      </div>
+    </section>
+
+    <section id="roles">
+      <h3><span class="num">A.16</span> Roles &amp; permissions</h3>
+      <p>Permissions are granular <code>resource.action</code> pairs. A role is a named bundle; a user gets one or more roles plus a <strong>data scope</strong> — own records, their branch, a set of branches, or the whole network. Scope is enforced in the data layer, not in the UI, so an API call cannot bypass it.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead>
+            <tr><th>Role</th><th>Booking</th><th>Hub</th><th>Dispatch</th><th>Delivery</th><th>Fleet</th><th>Billing</th><th>Masters</th><th>Scope</th></tr>
+          </thead>
+          <tbody>
+            <tr><th>Super Admin</th><td>CRUD</td><td>CRUD</td><td>CRUD</td><td>CRUD</td><td>CRUD</td><td>CRUD</td><td>CRUD</td><td>Network</td></tr>
+            <tr><th>Management</th><td>R</td><td>R</td><td>R</td><td>R</td><td>R</td><td>R</td><td>R</td><td>Network</td></tr>
+            <tr><th>Operations Manager</th><td>CRU</td><td>CRU</td><td>CRU + approve</td><td>CRU</td><td>R</td><td>R</td><td>R</td><td>Network</td></tr>
+            <tr><th>Branch Manager</th><td>CRU + cancel</td><td>CRU</td><td>CRU</td><td>CRU</td><td>R</td><td>R</td><td>R</td><td>Branch</td></tr>
+            <tr><th>Booking Executive</th><td>CR</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>R</td><td>Branch</td></tr>
+            <tr><th>Hub Operator</th><td>R</td><td>CRU</td><td>R</td><td>—</td><td>—</td><td>—</td><td>R</td><td>Branch</td></tr>
+            <tr><th>Dispatch Manager</th><td>R</td><td>R</td><td>CRUD</td><td>—</td><td>CRU</td><td>—</td><td>R</td><td>Branch set</td></tr>
+            <tr><th>Transport Desk</th><td>—</td><td>—</td><td>R</td><td>—</td><td>CRUD</td><td>—</td><td>R</td><td>Network</td></tr>
+            <tr><th>Pickup Executive</th><td>R</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>Own tasks</td></tr>
+            <tr><th>Delivery Agent</th><td>R</td><td>—</td><td>—</td><td>U own</td><td>—</td><td>COD collect</td><td>—</td><td>Own tasks</td></tr>
+            <tr><th>Driver</th><td>—</td><td>—</td><td>R own trip</td><td>—</td><td>R own</td><td>Expenses</td><td>—</td><td>Own trips</td></tr>
+            <tr><th>Accounts</th><td>R</td><td>—</td><td>R</td><td>R</td><td>R</td><td>CRUD + approve</td><td>Rates</td><td>Network</td></tr>
+            <tr><th>Customer Support</th><td>R + edit address</td><td>R</td><td>R</td><td>R</td><td>—</td><td>R</td><td>—</td><td>Network</td></tr>
+            <tr><th>Customer</th><td>CR own</td><td>—</td><td>—</td><td>—</td><td>—</td><td>R own</td><td>Own addresses</td><td>Own account</td></tr>
+          </tbody>
+        </table>
+        <caption>C create · R read · U update · D delete. Delete is almost never granted — cancellation and reversal are the real operations, and both are auditable.</caption>
+      </div>
+      <p>Sensitive actions need a permission of their own, separate from the module: cancel a booked shipment, override a rate, edit a chargeable weight after invoicing, reopen a closed manifest, correct a status, waive a charge, approve a settlement, release a hold, and export customer data in bulk.</p>
+    </section>
+
+    <section id="reports">
+      <h3><span class="num">A.17</span> Reports &amp; dashboards</h3>
+      <h4>Operations dashboard — today</h4>
+      <p>Bookings, pickups pending and done, received, processed, dispatched, in transit, at hub, out for delivery, delivered, failed, pending POD. Transport: vehicles available, dispatched, in transit, delayed, drivers on duty. Financial: today's revenue, COD collected, COD pending deposit, outstanding, vendor payable.</p>
+      <h4>Management KPIs</h4>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>KPI</th><th>Definition</th><th>Cut by</th></tr></thead>
+          <tbody>
+            <tr><th>On-time delivery %</th><td>Delivered within SLA ÷ delivered</td><td>Lane · branch · customer · service</td></tr>
+            <tr><th>First-attempt delivery %</th><td>Delivered on attempt 1 ÷ delivered</td><td>Branch · agent · area</td></tr>
+            <tr><th>SLA breach %</th><td>Breached ÷ eligible</td><td>Lane · branch · reason</td></tr>
+            <tr><th>Average transit time</th><td>Pickup → delivery, working hours</td><td>Lane · mode</td></tr>
+            <tr><th>Hub dwell time</th><td>Inbound scan → outbound load</td><td>Hub · lane</td></tr>
+            <tr><th>Truck load utilisation</th><td>Loaded weight ÷ capacity, and volume ÷ capacity</td><td>Lane · vehicle type</td></tr>
+            <tr><th>Cost per shipment / per kg</th><td>(Vendor freight + trip expenses) ÷ volume</td><td>Lane · mode</td></tr>
+            <tr><th>Revenue per kg / per trip</th><td>Billed ÷ chargeable weight or trips</td><td>Customer · lane</td></tr>
+            <tr><th>Damage &amp; loss rate</th><td>Exception shipments ÷ handled</td><td>Hub · lane · handler</td></tr>
+            <tr><th>COD ageing</th><td>Collected but not remitted, by days</td><td>Branch · customer</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>Report library</h4>
+      <p>Every report filters by date range, branch, customer, lane, service type and mode, and exports to XLSX, CSV, and PDF. Scheduled email delivery is available on any of them.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Operations</th><th>Financial</th><th>Customer &amp; people</th></tr></thead>
+          <tbody>
+            <tr><td>Booking register</td><td>Customer billing register</td><td>Customer-wise shipments</td></tr>
+            <tr><td>Pickup performance</td><td>Outstanding &amp; ageing</td><td>Customer-wise revenue</td></tr>
+            <tr><td>Dispatch &amp; manifest</td><td>Revenue by lane / branch</td><td>Customer-wise on-time %</td></tr>
+            <tr><td>In-transit status</td><td>COD collected / pending / remitted</td><td>Complaint register &amp; ageing</td></tr>
+            <tr><td>Delivery &amp; undelivered</td><td>Vendor payable &amp; reconciliation</td><td>Branch scorecard</td></tr>
+            <tr><td>Pending POD</td><td>Trip expense register</td><td>Driver scorecard</td></tr>
+            <tr><td>Exception register</td><td>Trip &amp; shipment profitability</td><td>Delivery agent scorecard</td></tr>
+            <tr><td>Hub inbound/outbound &amp; dwell</td><td>Driver settlement register</td><td>User activity &amp; audit extract</td></tr>
+            <tr><td>Vehicle utilisation &amp; document expiry</td><td>Credit-limit exceptions</td><td>Rate card coverage gaps</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="masters">
+      <h3><span class="num">A.18</span> Master data to finalise before Phase 2</h3>
+      <p>This is the schedule risk, not the code. Collecting and cleaning these lists takes longer than most people expect, and Phase 2 cannot be tested without them.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Master</th><th>Rough volume</th><th>Owner</th><th>Needed by</th></tr></thead>
+          <tbody>
+            <tr><th>Branches, hubs, warehouses (with geo-coordinates)</th><td>Tens</td><td>Operations</td><td>Phase 1</td></tr>
+            <tr><th>Users, roles, branch mapping</th><td>Hundreds</td><td>HR + Ops</td><td>Phase 1</td></tr>
+            <tr><th>Cities, PIN codes, serviceability, ODA flags</th><td>~19,000 PINs</td><td>Operations</td><td>Phase 1</td></tr>
+            <tr><th>Zones and lane definitions</th><td>Tens</td><td>Operations</td><td>Phase 1</td></tr>
+            <tr><th>Routes and legs</th><td>Dozens</td><td>Transport</td><td>Phase 3</td></tr>
+            <tr><th>Service types with SLA hours per lane</th><td>Dozens × lanes</td><td>Operations</td><td>Phase 3</td></tr>
+            <tr><th>Customers, addresses, GSTINs, credit terms</th><td>Hundreds–thousands</td><td>Sales</td><td>Phase 2</td></tr>
+            <tr><th>Vehicles, types, capacities, documents</th><td>Hundreds</td><td>Transport</td><td>Phase 3</td></tr>
+            <tr><th>Drivers, delivery agents, licences</th><td>Hundreds</td><td>Transport + HR</td><td>Phase 3</td></tr>
+            <tr><th>Vendors and rate contracts</th><td>Tens–hundreds</td><td>Transport</td><td>Phase 6</td></tr>
+            <tr><th>Customer rate cards</th><td>Per customer</td><td>Sales</td><td>Phase 6</td></tr>
+            <tr><th>Package types, charge heads, tax rates</th><td>Tens</td><td>Accounts</td><td>Phase 2</td></tr>
+            <tr><th>Reason codes — pickup, delivery, exception, cancellation</th><td>Tens</td><td>Operations</td><td>Phase 2</td></tr>
+            <tr><th>Notification templates</th><td>Tens</td><td>Marketing + Ops</td><td>Phase 5</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ PART B ============ -->
+
+    <div class="part-head">
+      <span class="kicker">Part B</span>
+      <h2>Technical plan</h2>
+    </div>
+
+    <section id="stack">
+      <h3><span class="num">B.1</span> Stack &amp; architecture</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Layer</th><th>Choice</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><th>Application</th><td>Next.js 16, App Router, TypeScript strict</td><td>One deployable serving ops portal, customer portal, field PWA, public tracking, and the API</td></tr>
+            <tr><th>UI</th><td>Tailwind v4 + shadcn/ui + lucide, TanStack Query, react-hook-form + Zod</td><td>Proven on your existing codebase; dense operational tables and mobile field screens from one system</td></tr>
+            <tr><th>Database</th><td>PostgreSQL 16 with <strong>PostGIS</strong></td><td>Geofences, route polylines, and nearest-branch queries belong in the database, not in application loops</td></tr>
+            <tr><th>ORM</th><td>Prisma 7 with <code>@prisma/adapter-pg</code>, multi-file schema</td><td>~105 models split by domain; raw SQL for PostGIS predicates and heavy reports</td></tr>
+            <tr><th>Auth</th><td>Auth.js v5 — password for office users, mobile + OTP for field users, API keys for customer integrations</td><td>Field staff will not manage passwords reliably</td></tr>
+            <tr><th>Jobs &amp; queue</th><td>Redis + BullMQ workers in a separate process</td><td>GPS ingestion, SLA scanning, notification fan-out, PDF generation, report exports — none of it belongs in a request</td></tr>
+            <tr><th>Realtime</th><td>Server-Sent Events for dashboards; WebSocket only for the live map</td><td>SSE is enough for one-way status streams and far simpler to operate</td></tr>
+            <tr><th>Files</th><td>S3-compatible object storage (MinIO on-prem or S3), signed URLs</td><td>POD photos and signatures are the bulk of storage and must never sit in the database</td></tr>
+            <tr><th>PDF</th><td>Server-side rendering to PDF for LR, manifest, loading sheet, POD, invoice</td><td>Consistent output; queued so a slow render never blocks an operator</td></tr>
+            <tr><th>Maps</th><td>Provider-agnostic adapter: Google Maps or MapLibre + OSRM</td><td>Routing, geocoding, distance matrix, and map tiles are separately swappable</td></tr>
+            <tr><th>Observability</th><td>Structured logs, Sentry, health endpoints, queue dashboard</td><td>An operations system that is down at 6am needs to say why</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <figure>
+        <div class="frame">
+          <svg viewBox="0 0 880 372" role="img" aria-label="Four client surfaces call one Next.js application over HTTP; the application writes to PostgreSQL with PostGIS and enqueues to Redis, where separate workers handle GPS ingestion, SLA scanning, notifications and documents.">
+            <defs>
+              <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+              </marker>
+            </defs>
+
+            <text x="20" y="22" class="svg-sub" fill="currentColor" opacity=".6">CLIENTS</text>
+            <g stroke="currentColor" stroke-width="1" fill="none" opacity=".5">
+              <rect x="20" y="32" width="196" height="44"/>
+              <rect x="232" y="32" width="196" height="44"/>
+              <rect x="444" y="32" width="196" height="44"/>
+              <rect x="656" y="32" width="204" height="44"/>
+            </g>
+            <g fill="currentColor">
+              <text x="118" y="52" text-anchor="middle" class="svg-label">Ops portal</text>
+              <text x="118" y="67" text-anchor="middle" class="svg-sub" opacity=".7">desktop, dense</text>
+              <text x="330" y="52" text-anchor="middle" class="svg-label">Customer portal</text>
+              <text x="330" y="67" text-anchor="middle" class="svg-sub" opacity=".7">+ public tracking</text>
+              <text x="542" y="52" text-anchor="middle" class="svg-label">Field PWA</text>
+              <text x="542" y="67" text-anchor="middle" class="svg-sub" opacity=".7">offline-first</text>
+              <text x="758" y="52" text-anchor="middle" class="svg-label">Partner API</text>
+              <text x="758" y="67" text-anchor="middle" class="svg-sub" opacity=".7">keys + webhooks</text>
+            </g>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".5" marker-end="url(#ar4)">
+              <line x1="118" y1="76" x2="118" y2="106"/>
+              <line x1="330" y1="76" x2="330" y2="106"/>
+              <line x1="542" y1="76" x2="542" y2="106"/>
+              <line x1="758" y1="76" x2="758" y2="106"/>
+            </g>
+
+            <rect x="20" y="112" width="840" height="96" fill="none" stroke="#0E6C73" stroke-width="2"/>
+            <text x="34" y="132" class="svg-sub" fill="#0E6C73">NEXT.JS APPLICATION — route handlers → services → repositories</text>
+            <g stroke="#0E6C73" stroke-width="1" fill="none" opacity=".65">
+              <rect x="34" y="144" width="128" height="48"/>
+              <rect x="174" y="144" width="128" height="48"/>
+              <rect x="314" y="144" width="128" height="48"/>
+              <rect x="454" y="144" width="128" height="48"/>
+              <rect x="594" y="144" width="128" height="48"/>
+              <rect x="734" y="144" width="112" height="48"/>
+            </g>
+            <g fill="#0E6C73" text-anchor="middle">
+              <text x="98" y="166" class="svg-label">Shipment</text><text x="98" y="181" class="svg-sub">events · status</text>
+              <text x="238" y="166" class="svg-label">Hub</text><text x="238" y="181" class="svg-sub">scan · sort</text>
+              <text x="378" y="166" class="svg-label">Transport</text><text x="378" y="181" class="svg-sub">manifest · trip</text>
+              <text x="518" y="166" class="svg-label">Delivery</text><text x="518" y="181" class="svg-sub">run · POD · COD</text>
+              <text x="658" y="166" class="svg-label">Finance</text><text x="658" y="181" class="svg-sub">rate · bill</text>
+              <text x="790" y="166" class="svg-label">Platform</text><text x="790" y="181" class="svg-sub">auth · audit</text>
+            </g>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".5" marker-end="url(#ar4)">
+              <line x1="230" y1="208" x2="230" y2="244"/>
+              <line x1="640" y1="208" x2="640" y2="244"/>
+            </g>
+            <text x="240" y="230" class="svg-edge" fill="currentColor" opacity=".7">reads / writes</text>
+            <text x="650" y="230" class="svg-edge" fill="currentColor" opacity=".7">enqueues</text>
+
+            <rect x="20" y="250" width="400" height="52" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".65"/>
+            <text x="220" y="272" text-anchor="middle" class="svg-label" fill="currentColor">PostgreSQL 16 + PostGIS</text>
+            <text x="220" y="289" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">operational tables · append-only event log · partitioned gps_ping</text>
+
+            <rect x="460" y="250" width="400" height="52" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".65"/>
+            <text x="660" y="272" text-anchor="middle" class="svg-label" fill="currentColor">Redis + BullMQ</text>
+            <text x="660" y="289" text-anchor="middle" class="svg-sub" fill="currentColor" opacity=".7">durable job queues</text>
+
+            <g stroke="currentColor" stroke-width="1.2" opacity=".5" marker-end="url(#ar4)">
+              <line x1="660" y1="302" x2="660" y2="326"/>
+            </g>
+            <g stroke="currentColor" stroke-width="1" fill="none" opacity=".5">
+              <rect x="460" y="332" width="94" height="30"/>
+              <rect x="562" y="332" width="94" height="30"/>
+              <rect x="664" y="332" width="94" height="30"/>
+              <rect x="766" y="332" width="94" height="30"/>
+            </g>
+            <g fill="currentColor" text-anchor="middle" class="svg-sub">
+              <text x="507" y="351">gps-ingest</text>
+              <text x="609" y="351">sla-scan</text>
+              <text x="711" y="351">notify</text>
+              <text x="813" y="351">documents</text>
+            </g>
+            <text x="460" y="326" class="svg-edge" fill="currentColor" opacity=".7">separate worker process — scales independently of web</text>
+
+            <rect x="20" y="332" width="400" height="30" fill="none" stroke="currentColor" stroke-width="1" opacity=".5"/>
+            <text x="220" y="351" text-anchor="middle" class="svg-sub" fill="currentColor">S3-compatible object storage — POD photos · signatures · documents</text>
+          </svg>
+        </div>
+        <figcaption>One deployable, one database, one queue. The worker process is separate because GPS ingestion and SLA scanning run continuously and must not compete with an operator waiting for a scan to register.</figcaption>
+      </figure>
+    </section>
+
+    <section id="datamodel">
+      <h3><span class="num">B.2</span> Data model</h3>
+      <p>Roughly 105 tables across eleven domains, in a multi-file Prisma schema so no single file becomes unreviewable.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Domain</th><th>~n</th><th>Principal models</th></tr></thead>
+          <tbody>
+            <tr><th>Identity &amp; access</th><td class="num-col">10</td><td class="mono">Organization · User · Session · Role · Permission · RolePermission · UserRole · UserBranchScope · ApiKey · LoginActivity</td></tr>
+            <tr><th>Geography &amp; network</th><td class="num-col">10</td><td class="mono">State · City · Pincode · Zone · ZonePincode · Branch · Route · RouteLeg · Geofence · ServiceabilityRule</td></tr>
+            <tr><th>Parties</th><td class="num-col">11</td><td class="mono">Customer · CustomerAddress · CustomerContact · CustomerUser · CustomerGstin · CreditTerm · Vendor · VendorContact · VendorBankAccount · VendorRateContract · VendorRateLine</td></tr>
+            <tr><th>Fleet &amp; people</th><td class="num-col">9</td><td class="mono">VehicleType · Vehicle · VehicleDocument · VehicleStatusLog · GpsDevice · Driver · DriverDocument · DeliveryAgent · MaintenanceRecord</td></tr>
+            <tr><th>Shipment core</th><td class="num-col">12</td><td class="mono">Shipment · ShipmentPackage · ShipmentCharge · ShipmentReference · ShipmentEvent · ShipmentDocument · ShipmentHold · ShipmentSla · PackageBarcode · BulkUploadBatch · BulkUploadRow · NumberSeries</td></tr>
+            <tr><th>Pickup</th><td class="num-col">4</td><td class="mono">PickupRequest · PickupAssignment · PickupAttempt · PickupVisit</td></tr>
+            <tr><th>Hub operations</th><td class="num-col">8</td><td class="mono">ScanRecord · InboundReceipt · InboundReceiptLine · ReceiptDiscrepancy · SortBin · PackageLocation · LoadingSheet · LoadingSheetLine</td></tr>
+            <tr><th>Transport</th><td class="num-col">10</td><td class="mono">Manifest · ManifestLine · Trip · TripLeg · TripEvent · TripExpense · TripAdvance · TripSettlement · SealRecord · EwayBillRecord</td></tr>
+            <tr><th>Tracking</th><td class="num-col">6</td><td class="mono">GpsPing · VehicleLocation · GeofenceEvent · RouteDeviation · EtaSnapshot · TrackingProviderConfig</td></tr>
+            <tr><th>Last mile</th><td class="num-col">10</td><td class="mono">DeliveryRun · DeliveryTask · DeliveryAttempt · Pod · PodAsset · OtpToken · CodCollection · CodDeposit · CodRemittance · ReasonCode</td></tr>
+            <tr><th>Exceptions &amp; SLA</th><td class="num-col">7</td><td class="mono">SlaPolicy · SlaCalendar · Exception · ExceptionAction · Complaint · ComplaintMessage · EscalationRule</td></tr>
+            <tr><th>Finance</th><td class="num-col">14</td><td class="mono">RateCard · RateCardVersion · RateSlab · ChargeRule · FuelSurchargeRule · FreightCalculation · Invoice · InvoiceLine · CreditNote · Payment · PaymentAllocation · CustomerLedger · VendorBill · VendorPayment</td></tr>
+            <tr><th>Platform</th><td class="num-col">10</td><td class="mono">AuditLog · OutboxEvent · NotificationTemplate · NotificationLog · FileAsset · SystemConfig · JobRun · WebhookSubscription · WebhookDelivery · SavedReport</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>The three tables that carry the design</h4>
+      <ul>
+        <li><strong><code>ShipmentEvent</code></strong> — append-only, no update or delete grant at the database level. Columns: <code>id</code>, <code>shipmentId</code>, <code>packageId?</code>, <code>eventType</code>, <code>occurredAt</code>, <code>recordedAt</code>, <code>branchId?</code>, <code>userId?</code>, <code>vehicleId?</code>, <code>driverId?</code>, <code>tripId?</code>, <code>manifestId?</code>, <code>lat?</code>, <code>lng?</code>, <code>deviceId?</code>, <code>reasonCodeId?</code>, <code>remarks?</code>, <code>attachmentId?</code>, <code>source</code>, <code>idempotencyKey</code> (unique), <code>payload</code> JSONB. Indexed on <code>(shipmentId, occurredAt)</code> and <code>(eventType, occurredAt)</code>.</li>
+        <li><strong><code>ScanRecord</code></strong> — every physical barcode read, at package granularity. Separate from <code>ShipmentEvent</code> because one shipment-level event can result from seventeen package scans, and shortage detection needs the package rows.</li>
+        <li><strong><code>GpsPing</code></strong> — declaratively partitioned by day, with a retention policy. Raw pings are high-volume and low-value after a few months; <code>VehicleLocation</code> holds the current position for fast map reads and <code>EtaSnapshot</code> holds the derived summaries that reports need.</li>
+      </ul>
+      <p>Monetary columns are <code>Decimal(14,2)</code> handled with decimal.js — never floats. Weights are <code>Decimal(10,3)</code>. Every table carries <code>createdAt</code>, <code>updatedAt</code>, <code>createdById</code>, and where relevant <code>branchId</code> and <code>orgId</code> for scope enforcement. Deletes are soft everywhere in the operational core.</p>
+    </section>
+
+    <section id="numbering">
+      <h3><span class="num">B.3</span> Numbering &amp; barcodes</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Document</th><th>Format</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><th>LR / AWB</th><td class="mono">CL + YYYYMMDD + 4-digit daily sequence</td><td class="mono">CL202608250001</td></tr>
+            <tr><th>Package barcode</th><td class="mono">LR + "-" + 2-digit index (Code128)</td><td class="mono">CL202608250001-03</td></tr>
+            <tr><th>Manifest</th><td class="mono">M + 6-digit running</td><td class="mono">M000145</td></tr>
+            <tr><th>Trip</th><td class="mono">TRIP-YYYY-5-digit</td><td class="mono">TRIP-2026-00125</td></tr>
+            <tr><th>Pickup request</th><td class="mono">PU + YYMMDD + 4-digit</td><td class="mono">PU2608250042</td></tr>
+            <tr><th>Delivery run</th><td class="mono">RUN-branch-YYMMDD-2-digit</td><td class="mono">RUN-DEL-260825-04</td></tr>
+            <tr><th>Invoice</th><td class="mono">INV/FY/branch/4-digit</td><td class="mono">INV/2627/DEL/0184</td></tr>
+            <tr><th>Exception</th><td class="mono">EXC + 7-digit</td><td class="mono">EXC0004512</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Sequences come from a <code>NumberSeries</code> table read under a PostgreSQL advisory lock inside the creating transaction — not from <code>MAX(id)+1</code>, which will hand two counters the same LR number on the first busy morning. Series are configurable per branch and per financial year without a code change.</p>
+      <p>Scanning uses the browser <code>BarcodeDetector</code> API where available with a WASM decoder fallback, plus USB and Bluetooth HID scanner support (a hardware gun presents as a keyboard, so the scan console must accept fast keystroke input as well as camera frames). Thermal label printing targets ZPL/TSPL over a local print bridge.</p>
+    </section>
+
+    <section id="statemachine">
+      <h3><span class="num">B.4</span> State machine &amp; event write path</h3>
+      <p>A single module, <code>src/lib/shipment/state-machine.ts</code>, owns every legal transition as data: <code>from</code>, <code>event</code>, <code>to</code>, required permission, required fields, and side effects. Nothing else in the codebase may write <code>currentStatus</code>.</p>
+      <ol class="list">
+        <li><strong>Validate.</strong> Is this transition legal from the current state, does the actor hold the permission, and are the mandatory fields present?</li>
+        <li><strong>Deduplicate.</strong> Reject on a repeated <code>idempotencyKey</code> — the offline queue will retry, and it must be safe.</li>
+        <li><strong>Append.</strong> Write the <code>ShipmentEvent</code> row inside a transaction.</li>
+        <li><strong>Project.</strong> Update the denormalised <code>currentStatus</code>, <code>currentBranchId</code>, <code>currentTripId</code>, <code>attemptCount</code>, and SLA fields in the same transaction.</li>
+        <li><strong>Emit.</strong> Insert into <code>OutboxEvent</code> in the same transaction; a worker then fans out to notifications, webhooks, and downstream automations. Nothing external is called inside the transaction, so a dead SMS gateway can never fail a scan.</li>
+      </ol>
+      <p>A rebuild command replays events for any shipment and asserts the projection matches — run in CI against a fixture set and available to support when a status looks wrong.</p>
+      <h4>Automations, all implemented as outbox consumers</h4>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>When</th><th>Then</th></tr></thead>
+          <tbody>
+            <tr><th class="mono">ARRIVED_AT_HUB</th><td>and hub = destination → create delivery task, notify consignee</td></tr>
+            <tr><th class="mono">DELIVERY_ATTEMPTED</th><td>→ increment attempts, create reattempt task per policy, notify both parties, open exception on attempt 2</td></tr>
+            <tr><th class="mono">GEOFENCE_ENTER</th><td>at a branch → generate vehicle arrival, and hub arrival for every shipment on that trip</td></tr>
+            <tr><th class="mono">POD_SYNCED</th><td>and COD reconciled and no open exception → close shipment, release for billing</td></tr>
+            <tr><th class="mono">SLA scanner tick</th><td>→ mark at-risk at 80%, breach past due, open exception, escalate on the rule ladder</td></tr>
+            <tr><th class="mono">Manifest closed</th><td>→ generate manifest PDF, e-way bill Part-B update, notify destination hub of expected inbound</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="offline">
+      <h3><span class="num">B.5</span> Offline-first field PWA</h3>
+      <p>Field staff work in basements, industrial estates, and lifts. Offline is the normal case, not the edge case.</p>
+      <ul>
+        <li><strong>Shell and data.</strong> Service worker caches the app shell; the day's assigned tasks are pre-fetched into IndexedDB when the agent starts their shift on branch WiFi.</li>
+        <li><strong>Write queue.</strong> Every action — scan, attempt, delivery, COD, photo — is written locally with a client-generated UUID as <code>idempotencyKey</code> and an <code>occurredAt</code> from the device clock, then queued. The UI confirms immediately; sync is invisible.</li>
+        <li><strong>Sync.</strong> Background Sync where supported, with a foreground retry loop as fallback. Ordered per shipment, exponential backoff, never blocking the operator.</li>
+        <li><strong>Clock drift.</strong> Server records the offset between device time and server time at sync; a drift beyond a threshold flags the events for review rather than silently accepting a delivery timestamped tomorrow.</li>
+        <li><strong>Media.</strong> Photos are compressed client-side (long edge ~1600px, ~200KB) and uploaded separately from the event so a delivery confirms instantly and the image follows.</li>
+        <li><strong>Conflict.</strong> There is none to resolve — events are additive. A late-arriving event re-runs the projection in <code>occurredAt</code> order.</li>
+        <li><strong>Install &amp; hardware.</strong> Add-to-home-screen prompt, full-screen display, wake lock during a run, camera and geolocation permissions requested once at onboarding.</li>
+      </ul>
+      <div class="note warn">
+        <span class="note-label">The PWA limit, stated plainly</span>
+        <p>A PWA cannot report location while it is closed or the phone is locked. Continuous vehicle tracking therefore comes from the in-vehicle GPS device, not the agent's phone. Where you need continuous last-mile agent tracking on foot or two-wheeler, that is the specific trigger to build the native app — nothing else about the PWA plan needs to change when you do.</p>
+      </div>
+    </section>
+
+    <section id="gps-tech">
+      <h3><span class="num">B.6</span> GPS ingestion &amp; geofencing</h3>
+      <p>A provider adapter interface keeps the core ignorant of which telematics vendor is attached:</p>
+      <pre class="tree"><b>interface</b> GpsProvider {
+  <i>// pull-based providers</i>
+  fetchPositions(deviceIds: string[]): Promise&lt;NormalizedPing[]&gt;
+  <i>// push-based providers</i>
+  parseWebhook(body: unknown, signature: string): NormalizedPing[]
+}
+
+<b>type</b> NormalizedPing = {
+  deviceId, lat, lng, speedKmph, heading,
+  ignition, recordedAt, providerRef
+}</pre>
+      <p>The pipeline, running in the <code>gps-ingest</code> worker:</p>
+      <ol class="list">
+        <li><strong>Ingest</strong> — poll each configured provider on its own interval, or accept a signed webhook. Duplicate <code>(deviceId, recordedAt)</code> pairs are dropped.</li>
+        <li><strong>Persist</strong> — insert into the day's <code>gps_ping</code> partition; upsert <code>vehicle_location</code> with the latest fix.</li>
+        <li><strong>Evaluate geofences</strong> — a single PostGIS query per ping: which fences contain this point (<code>ST_Contains</code> for polygons, <code>ST_DWithin</code> on <code>geography</code> for circles). Compare to the vehicle's previous fence set; the difference is an enter or exit.</li>
+        <li><strong>Debounce</strong> — a fence event only fires after N consecutive pings inside or outside, so a truck idling on the boundary does not generate forty arrival events.</li>
+        <li><strong>Emit</strong> — enter at a branch fence writes a vehicle arrival, and a hub-arrival event for every shipment on the active trip. This is where most manual status updating disappears.</li>
+        <li><strong>Derive</strong> — recompute remaining distance along the planned route and ETA from a rolling average speed; check deviation from the route polyline and stationary duration; raise exceptions.</li>
+      </ol>
+      <p>Retention: raw pings kept hot for 90 days, then downsampled to one fix per five minutes and archived. Trip replay reads the archive.</p>
+    </section>
+
+    <section id="pricing-tech">
+      <h3><span class="num">B.7</span> Freight engine</h3>
+      <p>Rating is a pure function with no database access of its own — it receives a resolved rate-card version and a shipment snapshot, and returns priced lines plus a trace. That makes it exhaustively unit-testable, and the trace is what settles billing arguments.</p>
+      <pre class="tree"><b>calculateFreight</b>(shipment, rateCardVersion, context) → {
+  chargeableWeight,      <i>// max(actual, volumetric), divisor from service type</i>
+  lines: [{ chargeType, basis, rate, quantity, amount, ruleId }],
+  taxes: [{ head, rate, amount, isReverseCharge }],
+  total,
+  trace                  <i>// every rule considered, matched or skipped, and why</i>
+}</pre>
+      <p>Resolution order when several rate rules could match: customer-specific lane → customer zone pair → customer default → published tariff for the lane → published default. The first match wins and the trace records what was skipped. A shipment on a lane with no rate rule does not silently price at zero — it books with an unrated flag and appears on the <em>rate card coverage gaps</em> report.</p>
+      <p><code>FreightCalculation</code> stores the trace against the shipment at booking and again at invoicing. When the hub revises chargeable weight, a re-rate runs, the delta is recorded, and the customer is notified if the increase exceeds the configured tolerance.</p>
+    </section>
+
+    <section id="security">
+      <h3><span class="num">B.8</span> Security &amp; audit</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Control</th><th>Implementation</th></tr></thead>
+          <tbody>
+            <tr><th>Authentication</th><td>Password + optional TOTP for office users; mobile + OTP for field users; short-lived tokens with refresh on the PWA; API keys with per-key scopes and IP allowlists for customers</td></tr>
+            <tr><th>Authorisation</th><td>Permission check in the service layer, plus a data-scope filter injected at the repository layer so a missing UI guard cannot leak another branch's data</td></tr>
+            <tr><th>Customer isolation</th><td>Portal sessions carry a customer id that is applied as a mandatory predicate on every query — verified by an automated test that fails the build if any customer-facing repository method lacks it</td></tr>
+            <tr><th>Audit log</th><td>Every create, update, and state change writes actor, timestamp, IP, device, before/after JSON. Immutable, retained per policy, exportable per shipment for disputes</td></tr>
+            <tr><th>Session &amp; device</th><td>Active session list per user, remote revoke, forced logout on role change, device binding for field users</td></tr>
+            <tr><th>Sensitive data</th><td>Consignee phone masked in exports and in the agent app's call function; POD assets served only through short-lived signed URLs; bulk export is a separate permission and is itself audited</td></tr>
+            <tr><th>Transport &amp; storage</th><td>TLS everywhere, encryption at rest for the database and object store, secrets from environment or a vault — never in the repository</td></tr>
+            <tr><th>API hardening</th><td>Rate limits per key and per IP, request signing for webhooks, strict Zod validation on every boundary, no raw SQL from user input</td></tr>
+            <tr><th>Backup &amp; recovery</th><td>Nightly full plus continuous WAL archiving, 30-day point-in-time recovery, object store versioning, and a <strong>quarterly restore drill</strong> — an untested backup is not a backup</td></tr>
+            <tr><th>Retention</th><td>Shipment records and PODs 8 years (statutory), GPS raw 90 days then downsampled, audit log 8 years, notification log 2 years</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="integrations">
+      <h3><span class="num">B.9</span> Integrations</h3>
+      <p>Every integration sits behind an adapter interface with a mock implementation, so development and testing never depend on a live third party.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Integration</th><th>Purpose</th><th>Phase</th><th>Lead time</th></tr></thead>
+          <tbody>
+            <tr><th>GPS / telematics</th><td>Vehicle positions, ignition, odometer</td><td>7</td><td>Contract + device fitment</td></tr>
+            <tr><th>SMS (DLT-registered)</th><td>Status alerts, OTP</td><td>5</td><td class="mono">1–3 weeks approval</td></tr>
+            <tr><th>WhatsApp Business API</th><td>Rich status updates, POD links</td><td>5</td><td class="mono">1–3 weeks approval</td></tr>
+            <tr><th>Email (SES/SMTP)</th><td>Invoices, PODs, reports</td><td>5</td><td>Domain + DKIM setup</td></tr>
+            <tr><th>Maps &amp; routing</th><td>Geocoding, distance matrix, navigation, tiles</td><td>3</td><td>Billing account</td></tr>
+            <tr><th>E-way bill (NIC via GSP)</th><td>Generate, update Part-B on vehicle change, cancel</td><td>3</td><td class="mono">GSP onboarding, 2–4 weeks</td></tr>
+            <tr><th>Payment gateway</th><td>Online receipts, COD digital collection</td><td>6</td><td>KYC</td></tr>
+            <tr><th>Accounting (AccuBooks or Tally)</th><td>Push invoices, receipts, vendor bills to the books</td><td>6</td><td>API mapping</td></tr>
+            <tr><th>Weighbridge</th><td>Direct weight capture</td><td>3</td><td>Serial/TCP bridge per site</td></tr>
+            <tr><th>Thermal label printers</th><td>ZPL/TSPL label output</td><td>3</td><td>Hardware selection</td></tr>
+            <tr><th>Customer ERP webhooks</th><td>Push status events to corporate customers</td><td>5</td><td>Per customer</td></tr>
+            <tr><th>FASTag</th><td>Toll transactions against trips</td><td>8</td><td>Bank API access</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="nfr">
+      <h3><span class="num">B.10</span> Non-functional targets</h3>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>Dimension</th><th>Target</th><th>Why this number</th></tr></thead>
+          <tbody>
+            <tr><th>Scan-to-confirm</th><td>&lt; 400 ms p95</td><td>A hub clerk scans a package every few seconds; anything slower and they stop trusting the gun</td></tr>
+            <tr><th>Operational page load</th><td>&lt; 1.5 s p95</td><td>Branch machines are modest and connections are shared</td></tr>
+            <tr><th>Tracking lookup</th><td>&lt; 800 ms p95</td><td>Public endpoint, high volume, heavily cached</td></tr>
+            <tr><th>Throughput</th><td>50,000 shipments/day, 300,000 package scans/day</td><td>Headroom of roughly 5× projected peak</td></tr>
+            <tr><th>GPS ingestion</th><td>1,000 vehicles at 30-second intervals</td><td>≈ 2.9M pings/day; partitioning and batch insert are sized for this</td></tr>
+            <tr><th>Concurrent users</th><td>500 office + 2,000 field</td><td>Field devices are bursty at shift start and end</td></tr>
+            <tr><th>Availability</th><td>99.5% during 06:00–23:00 operating window</td><td>Field apps keep working offline through a short outage</td></tr>
+            <tr><th>RPO / RTO</th><td>5 minutes / 2 hours</td><td>WAL archiving plus a rehearsed restore</td></tr>
+            <tr><th>Browser support</th><td>Chrome/Edge current-2, Android Chrome 10+, iOS Safari 15+</td><td>Field device reality</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="repo">
+      <h3><span class="num">B.11</span> Repository layout</h3>
+      <pre class="tree">D:\Projects\Logistics\
+├─ <b>prisma/</b>
+│  ├─ schema/            <i>identity · geo · parties · fleet · shipment · hub ·</i>
+│  │                     <i>transport · tracking · lastmile · finance · platform</i>
+│  ├─ migrations/
+│  └─ seed/              <i>masters, reason codes, permissions, demo network</i>
+├─ <b>src/</b>
+│  ├─ app/
+│  │  ├─ (auth)/         <i>login, OTP, password reset</i>
+│  │  ├─ (ops)/          <i>booking · hub · dispatch · delivery · exceptions ·</i>
+│  │  │                  <i>fleet · finance · masters · reports · dashboards</i>
+│  │  ├─ (portal)/       <i>customer login area</i>
+│  │  ├─ (field)/        <i>PWA: pickup · driver · delivery agent</i>
+│  │  ├─ track/          <i>public tracking, no auth</i>
+│  │  └─ api/            <i>route handlers, webhooks, partner API v1</i>
+│  ├─ server/
+│  │  ├─ services/       <i>business logic, transaction boundaries</i>
+│  │  └─ repositories/   <i>data access + scope enforcement</i>
+│  ├─ lib/
+│  │  ├─ shipment/       <i>state-machine · numbering · events · projection</i>
+│  │  ├─ hub/            <i>scanning · sorting · receipts · discrepancy</i>
+│  │  ├─ transport/      <i>manifest · trip · loading · eway</i>
+│  │  ├─ delivery/       <i>runs · attempts · pod · cod</i>
+│  │  ├─ tracking/       <i>providers/ · geofence · eta · deviation</i>
+│  │  ├─ pricing/        <i>rate resolution · freight engine · trace</i>
+│  │  ├─ billing/        <i>invoicing · receivables · settlement</i>
+│  │  ├─ sla/ exceptions/ notifications/ documents/
+│  │  └─ auth/ rbac/ audit/ files/ outbox/
+│  ├─ components/        <i>ui/ · data-table/ · scanner/ · map/ · forms/</i>
+│  └─ types/
+├─ <b>workers/</b>          <i>gps-ingest · sla-scan · notify · documents · outbox</i>
+├─ <b>docs/</b>             <i>this BRD · ADRs · API reference · runbooks</i>
+├─ <b>tests/</b>            <i>unit · integration · e2e (Playwright)</i>
+└─ public/brand/        <i>preserved logo assets</i></pre>
+      <p>Non-negotiable conventions: route handlers contain no business logic, services own transaction boundaries, repositories are the only place Prisma is touched, and the state machine is the only writer of shipment status. A CI check enforces the last one by grepping for direct <code>currentStatus</code> assignment outside the module.</p>
+    </section>
+
+    <!-- ============ PART C ============ -->
+
+    <div class="part-head">
+      <span class="kicker">Part C</span>
+      <h2>Delivery plan</h2>
+    </div>
+
+    <section id="phases">
+      <h3><span class="num">C.1</span> Phase plan</h3>
+      <p>Nine phases, 29 weeks. Each ends with something demonstrable to operations, not just a merged branch.</p>
+      <div class="phases">
+        <div class="phase">
+          <div class="idx">Phase 0</div>
+          <div class="content">
+            <h4>Foundation</h4>
+            <p>Clean the folder, scaffold Next.js 16 + Prisma 7 + PostGIS, git init, CI, Docker compose for Postgres and Redis, design tokens and component base, deploy pipeline to a staging server.</p>
+            <p class="exit"><b>Exit:</b> a deployed empty app with a health check, a migration, and a green pipeline.</p>
+          </div>
+          <div class="dur">1 week</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 1</div>
+          <div class="content">
+            <h4>Identity, network, masters</h4>
+            <p>Users, roles, granular permissions, branch scoping, session and device management, audit log. Branches, hubs, cities, PIN codes, zones, routes, service types, package types, charge heads, tax rates, reason codes. Master import tooling and the seed set. Number series. Shell navigation and an empty dashboard.</p>
+            <p class="exit"><b>Exit:</b> real staff log in with real roles and see only their branch. DLT and WhatsApp registration started in parallel.</p>
+          </div>
+          <div class="dur">3 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 2</div>
+          <div class="content">
+            <h4>Booking, pickup, the event spine</h4>
+            <p>Customer master and addresses. Booking for all three modes, package-level records and barcodes, LR generation and printing. Pickup request, assignment, field capture, failure reasons. The <code>ShipmentEvent</code> table, state machine, projection, outbox, and the shipment timeline UI. Bulk upload with validation grid.</p>
+            <p class="exit"><b>Exit:</b> a shipment can be booked and picked up, and its timeline shows every event with who, where, and when.</p>
+          </div>
+          <div class="dur">4 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 3</div>
+          <div class="content">
+            <h4>Hub operations &amp; transport</h4>
+            <p>Scan console, inbound against manifest, weighment, sorting and bins, labelling, damage capture, discrepancy automation. Vehicle and driver masters with document expiry. Manifest and loading sheet for PTL, trip for FTL, dispatch and gate-out, hub-to-hub legs, e-way bill Part-B, branch dashboard.</p>
+            <p class="exit"><b>Exit:</b> a shipment moves Delhi → Jaipur through a manifest, on a truck, with a shortage correctly detected at the far end.</p>
+          </div>
+          <div class="dur">4 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 4</div>
+          <div class="content">
+            <h4>Last mile, POD, COD</h4>
+            <p>Delivery runs and tasks, agent PWA with offline queue, OTP, signature, photo, attempt history and reason codes, reattempt automation, RTO. POD record and branded PDF. COD collection, day-end deposit, reconciliation.</p>
+            <p class="exit"><b>Exit:</b> an agent completes a full run offline, syncs on return, and every POD PDF is downloadable.</p>
+          </div>
+          <div class="dur">4 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 5</div>
+          <div class="content">
+            <h4>Customer portal, tracking, notifications</h4>
+            <p>Public tracking page, customer login, portal booking and bulk upload, POD and invoice download, complaint workflow, sub-user management. Notification templates, SMS/WhatsApp/email channels, send log, opt-outs. Partner API v1 and webhooks.</p>
+            <p class="exit"><b>Exit:</b> a customer books, tracks, and receives every status message without calling the branch. <strong>MVP go-live candidate.</strong></p>
+          </div>
+          <div class="dur">3 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 6</div>
+          <div class="content">
+            <h4>Rating, billing, settlement</h4>
+            <p>Rate cards with versioning, freight engine and trace, re-rate on weight revision. Invoicing, credit notes, receivables and ageing, credit limits, payments. Vendor master and rate contracts, trip expenses and advances, driver settlement, vendor payable, COD remittance, profitability.</p>
+            <p class="exit"><b>Exit:</b> a month's shipments invoice correctly and every line traces to its rule.</p>
+          </div>
+          <div class="dur">4 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 7</div>
+          <div class="content">
+            <h4>GPS, geofencing, live map</h4>
+            <p>Provider adapter and ingestion worker, partitioned ping storage, geofence evaluation with debounce, automatic arrival and departure events, live map, ETA, route deviation, stoppage and signal-loss alerts, trip replay.</p>
+            <p class="exit"><b>Exit:</b> a truck entering the Jaipur fence generates hub arrival for every shipment on board, with no operator involved.</p>
+          </div>
+          <div class="dur">3 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Phase 8</div>
+          <div class="content">
+            <h4>SLA, exception tower, analytics</h4>
+            <p>SLA policies and working calendars, breach scanner and escalation ladder, exception control tower, management KPI dashboards, the full report library with scheduled email, saved views, and export.</p>
+            <p class="exit"><b>Exit:</b> the duty manager runs the shift from the exception tower rather than from phone calls.</p>
+          </div>
+          <div class="dur">3 weeks</div>
+        </div>
+        <div class="phase">
+          <div class="idx">Hardening</div>
+          <div class="content">
+            <h4>UAT, data migration, go-live</h4>
+            <p>Parallel run against the current process, historical data migration, load test at 5× peak, security review, restore drill, branch-by-branch rollout with training and a support runbook.</p>
+            <p class="exit"><b>Exit:</b> all branches live, old process retired.</p>
+          </div>
+          <div class="dur">4 weeks</div>
+        </div>
+      </div>
+      <div class="note">
+        <span class="note-label">One deviation from your §50 ordering</span>
+        <p>You placed GPS tracking at Phase 4, before last mile. I have moved it to Phase 7 for one reason: <strong>customer tracking does not need GPS.</strong> It runs off the event log, which exists from Phase 2. GPS adds vehicle visibility and automation — genuinely valuable, but it does not unblock go-live, whereas POD and last mile do. If a major customer contractually requires live vehicle tracking at launch, swap Phases 7 and 5; nothing else in the plan changes.</p>
+      </div>
+    </section>
+
+    <section id="mvp">
+      <h3><span class="num">C.2</span> MVP cut line</h3>
+      <p><strong>Go live at the end of Phase 5 — week 19</strong>, with Phases 0 through 5 complete. That covers: booking → pickup → hub → manifest → PTL/FTL → dispatch → transit → hub receiving → delivery → POD → customer tracking → notifications.</p>
+      <div class="scroller">
+        <table class="wide">
+          <thead><tr><th>In the MVP</th><th>Deliberately after go-live</th></tr></thead>
+          <tbody>
+            <tr><td>Full shipment lifecycle and event timeline</td><td>Live GPS map and geofence automation <span class="chip later">Phase 7</span></td></tr>
+            <tr><td>Package-level barcodes, hub scanning, discrepancy detection</td><td>Automated SLA engine and exception tower <span class="chip later">Phase 8</span></td></tr>
+            <tr><td>PTL manifests and FTL trips</td><td>Rate cards and automated invoicing <span class="chip later">Phase 6</span></td></tr>
+            <tr><td>Delivery runs, attempts, POD, COD collection</td><td>Vendor settlement and profitability <span class="chip later">Phase 6</span></td></tr>
+            <tr><td>Customer portal, public tracking, notifications</td><td>Management KPI dashboards <span class="chip later">Phase 8</span></td></tr>
+            <tr><td>Roles, permissions, audit trail</td><td>Route optimisation and load planning <span class="chip later">Phase 8+</span></td></tr>
+            <tr><td>Manual charge entry and a basic billing register</td><td>Native mobile apps <span class="chip later">On trigger</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Manual charge entry in the MVP is the deliberate compromise: the operation goes digital in nineteen weeks and accounts keep their current billing process for one more quarter, rather than everyone waiting seven months for a single big-bang release.</p>
+    </section>
+
+    <section id="acceptance">
+      <h3><span class="num">C.3</span> Acceptance criteria</h3>
+      <p>Each phase is accepted against scenarios executed by operations staff on staging with real master data — not by a demo.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Phase</th><th>Representative acceptance scenarios</th></tr></thead>
+          <tbody>
+            <tr><th>1</th><td>A Delhi branch manager cannot see a Jaipur shipment through UI or API. Revoking a permission takes effect on the next request. Every login and role change appears in the audit log with IP and device.</td></tr>
+            <tr><th>2</th><td>Two operators booking simultaneously receive different LR numbers. A 200-row bulk file with 7 bad rows books 193 and reports the 7 with reasons. The timeline for a picked-up shipment shows 4 events with actor, branch, and GPS.</td></tr>
+            <tr><th>3</th><td>A 17-package manifest scanned inbound with 15 packages closes with a 2-package shortage exception owned by the dispatching branch. A vehicle with an expired permit cannot be assigned. Manifest PDF matches the loading sheet exactly.</td></tr>
+            <tr><th>4</th><td>An agent completes 12 stops in airplane mode and syncs cleanly, with no duplicates on a forced double-sync. A failed attempt creates a reattempt task and notifies both parties. POD PDF renders signature, photo, GPS, and OTP reference.</td></tr>
+            <tr><th>5</th><td>A customer books, tracks, and downloads a POD without contacting the branch. Public tracking exposes no internal branch, vehicle, or driver data. Every configured notification fires once and only once, and appears in the send log.</td></tr>
+            <tr><th>6</th><td>A month of shipments invoices with zero manual price corrections. A revised chargeable weight produces a debit note and a customer notification. Trip profitability matches a hand-calculated control sample.</td></tr>
+            <tr><th>7</th><td>A vehicle entering a hub geofence generates arrival for every shipment on board within 60 seconds. Signal loss for 30 minutes raises an exception. Trip replay matches the driver's account of the route.</td></tr>
+            <tr><th>8</th><td>SLA breach counts reconcile to a manual audit of 100 shipments. Every exception type appears in the tower within its detection window and escalates on schedule.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="team">
+      <h3><span class="num">C.4</span> Team &amp; assumptions</h3>
+      <p>The 29-week estimate assumes: one tech lead, two full-stack engineers, one frontend engineer focused on the PWA and operational UI, one QA engineer, a designer at roughly half time, and a business analyst or product owner from your side who is available daily — not weekly.</p>
+      <p>It also assumes master data arrives on the schedule in §A.18, that a staging environment mirroring production exists from Phase 0, and that operations staff are available for acceptance testing at the end of each phase. Compress the team and the timeline extends roughly proportionally; the phases are sequenced by dependency, so they cannot be parallelised much beyond this shape.</p>
+    </section>
+
+    <section id="risks">
+      <h3><span class="num">C.5</span> Risks</h3>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><th>Master data not ready</th><td class="chip exc">High</td><td>The most common cause of slipped logistics projects. Named owner per master in §A.18, weekly tracking from week 1, import tooling built in Phase 1 rather than Phase 2.</td></tr>
+            <tr><th>Field staff reject the app</th><td class="chip exc">High</td><td>Two-tap common paths, works offline, large touch targets, local language labels. Pilot with 5 agents in Phase 4 and change the design based on what they say, not what we assumed.</td></tr>
+            <tr><th>DLT / WhatsApp approval delay</th><td class="chip auto">Medium</td><td>Start registration in Phase 1. Email fallback for every notification so a delay cannot block go-live.</td></tr>
+            <tr><th>Mixed fleet with unreliable GPS</th><td class="chip auto">Medium</td><td>Manual equivalent for every automatic event; reports distinguish the two. The system never assumes telematics.</td></tr>
+            <tr><th>Barcode hardware fragmentation</th><td class="chip auto">Medium</td><td>Standardise on one scanner and one thermal printer model in Phase 1 and buy the pilot units then, not in Phase 3.</td></tr>
+            <tr><th>Rate card complexity underestimated</th><td class="chip auto">Medium</td><td>Collect the ten most complex real customer contracts in Phase 1 and design the rate model against them, not against a simplified example.</td></tr>
+            <tr><th>Scope creep during build</th><td class="chip auto">Medium</td><td>Anything not in this document goes to a Phase 8+ backlog by default; changes to a phase in progress require an explicit trade against something already in it.</td></tr>
+            <tr><th>Parallel-run fatigue</th><td class="chip later">Low–Med</td><td>Branch-by-branch rollout with a hard cut date per branch, capped at two weeks of double entry anywhere.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="open">
+      <h3><span class="num">C.6</span> Open decisions — what I need from you</h3>
+      <p>None of these block starting Phase 0. All of them are needed by the phase named.</p>
+      <div class="scroller">
+        <table class="xwide">
+          <thead><tr><th>#</th><th>Decision</th><th>Needed by</th></tr></thead>
+          <tbody>
+            <tr><td class="num-col">1</td><th>Company and product name, and the LR prefix. <code>CL</code> is assumed from your example — confirm, since it appears on every document you print.</th><td>Phase 0</td></tr>
+            <tr><td class="num-col">2</td><th>Deployment target: on-premise server at head office, or a cloud VPS. Determines backup design and whether MinIO or S3 is used.</th><td>Phase 0</td></tr>
+            <tr><td class="num-col">3</td><th>Single company, or should multi-company be possible later? My recommendation is to carry the column regardless.</th><td>Phase 1</td></tr>
+            <tr><td class="num-col">4</td><th>Branch and hub list with addresses and coordinates, and the current org chart of who does what.</th><td>Phase 1</td></tr>
+            <tr><td class="num-col">5</td><th>Scanner and thermal printer models to standardise on.</th><td>Phase 1</td></tr>
+            <tr><td class="num-col">6</td><th>SMS and WhatsApp provider — and start DLT registration immediately.</th><td>Phase 1</td></tr>
+            <tr><td class="num-col">7</td><th>Is e-way bill generation done in this system, or does the team continue on the government portal? Changes Phase 3 materially.</th><td>Phase 3</td></tr>
+            <tr><td class="num-col">8</td><th>GPS provider(s) currently fitted, and whether API access is contracted.</th><td>Phase 7</td></tr>
+            <tr><td class="num-col">9</td><th>Ten representative customer rate contracts, including the most complicated one you have.</th><td>Phase 6</td></tr>
+            <tr><td class="num-col">10</td><th>Should invoices post to AccuBooks or Tally, and in which direction does the customer master flow?</th><td>Phase 6</td></tr>
+            <tr><td class="num-col">11</td><th>COD remittance cycle and who bears the collection fee.</th><td>Phase 4</td></tr>
+            <tr><td class="num-col">12</td><th>Historical data: how much of the existing shipment history migrates, and from what system?</th><td>Hardening</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="colophon">
+      <p><strong>City Logistics Blueprint</strong> · Business Requirements &amp; Technical Plan · version 1.0 · 25 August 2026.</p>
+      <p>Scope covers items 1–54 of the requirement brief. Estimates assume the team and conditions in §C.4. This document is the acceptance baseline: anything not described here is out of scope until it is added here.</p>
+    </div>
+
+  </main>
+</div>

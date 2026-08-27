@@ -1,0 +1,157 @@
+// ============================================================
+// CUSTOMER PORTAL & COMPLAINTS  (Phase 5)
+//
+// Portal logins are deliberately a separate model from staff `User`.
+// A customer must never be reachable through a staff permission check,
+// and vice versa — one table with a "type" column is how that boundary
+// gets crossed by accident six months later.
+// ============================================================
+
+enum CustomerUserRole {
+  OWNER
+  MEMBER
+  VIEWER
+}
+
+model CustomerUser {
+  id           String           @id @default(cuid())
+  orgId        String
+  customerId   String
+  name         String
+  /// Scoped like staff `User.email`: a consignee may be a customer of two
+  /// carriers on the platform, so the address identifies them within one
+  /// tenant rather than across the product.
+  email        String
+  mobile       String?
+  passwordHash String?
+  role         CustomerUserRole @default(MEMBER)
+
+  /// Restricts what this login can see to specific branches of their own
+  /// account — a plant manager sees their plant, not the whole group.
+  visibleBranchIds String[] @default([])
+
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(true)
+  lastLoginAt        DateTime?
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  invitedAt          DateTime?
+  acceptedAt         DateTime?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+  deletedAt   DateTime?
+
+  customer        Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  complaints      Complaint[]
+  messages        ComplaintMessage[]
+  batches         BulkUploadBatch[]
+  bookedShipments Shipment[]         @relation("ShipmentBookedByCustomer")
+  shipmentEvents  ShipmentEvent[]
+
+  @@unique([orgId, email])
+  @@index([customerId, isActive])
+  @@map("customer_user")
+}
+
+enum ComplaintCategory {
+  DELAY
+  DAMAGE
+  MISSING
+  WRONG_DELIVERY
+  BILLING
+  POD_ISSUE
+  PICKUP_ISSUE
+  BEHAVIOUR
+  OTHER
+}
+
+enum ComplaintStatus {
+  OPEN
+  ASSIGNED
+  INVESTIGATING
+  ACTION_TAKEN
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+enum ComplaintPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+model Complaint {
+  id       String            @id @default(cuid())
+  orgId    String
+  /// Allocated from a per-org NumberSeries, so two tenants reach the same
+  /// number by construction — it is only unique within the org.
+  number   String
+  category ComplaintCategory
+  priority ComplaintPriority @default(NORMAL)
+  status   ComplaintStatus   @default(OPEN)
+
+  subject     String
+  description String
+
+  shipmentId String?
+  customerId String?
+  branchId   String?
+
+  /// Whichever side raised it. Exactly one of these is set.
+  raisedByUserId         String?
+  raisedByCustomerUserId String?
+
+  assignedToId    String?
+  /// Response and resolution deadlines from the complaint SLA.
+  respondBy       DateTime?
+  resolveBy       DateTime?
+  firstResponseAt DateTime?
+  resolvedAt      DateTime?
+  resolution      String?
+  closedAt        DateTime?
+  reopenedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  shipment             Shipment?          @relation(fields: [shipmentId], references: [id])
+  customer             Customer?          @relation(fields: [customerId], references: [id])
+  branch               Branch?            @relation(fields: [branchId], references: [id])
+  assignedTo           User?              @relation("ComplaintAssignee", fields: [assignedToId], references: [id])
+  raisedByCustomerUser CustomerUser?      @relation(fields: [raisedByCustomerUserId], references: [id])
+  messages             ComplaintMessage[]
+
+  @@unique([orgId, number])
+  @@index([status, priority, createdAt])
+  @@index([customerId, status])
+  @@index([shipmentId])
+  @@index([assignedToId, status])
+  @@map("complaint")
+}
+
+model ComplaintMessage {
+  id          String @id @default(cuid())
+  complaintId String
+  body        String
+
+  authorUserId         String?
+  authorCustomerUserId String?
+  /// Internal notes are never shown in the customer portal. This flag is
+  /// the only thing standing between an ops aside and the customer
+  /// reading it, so it defaults to the safe value.
+  isInternal           Boolean @default(true)
+  attachmentId         String?
+
+  createdAt DateTime @default(now())
+
+  complaint          Complaint     @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  authorUser         User?         @relation("ComplaintAuthor", fields: [authorUserId], references: [id])
+  authorCustomerUser CustomerUser? @relation(fields: [authorCustomerUserId], references: [id])
+
+  @@index([complaintId, createdAt])
+  @@map("complaint_message")
+}

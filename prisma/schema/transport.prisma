@@ -1,0 +1,259 @@
+// ============================================================
+// TRANSPORT  (Phase 3)
+//
+// A Trip is the physical movement of a vehicle. A Manifest is the
+// document listing what is on it for one leg. PTL and courier need
+// both; FTL binds one shipment to one trip and skips the manifest
+// entirely — see docs/BRD.html §A.7.
+// ============================================================
+
+enum TripStatus {
+  PLANNED
+  VEHICLE_REPORTED
+  LOADING
+  DISPATCHED
+  IN_TRANSIT
+  ARRIVED
+  UNLOADING
+  COMPLETED
+  CANCELLED
+}
+
+model Trip {
+  id     String     @id @default(cuid())
+  orgId  String
+  number String
+  status TripStatus @default(PLANNED)
+
+  vehicleId String
+  driverId  String?
+  vendorId  String?
+  routeId   String?
+
+  originBranchId      String
+  destinationBranchId String
+
+  plannedDepartureAt DateTime?
+  actualDepartureAt  DateTime?
+  plannedArrivalAt   DateTime?
+  actualArrivalAt    DateTime?
+
+  startOdometerKm Int?
+  endOdometerKm   Int?
+  distanceKm      Decimal? @db.Decimal(10, 2)
+
+  /// FTL only: the single consignment this trip exists for.
+  ftlShipmentId String?
+
+  /// Seal applied at gate-out; a broken seal on arrival is an exception.
+  sealNumber   String?
+  sealBrokenBy String?
+
+  freightPayable Decimal? @db.Decimal(14, 2)
+  advancePaid    Decimal? @db.Decimal(14, 2)
+
+  remarks     String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+  closedAt    DateTime?
+
+  vehicle           Vehicle   @relation(fields: [vehicleId], references: [id])
+  driver            Driver?   @relation(fields: [driverId], references: [id])
+  vendor            Vendor?   @relation(fields: [vendorId], references: [id])
+  originBranch      Branch    @relation("TripOriginBranch", fields: [originBranchId], references: [id])
+  destinationBranch Branch    @relation("TripDestinationBranch", fields: [destinationBranchId], references: [id])
+  route             Route?    @relation(fields: [routeId], references: [id])
+  ftlShipment       Shipment? @relation("FtlTrip", fields: [ftlShipmentId], references: [id])
+
+  manifests Manifest[]
+  events    TripEvent[]
+  expenses  TripExpense[]
+
+  @@unique([orgId, number])
+  @@index([status, plannedDepartureAt])
+  @@index([vehicleId, status])
+  @@index([driverId, status])
+  @@map("trip")
+}
+
+model TripEvent {
+  id         String   @id @default(cuid())
+  tripId     String
+  eventType  String
+  occurredAt DateTime @default(now())
+  branchId   String?
+  userId     String?
+  latitude   Decimal? @db.Decimal(10, 7)
+  longitude  Decimal? @db.Decimal(10, 7)
+  odometerKm Int?
+  remarks    String?
+  payload    Json?
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId, occurredAt])
+  @@map("trip_event")
+}
+
+enum ManifestStatus {
+  DRAFT
+  CLOSED
+  DISPATCHED
+  RECEIVED
+  RECONCILED
+  CANCELLED
+}
+
+/// The document for one leg of a trip.
+model Manifest {
+  id     String         @id @default(cuid())
+  orgId  String
+  number String
+  status ManifestStatus @default(DRAFT)
+
+  tripId              String?
+  originBranchId      String
+  destinationBranchId String
+
+  /// Totals are denormalised so a dispatcher can see utilisation without
+  /// summing hundreds of lines on every render.
+  totalShipments Int     @default(0)
+  totalPackages  Int     @default(0)
+  totalWeight    Decimal @default(0) @db.Decimal(12, 3)
+  /// Cubic feet, summed from package dimensions. Without it, truck
+  /// utilisation can only ever answer half the question — a light,
+  /// bulky load fills a vehicle long before it reaches its weight limit.
+  totalVolumeCft Decimal @default(0) @db.Decimal(12, 3)
+
+  closedAt     DateTime?
+  closedById   String?
+  dispatchedAt DateTime?
+  receivedAt   DateTime?
+  receivedById String?
+
+  remarks     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+
+  trip              Trip?            @relation(fields: [tripId], references: [id])
+  originBranch      Branch           @relation("ManifestOriginBranch", fields: [originBranchId], references: [id])
+  destinationBranch Branch           @relation("ManifestDestinationBranch", fields: [destinationBranchId], references: [id])
+  lines             ManifestLine[]
+  receipts          InboundReceipt[]
+
+  @@unique([orgId, number])
+  @@index([status, createdAt])
+  @@index([originBranchId, status])
+  @@index([destinationBranchId, status])
+  @@map("manifest")
+}
+
+model ManifestLine {
+  id           String   @id @default(cuid())
+  manifestId   String
+  shipmentId   String
+  /// Snapshot at the time of manifesting — what the dispatching branch
+  /// says it sent. The receiving scan is compared against this.
+  packageCount Int
+  weight       Decimal  @db.Decimal(10, 3)
+  volumeCft    Decimal  @default(0) @db.Decimal(10, 3)
+  addedAt      DateTime @default(now())
+  addedById    String?
+
+  manifest Manifest @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+  shipment Shipment @relation(fields: [shipmentId], references: [id])
+
+  @@unique([manifestId, shipmentId])
+  @@index([shipmentId])
+  @@map("manifest_line")
+}
+
+enum LoadingSheetStatus {
+  OPEN
+  CLOSED
+}
+
+/// Scan-to-load record. The sheet cannot close while a package is
+/// scanned but not loaded, or loaded but not scanned.
+model LoadingSheet {
+  id         String             @id @default(cuid())
+  tripId     String?
+  manifestId String?
+  branchId   String
+  status     LoadingSheetStatus @default(OPEN)
+  openedAt   DateTime           @default(now())
+  openedById String?
+  closedAt   DateTime?
+  closedById String?
+
+  branch Branch             @relation(fields: [branchId], references: [id])
+  lines  LoadingSheetLine[]
+
+  @@index([branchId, status])
+  @@map("loading_sheet")
+}
+
+model LoadingSheetLine {
+  id             String   @id @default(cuid())
+  loadingSheetId String
+  packageId      String
+  barcode        String
+  scannedAt      DateTime @default(now())
+  scannedById    String?
+
+  loadingSheet LoadingSheet    @relation(fields: [loadingSheetId], references: [id], onDelete: Cascade)
+  package      ShipmentPackage @relation(fields: [packageId], references: [id])
+
+  @@unique([loadingSheetId, packageId])
+  @@map("loading_sheet_line")
+}
+
+model TripExpense {
+  id           String    @id @default(cuid())
+  tripId       String
+  category     String
+  amount       Decimal   @db.Decimal(14, 2)
+  incurredOn   DateTime  @db.Date
+  paidBy       String?
+  billAssetId  String?
+  isApproved   Boolean   @default(false)
+  approvedById String?
+  approvedAt   DateTime?
+  remarks      String?
+  createdAt    DateTime  @default(now())
+  createdById  String?
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+  @@map("trip_expense")
+}
+
+/// E-way bill Part-B carries the vehicle number, which changes at every
+/// transshipment — so this is a log, not a single field.
+model EwayBillRecord {
+  id              String    @id @default(cuid())
+  /// shipmentId below is a bare column with no declared relation, so this
+  /// log has no foreign key to inherit isolation through — it has to carry
+  /// the tenant itself.
+  orgId           String
+  shipmentId      String
+  ewayBillNumber  String
+  action          String
+  vehicleNumber   String?
+  fromPlace       String?
+  validUpto       DateTime?
+  requestPayload  Json?
+  responsePayload Json?
+  isSuccess       Boolean   @default(false)
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+  createdById     String?
+
+  @@index([orgId])
+  @@index([shipmentId, createdAt])
+  @@index([ewayBillNumber])
+  @@map("eway_bill_record")
+}

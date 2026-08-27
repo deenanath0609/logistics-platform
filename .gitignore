@@ -1,0 +1,44 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# generated
+/src/generated
+
+# testing
+/coverage
+
+# misc
+.DS_Store
+*.pem
+*.tsbuildinfo
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env
+.env
+.env*.local
+!.env.example
+
+# Local object store standing in for S3 until the storage adapter lands.
+# POD photos and signatures are customer data — they must never be committed.
+/storage
+/public/uploads
+
+# editors
+.vscode/*
+!.vscode/extensions.json
+.idea

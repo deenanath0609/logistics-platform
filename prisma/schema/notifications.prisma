@@ -1,0 +1,193 @@
+// ============================================================
+// NOTIFICATIONS & WEBHOOKS  (Phase 5)
+//
+// Templates are master data, not code. Every send is logged with its
+// provider response, because "the customer says they never got the SMS"
+// is a question the system has to be able to answer.
+// ============================================================
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+  WHATSAPP
+  PUSH
+  IN_APP
+}
+
+enum RecipientKind {
+  CONSIGNOR
+  CONSIGNEE
+  CUSTOMER_USER
+  STAFF
+  BRANCH
+}
+
+model NotificationTemplate {
+  id        String              @id @default(cuid())
+  orgId     String
+  code      String
+  channel   NotificationChannel
+  /// The outbox event this template answers, e.g. "shipment.delivered".
+  eventType String
+  name      String
+  language  String              @default("en")
+
+  /// Email only.
+  subject   String?
+  /// Body with {{placeholders}}; validated against `variables` on save.
+  body      String
+  /// Declared placeholder names, so a template referencing {{foo}} that
+  /// nothing supplies is caught at save time rather than at send time.
+  variables String[] @default([])
+
+  recipientKind RecipientKind @default(CONSIGNOR)
+
+  /// Indian transactional SMS requires the header and each template to be
+  /// registered on DLT. Sends without these are rejected by the operator,
+  /// so they belong on the template, not in a config file.
+  dltTemplateId String?
+  dltSenderId   String?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs NotificationLog[]
+
+  // Never shared between tenants: each registers its own DLT template and
+  // sender id, so the same code is a different approved body per org —
+  // see ADR 001 §3.
+  @@unique([orgId, code, channel, language])
+  @@index([eventType, isActive])
+  @@map("notification_template")
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  SKIPPED
+  BOUNCED
+}
+
+/// One row per attempted send. Retained so failed deliveries are visible
+/// and per-customer notification spend is measurable.
+model NotificationLog {
+  id         String              @id @default(cuid())
+  orgId      String
+  templateId String?
+  channel    NotificationChannel
+  eventType  String
+
+  /// Phone number or email. Masked in exports.
+  recipient     String
+  recipientKind RecipientKind
+  subject       String?
+  body          String
+
+  status           NotificationStatus @default(QUEUED)
+  attempts         Int                @default(0)
+  providerRef      String?
+  providerResponse Json?
+  /// Some providers bill per segment; kept for cost reporting.
+  segments         Int?
+  costAmount       Decimal?           @db.Decimal(10, 4)
+  error            String?
+
+  shipmentId String?
+  customerId String?
+  branchId   String?
+
+  queuedAt    DateTime  @default(now())
+  sentAt      DateTime?
+  deliveredAt DateTime?
+
+  template NotificationTemplate? @relation(fields: [templateId], references: [id])
+  shipment Shipment?             @relation(fields: [shipmentId], references: [id])
+
+  @@index([orgId, queuedAt])
+  @@index([status, queuedAt])
+  @@index([shipmentId])
+  @@index([customerId, queuedAt])
+  @@index([recipient, queuedAt])
+  @@map("notification_log")
+}
+
+/// Opt-outs. Absence of a row means "send it" — an explicit row turns a
+/// channel off for one event type.
+model NotificationPreference {
+  id             String              @id @default(cuid())
+  orgId          String
+  customerId     String?
+  customerUserId String?
+  userId         String?
+  eventType      String
+  channel        NotificationChannel
+  enabled        Boolean             @default(true)
+  updatedAt      DateTime            @updatedAt
+  createdAt      DateTime            @default(now())
+
+  @@unique([orgId, customerId, customerUserId, userId, eventType, channel])
+  @@index([customerId])
+  @@map("notification_preference")
+}
+
+// ────────────────────────────────────────────────────────────
+// Webhooks — pushing events to a corporate customer's own system
+// ────────────────────────────────────────────────────────────
+
+model WebhookSubscription {
+  id           String    @id @default(cuid())
+  orgId        String
+  customerId   String?
+  name         String
+  url          String
+  /// Used to sign the payload so the receiver can verify it came from us.
+  secret       String
+  /// Event names subscribed to; "*" for everything.
+  events       String[]  @default([])
+  isActive     Boolean   @default(true)
+  /// Consecutive failures. A subscription that keeps failing is paused
+  /// rather than retried forever against a dead endpoint.
+  failureCount Int       @default(0)
+  pausedAt     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  createdById  String?
+
+  customer   Customer?         @relation(fields: [customerId], references: [id])
+  deliveries WebhookDelivery[]
+
+  @@index([customerId, isActive])
+  @@map("webhook_subscription")
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  DEAD
+}
+
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  subscriptionId String
+  eventType      String
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  maxAttempts    Int                   @default(8)
+  nextAttemptAt  DateTime              @default(now())
+  responseStatus Int?
+  responseBody   String?
+  error          String?
+  deliveredAt    DateTime?
+  createdAt      DateTime              @default(now())
+
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([subscriptionId, createdAt])
+  @@map("webhook_delivery")
+}

@@ -1,0 +1,176 @@
+// ============================================================
+// GPS, GEOFENCING & ETA  (Phase 7)
+//
+// A layer over the operation, deliberately isolated so a telematics
+// provider can be swapped without touching shipment logic.
+//
+// NOTE: PostGIS is not installed on the current database, so geofence
+// evaluation uses great-circle distance in application code rather than
+// ST_DWithin. Circles work exactly; polygons use a ray-cast test. When
+// PostGIS lands, the query moves into SQL and nothing else changes.
+// ============================================================
+
+model TrackingProviderConfig {
+  id                  String    @id @default(cuid())
+  orgId               String
+  code                String
+  name                String
+  /// "poll" or "webhook".
+  mode                String    @default("poll")
+  baseUrl             String?
+  /// Never returned to the browser.
+  apiKey              String?
+  webhookSecret       String?
+  pollIntervalSeconds Int       @default(30)
+  isActive            Boolean   @default(true)
+  lastPolledAt        DateTime?
+  lastError           String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([orgId, code])
+  @@map("tracking_provider_config")
+}
+
+// The four models below each carry their own `orgId`. None of them
+// declares a relation to a tenant-owned model, so there is nothing for
+// them to inherit isolation through.
+
+/// Raw positions. High volume, low value after a few months — retained
+/// hot for 90 days then downsampled.
+model GpsPing {
+  id          String   @id @default(cuid())
+  orgId       String
+  deviceId    String
+  vehicleId   String?
+  latitude    Decimal  @db.Decimal(10, 7)
+  longitude   Decimal  @db.Decimal(10, 7)
+  speedKmph   Decimal? @db.Decimal(6, 2)
+  heading     Int?
+  ignition    Boolean?
+  odometerKm  Int?
+  /// Device clock, from the provider.
+  recordedAt  DateTime
+  /// When we ingested it.
+  receivedAt  DateTime @default(now())
+  provider    String?
+  providerRef String?
+
+  @@unique([orgId, deviceId, recordedAt])
+  @@index([vehicleId, recordedAt])
+  @@index([recordedAt])
+  @@map("gps_ping")
+}
+
+/// Latest known position per vehicle. Read by the live map, so it is a
+/// single row per vehicle rather than a scan of the ping table.
+model VehicleLocation {
+  vehicleId  String   @id
+  orgId      String
+  deviceId   String?
+  latitude   Decimal  @db.Decimal(10, 7)
+  longitude  Decimal  @db.Decimal(10, 7)
+  speedKmph  Decimal? @db.Decimal(6, 2)
+  heading    Int?
+  ignition   Boolean?
+  recordedAt DateTime
+  updatedAt  DateTime @updatedAt
+
+  /// Fences the vehicle is currently inside, so enter/exit is a set
+  /// difference rather than a re-test of every fence.
+  insideGeofenceIds String[] @default([])
+  /// Consecutive pings agreeing with the pending change, for debounce.
+  pendingFenceId    String?
+  pendingCount      Int      @default(0)
+
+  /// Nearest known place, for a human-readable "last seen".
+  nearestBranchId     String?
+  distanceToNearestKm Decimal? @db.Decimal(8, 2)
+
+  @@index([orgId])
+  @@index([recordedAt])
+  @@map("vehicle_location")
+}
+
+enum GeofenceDirection {
+  ENTER
+  EXIT
+}
+
+model GeofenceEvent {
+  id           String            @id @default(cuid())
+  geofenceId   String
+  vehicleId    String
+  tripId       String?
+  direction    GeofenceDirection
+  latitude     Decimal           @db.Decimal(10, 7)
+  longitude    Decimal           @db.Decimal(10, 7)
+  occurredAt   DateTime
+  recordedAt   DateTime          @default(now())
+  /// How long the vehicle stayed, filled in on the matching EXIT.
+  dwellMinutes Int?
+  /// True when this generated shipment arrival events.
+  propagated   Boolean           @default(false)
+
+  geofence Geofence @relation(fields: [geofenceId], references: [id])
+
+  @@index([vehicleId, occurredAt])
+  @@index([geofenceId, occurredAt])
+  @@map("geofence_event")
+}
+
+enum TrackingAlertKind {
+  ROUTE_DEVIATION
+  STOPPAGE
+  SIGNAL_LOST
+  OVERSPEED
+  NIGHT_DRIVING
+}
+
+/// Deviations, stoppages and signal loss. The absence of data is itself
+/// an operational signal, which is why SIGNAL_LOST is a first-class kind.
+model TrackingAlert {
+  id              String            @id @default(cuid())
+  orgId           String
+  kind            TrackingAlertKind
+  vehicleId       String
+  tripId          String?
+  latitude        Decimal?          @db.Decimal(10, 7)
+  longitude       Decimal?          @db.Decimal(10, 7)
+  /// Metres off the planned polyline, for a deviation.
+  deviationMetres Int?
+  /// Minutes stationary, for a stoppage; minutes silent, for signal loss.
+  durationMinutes Int?
+  speedKmph       Decimal?          @db.Decimal(6, 2)
+  detectedAt      DateTime
+  resolvedAt      DateTime?
+  exceptionId     String?
+  details         Json?
+  createdAt       DateTime          @default(now())
+
+  @@index([orgId])
+  @@index([vehicleId, detectedAt])
+  @@index([kind, resolvedAt])
+  @@map("tracking_alert")
+}
+
+/// Derived arrival estimates, kept so reports do not recompute them and
+/// so "what did we promise?" is answerable after the fact.
+model EtaSnapshot {
+  id                 String   @id @default(cuid())
+  orgId              String
+  tripId             String
+  shipmentId         String?
+  computedAt         DateTime @default(now())
+  estimatedArrivalAt DateTime
+  remainingKm        Decimal? @db.Decimal(10, 2)
+  averageSpeedKmph   Decimal? @db.Decimal(6, 2)
+  /// "gps", "schedule" — how the estimate was reached.
+  method             String   @default("gps")
+  confidence         String?
+
+  @@index([orgId])
+  @@index([tripId, computedAt])
+  @@index([shipmentId, computedAt])
+  @@map("eta_snapshot")
+}

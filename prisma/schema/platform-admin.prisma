@@ -1,0 +1,203 @@
+// ============================================================
+// PLATFORM OPERATOR  (Phase 9 — white-label multi-tenancy)
+//
+// The operator of the platform is not a user of any tenant. Keeping
+// `PlatformAdmin` separate from `User` and `CustomerUser` is the same
+// judgement made for the customer portal: one table with a "type"
+// column is how, a year from now, a support login quietly satisfies a
+// tenant permission check.
+//
+// Three populations, three tables, no shared identity:
+//   PlatformAdmin — runs the platform, sees every tenant
+//   User          — staff of one tenant
+//   CustomerUser  — a customer of one tenant
+// ============================================================
+
+enum PlatformRole {
+  /// Everything, including creating and suspending tenants.
+  OWNER
+  /// Read tenants, open support sessions, no billing or provisioning.
+  SUPPORT
+  /// Plans, invoices and usage; no operational data.
+  BILLING
+  /// Read-only across the platform.
+  VIEWER
+}
+
+model PlatformAdmin {
+  id           String       @id @default(cuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  role         PlatformRole @default(VIEWER)
+
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(true)
+  lastLoginAt        DateTime?
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  auditLogs      PlatformAuditLog[]
+  impersonations ImpersonationGrant[]
+
+  @@index([isActive])
+  @@map("platform_admin")
+}
+
+enum TenantStatus {
+  /// Provisioned but not yet handed over.
+  PROVISIONING
+  TRIAL
+  ACTIVE
+  /// Reachable but read-only — usually non-payment.
+  SUSPENDED
+  /// Sign-in refused entirely. Data retained.
+  CLOSED
+}
+
+/// A commercial plan. Limits are enforced at the point of use, not by a
+/// nightly job, so a tenant is told when they hit one rather than
+/// discovering it in an invoice.
+model TenantPlan {
+  id                   String   @id @default(cuid())
+  code                 String   @unique
+  name                 String
+  /// Null means unlimited. Zero means the feature is off.
+  maxUsers             Int?
+  maxBranches          Int?
+  maxShipmentsPerMonth Int?
+  maxPortalUsers       Int?
+  /// Feature keys this plan switches on, e.g. "gps", "api", "webhooks".
+  features             String[] @default([])
+
+  monthlyPrice Decimal? @db.Decimal(12, 2)
+  currency     String   @default("INR")
+
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organizations Organization[]
+
+  @@map("tenant_plan")
+}
+
+/// Cross-tenant record of what the operator did.
+///
+/// Deliberately separate from `AuditLog`: that table belongs to a tenant
+/// and a tenant may read it. Operator actions — suspending a company,
+/// opening a support session — are not a tenant's business to browse,
+/// and must survive even if the tenant is deleted.
+///
+/// Append-only, enforced by trigger like the others.
+model PlatformAuditLog {
+  id              String   @id @default(cuid())
+  platformAdminId String?
+  action          String
+  /// Kept as a plain column, not a relation: this row must outlive the
+  /// tenant it describes.
+  targetOrgId     String?
+  targetOrgSlug   String?
+  entity          String?
+  entityId        String?
+  before          Json?
+  after           Json?
+  reason          String?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime @default(now())
+
+  platformAdmin PlatformAdmin? @relation(fields: [platformAdminId], references: [id])
+
+  @@index([targetOrgId, createdAt])
+  @@index([platformAdminId, createdAt])
+  @@index([createdAt])
+  @@map("platform_audit_log")
+}
+
+/// Time-boxed permission for an operator to act inside a tenant.
+///
+/// Support will need to see what a customer sees. That is legitimate and
+/// it is also the most dangerous capability in the system, so it is a
+/// grant with a reason, an expiry, and its own audit trail — never an
+/// ambient power attached to a role.
+model ImpersonationGrant {
+  id              String  @id @default(cuid())
+  platformAdminId String
+  orgId           String
+  /// The tenant user whose view is being adopted. Null means read-only
+  /// tenant-wide access rather than acting as a specific person.
+  asUserId        String?
+  reason          String
+  /// Read-only unless someone deliberately asks for write.
+  allowWrites     Boolean @default(false)
+
+  startedAt DateTime  @default(now())
+  expiresAt DateTime
+  endedAt   DateTime?
+  endedBy   String?
+
+  ipAddress String?
+
+  platformAdmin PlatformAdmin @relation(fields: [platformAdminId], references: [id])
+
+  @@index([platformAdminId, startedAt])
+  @@index([orgId, startedAt])
+  @@index([expiresAt])
+  @@map("impersonation_grant")
+}
+
+/// Daily counts per tenant. Written by a scheduled pass so plan limits,
+/// billing and "is this tenant actually using it?" are answerable without
+/// scanning operational tables across every org.
+model TenantUsageSnapshot {
+  id     String   @id @default(cuid())
+  orgId  String
+  onDate DateTime @db.Date
+
+  shipments     Int    @default(0)
+  deliveries    Int    @default(0)
+  activeUsers   Int    @default(0)
+  branches      Int    @default(0)
+  portalUsers   Int    @default(0)
+  notifications Int    @default(0)
+  apiCalls      Int    @default(0)
+  storageBytes  BigInt @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([orgId, onDate])
+  @@index([onDate])
+  @@map("tenant_usage_snapshot")
+}
+
+/// What a new tenant needs before it can be handed over.
+///
+/// Onboarding is a real process, not a SQL insert: geography and masters
+/// have to be seeded, a first owner invited, and — the long pole — DLT
+/// sender registration started, which takes one to three weeks of
+/// external approval per tenant. Tracking it here stops a tenant going
+/// live unable to send a delivery OTP.
+model TenantOnboardingTask {
+  id         String    @id @default(cuid())
+  orgId      String
+  key        String
+  label      String
+  /// Blocks handover when true.
+  isBlocking Boolean   @default(false)
+  isDone     Boolean   @default(false)
+  doneAt     DateTime?
+  doneBy     String?
+  notes      String?
+  sortOrder  Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@unique([orgId, key])
+  @@index([orgId, isDone])
+  @@map("tenant_onboarding_task")
+}

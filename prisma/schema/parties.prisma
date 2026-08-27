@@ -1,0 +1,126 @@
+// ============================================================
+// PARTIES — customers today, vendors in Phase 6
+// ============================================================
+
+enum CustomerType {
+  CORPORATE
+  RETAIL
+  WALK_IN
+}
+
+enum PaymentTerm {
+  PREPAID
+  CREDIT
+  CASH
+}
+
+model Customer {
+  id        String       @id @default(cuid())
+  orgId     String
+  code      String
+  name      String
+  legalName String?
+  type      CustomerType @default(CORPORATE)
+  /// Branch that owns the relationship — drives visibility for
+  /// branch-scoped staff.
+  branchId  String?
+
+  phone    String
+  altPhone String?
+  email    String?
+  gstin    String?
+  pan      String?
+
+  billingAddress String?
+  billingCityId  String?
+  billingPincode String?
+
+  /// Terms. Credit limit is enforced at booking from Phase 6; the columns
+  /// exist now so the data is captured from day one rather than
+  /// backfilled later.
+  paymentTerm PaymentTerm @default(CASH)
+  creditLimit Decimal?    @db.Decimal(14, 2)
+  creditDays  Int?
+  /// Blocks new bookings regardless of credit.
+  isBlocked   Boolean     @default(false)
+  blockReason String?
+
+  notes       String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+  deletedAt   DateTime?
+
+  branch         Branch?           @relation(fields: [branchId], references: [id])
+  billingCity    City?             @relation("CustomerBillingCity", fields: [billingCityId], references: [id])
+  addresses      CustomerAddress[]
+  contacts       CustomerContact[]
+  shipments      Shipment[]        @relation("ShipmentConsignor")
+  pickups        PickupRequest[]
+  codRemittances CodRemittance[]
+
+  // Phase 5
+  portalUsers CustomerUser[]
+  complaints  Complaint[]
+  webhooks    WebhookSubscription[]
+
+  // Phase 6
+  rateCards RateCard[]
+  invoices  Invoice[]
+  payments  Payment[]
+
+  @@unique([orgId, code])
+  @@index([branchId, isActive])
+  @@index([phone])
+  @@index([name])
+  @@map("customer")
+}
+
+enum AddressKind {
+  PICKUP
+  DELIVERY
+  BILLING
+}
+
+model CustomerAddress {
+  id          String      @id @default(cuid())
+  customerId  String
+  label       String
+  kind        AddressKind @default(PICKUP)
+  contactName String?
+  phone       String?
+  address     String
+  cityId      String
+  pincode     String
+  landmark    String?
+  latitude    Decimal?    @db.Decimal(10, 7)
+  longitude   Decimal?    @db.Decimal(10, 7)
+  isDefault   Boolean     @default(false)
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  customer Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  city     City            @relation(fields: [cityId], references: [id])
+  pickups  PickupRequest[]
+
+  @@index([customerId, kind])
+  @@map("customer_address")
+}
+
+model CustomerContact {
+  id          String   @id @default(cuid())
+  customerId  String
+  name        String
+  designation String?
+  phone       String?
+  email       String?
+  isPrimary   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("customer_contact")
+}

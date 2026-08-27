@@ -1,0 +1,258 @@
+// ============================================================
+// SLA, EXCEPTIONS & REPORTING  (Phase 8)
+//
+// The exception tower is the screen a duty manager runs the shift from.
+// Everything here exists so that "what is wrong right now, and whose
+// job is it?" has one answer.
+// ============================================================
+
+/// Transit commitment for a lane. Resolution is most-specific-first:
+/// service + city pair, then service + zone pair, then service default.
+model SlaPolicy {
+  id            String  @id @default(cuid())
+  orgId         String
+  code          String
+  name          String
+  serviceTypeId String?
+
+  originZoneId      String?
+  destinationZoneId String?
+  originCityId      String?
+  destinationCityId String?
+
+  /// The promise, in working hours.
+  transitHours    Int
+  /// Clock runs on the branch working calendar rather than wall time.
+  useWorkingHours Boolean @default(true)
+  /// Booked after the branch cut-off starts the clock next working day.
+  respectCutoff   Boolean @default(true)
+  /// Fraction elapsed at which a shipment is flagged at risk.
+  atRiskPercent   Int     @default(80)
+
+  priority  Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, code])
+  @@index([serviceTypeId, isActive])
+  @@map("sla_policy")
+}
+
+enum SlaState {
+  ON_TIME
+  AT_RISK
+  BREACHED
+  MET
+  NOT_APPLICABLE
+}
+
+/// The computed commitment for one shipment. Separate from Shipment so
+/// the SLA engine can rewrite it without touching the consignment, and
+/// so a policy change can be replayed over open shipments.
+model ShipmentSla {
+  shipmentId String   @id
+  policyId   String?
+  state      SlaState @default(ON_TIME)
+
+  /// When the clock started — pickup, or booking for walk-ins.
+  startedAt       DateTime
+  dueAt           DateTime
+  atRiskAt        DateTime?
+  /// Actual delivery, once it happens.
+  settledAt       DateTime?
+  /// Positive means late. Kept signed so "how early?" is answerable too.
+  varianceMinutes Int?
+
+  /// Inferred from the event log where possible: late dispatch, hub
+  /// dwell, failed attempt. Blank when nothing obvious explains it.
+  breachReason    String?
+  escalatedAt     DateTime?
+  escalationLevel Int       @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@index([state, dueAt])
+  @@index([dueAt])
+  @@map("shipment_sla")
+}
+
+enum ExceptionKind {
+  SLA_AT_RISK
+  SLA_BREACHED
+  NO_GPS_UPDATE
+  VEHICLE_STOPPED
+  ROUTE_DEVIATION
+  DELIVERY_FAILED
+  SHORT_RECEIVED
+  EXCESS_RECEIVED
+  DAMAGED
+  POD_PENDING
+  HUB_DWELL
+  COD_SHORTFALL
+  CUSTOMER_COMPLAINT
+  DOCUMENT_EXPIRED
+  OTHER
+}
+
+enum ExceptionPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum ExceptionStatus {
+  OPEN
+  ACKNOWLEDGED
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+  DISMISSED
+}
+
+/// One row per thing that is wrong. Nothing closes without a resolution
+/// note — an exception that vanishes silently teaches everyone to ignore
+/// the tower.
+model Exception {
+  id       String            @id @default(cuid())
+  orgId    String
+  number   String
+  kind     ExceptionKind
+  priority ExceptionPriority @default(NORMAL)
+  status   ExceptionStatus   @default(OPEN)
+
+  title  String
+  detail String?
+
+  shipmentId    String?
+  tripId        String?
+  vehicleId     String?
+  branchId      String?
+  /// The branch that owns the problem, which is not always where it
+  /// was noticed — a shortage belongs to the branch that dispatched.
+  ownerBranchId String?
+  assignedToId  String?
+
+  reasonCodeId String?
+
+  detectedAt      DateTime  @default(now())
+  /// Set by the escalation ladder.
+  escalateAt      DateTime?
+  escalationLevel Int       @default(0)
+  acknowledgedAt  DateTime?
+  resolvedAt      DateTime?
+  resolvedById    String?
+  resolution      String?
+  closedAt        DateTime?
+
+  /// Where it came from: "sla-scanner", "hub", "gps", "manual".
+  source    String  @default("system")
+  /// Stops a scanner raising the same exception every 15 minutes. Scoped
+  /// per tenant: the key is derived from the scan, so two organisations
+  /// can legitimately produce the same one.
+  dedupeKey String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  shipment   Shipment?         @relation(fields: [shipmentId], references: [id])
+  branch     Branch?           @relation(fields: [branchId], references: [id])
+  assignedTo User?             @relation("ExceptionAssignee", fields: [assignedToId], references: [id])
+  actions    ExceptionAction[]
+
+  @@unique([orgId, number])
+  @@unique([orgId, dedupeKey])
+  @@index([status, priority, detectedAt])
+  @@index([ownerBranchId, status])
+  @@index([assignedToId, status])
+  @@index([kind, status])
+  @@index([shipmentId])
+  @@map("exception")
+}
+
+model ExceptionAction {
+  id          String   @id @default(cuid())
+  exceptionId String
+  action      String
+  note        String?
+  userId      String?
+  createdAt   DateTime @default(now())
+
+  exception Exception @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+
+  @@index([exceptionId, createdAt])
+  @@map("exception_action")
+}
+
+/// Who gets told, and when, if nobody has acted.
+model EscalationRule {
+  id             String        @id @default(cuid())
+  orgId          String
+  kind           ExceptionKind
+  level          Int
+  /// Minutes since detection before this level fires.
+  afterMinutes   Int
+  /// Role code to notify, e.g. "OPS_MANAGER".
+  notifyRoleCode String?
+  notifyUserId   String?
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+
+  @@unique([orgId, kind, level])
+  @@map("escalation_rule")
+}
+
+// ────────────────────────────────────────────────────────────
+// Reporting
+// ────────────────────────────────────────────────────────────
+
+/// A filter set someone wants back tomorrow, optionally emailed on a
+/// schedule. The report itself is code; this is only the saved shape.
+model SavedReport {
+  id        String   @id @default(cuid())
+  orgId     String
+  /// Report key, e.g. "booking-register".
+  reportKey String
+  name      String
+  filters   Json
+  columns   String[] @default([])
+
+  ownerId  String?
+  /// Shared reports appear for everyone with the report permission.
+  isShared Boolean @default(false)
+
+  /// Cron-ish schedule; null means run on demand only.
+  schedule   String?
+  recipients String[]  @default([])
+  lastRunAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([reportKey, ownerId])
+  @@map("saved_report")
+}
+
+/// A record of what was exported and by whom. Bulk export of customer
+/// data is a sensitive action and has to leave a trail.
+model ReportRun {
+  id         String   @id @default(cuid())
+  /// Carries its own tenant key: `userId` is a bare string and there is no
+  /// relation here to inherit isolation through.
+  orgId      String
+  reportKey  String
+  filters    Json
+  format     String
+  rowCount   Int      @default(0)
+  durationMs Int?
+  userId     String?
+  createdAt  DateTime @default(now())
+
+  @@index([orgId])
+  @@index([reportKey, createdAt])
+  @@index([userId, createdAt])
+  @@map("report_run")
+}

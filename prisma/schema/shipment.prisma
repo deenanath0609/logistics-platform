@@ -1,0 +1,443 @@
+// ============================================================
+// SHIPMENT — the core of the system
+//
+// `Shipment.currentStatus` is a PROJECTION of `ShipmentEvent`, not a
+// field anyone writes directly. Only src/lib/shipment/state-machine.ts
+// may change it, and it does so in the same transaction that appends
+// the event which caused it. See docs/BRD.html §A.1.
+// ============================================================
+
+/// The main track. Exceptions do not replace these — a failed delivery
+/// attempt returns the shipment to RECEIVED_AT_HUB and raises a separate
+/// exception, so "still out with an agent" and "attempted once" stay
+/// distinguishable.
+enum ShipmentStatus {
+  BOOKED
+  PICKUP_ASSIGNED
+  PICKED_UP
+  RECEIVED_AT_ORIGIN
+  PROCESSED
+  MANIFESTED
+  DISPATCHED
+  IN_TRANSIT
+  ARRIVED_AT_HUB
+  RECEIVED_AT_HUB
+  ASSIGNED_FOR_DELIVERY
+  OUT_FOR_DELIVERY
+  DELIVERED
+  POD_UPLOADED
+  CLOSED
+  // Terminal side-branches
+  RTO_INITIATED
+  RTO_IN_TRANSIT
+  RTO_DELIVERED
+  LOST
+  CANCELLED
+}
+
+/// Every physical act someone performs. Status is derived from these.
+enum ShipmentEventType {
+  BOOKING_CREATED
+  BOOKING_AMENDED
+  PICKUP_ASSIGNED
+  PICKUP_ATTEMPTED
+  PICKUP_COMPLETED
+  INBOUND_SCAN
+  WEIGHT_CAPTURED
+  SORTED
+  MANIFEST_ADDED
+  MANIFEST_REMOVED
+  LOADED
+  GATE_OUT
+  IN_TRANSIT_PING
+  GEOFENCE_ENTER
+  GEOFENCE_EXIT
+  GATE_IN
+  UNLOADED
+  DISCREPANCY_RAISED
+  DAMAGE_RECORDED
+  HELD
+  HOLD_RELEASED
+  DELIVERY_ASSIGNED
+  RUN_STARTED
+  DELIVERY_ATTEMPTED
+  DELIVERED
+  COD_COLLECTED
+  POD_SYNCED
+  RTO_INITIATED
+  CANCELLED
+  CLOSED
+  STATUS_CORRECTED
+}
+
+/// Where an event came from. Reports must be able to separate a scan at
+/// the dock from a status somebody typed in.
+enum EventSource {
+  WEB
+  FIELD_APP
+  API
+  GPS
+  SYSTEM
+  IMPORT
+}
+
+enum PaymentType {
+  PAID
+  TO_PAY
+  TBB
+  COD
+}
+
+enum ShipmentPackageStatus {
+  PENDING
+  IN_NETWORK
+  DELIVERED
+  DAMAGED
+  MISSING
+  RETURNED
+}
+
+model Shipment {
+  id            String       @id @default(cuid())
+  orgId         String
+  /// The consignment note number printed on every document.
+  lrNumber      String
+  mode          ShipmentMode
+  serviceTypeId String
+
+  // ── Network position ────────────────────────────────────
+  bookingBranchId     String
+  originBranchId      String
+  destinationBranchId String
+  /// Where the goods physically are right now. Null before pickup.
+  currentBranchId     String?
+
+  // ── Status (projection — never written outside the state machine) ──
+  currentStatus   ShipmentStatus @default(BOOKED)
+  statusUpdatedAt DateTime       @default(now())
+  /// Failed delivery attempts so far. Drives the RTO threshold.
+  attemptCount    Int            @default(0)
+  isOnHold        Boolean        @default(false)
+  holdReasonId    String?
+
+  // ── Consignor ───────────────────────────────────────────
+  /// Null for a walk-in booking paid in cash.
+  consignorId      String?
+  consignorName    String
+  consignorCompany String?
+  consignorPhone   String
+  consignorEmail   String?
+  consignorAddress String
+  consignorCityId  String
+  consignorPincode String
+  consignorGstin   String?
+
+  // ── Consignee ───────────────────────────────────────────
+  consigneeName     String
+  consigneeCompany  String?
+  consigneePhone    String
+  consigneeEmail    String?
+  consigneeAddress  String
+  consigneeCityId   String
+  consigneePincode  String
+  consigneeLandmark String?
+  consigneeGstin    String?
+
+  // ── Goods ───────────────────────────────────────────────
+  packageCount        Int
+  packageTypeId       String?
+  /// Weighed at booking; revised at the hub, which is what bills.
+  actualWeight        Decimal  @db.Decimal(10, 3)
+  volumetricWeight    Decimal? @db.Decimal(10, 3)
+  /// max(actual, volumetric). The number the customer is charged on.
+  chargeableWeight    Decimal  @db.Decimal(10, 3)
+  declaredValue       Decimal? @db.Decimal(14, 2)
+  goodsDescription    String
+  specialInstructions String?
+  isFragile           Boolean  @default(false)
+
+  // ── Money ───────────────────────────────────────────────
+  paymentType     PaymentType @default(PAID)
+  codAmount       Decimal?    @db.Decimal(14, 2)
+  freightAmount   Decimal     @default(0) @db.Decimal(14, 2)
+  chargesTotal    Decimal     @default(0) @db.Decimal(14, 2)
+  taxAmount       Decimal     @default(0) @db.Decimal(14, 2)
+  grandTotal      Decimal     @default(0) @db.Decimal(14, 2)
+  /// GTA supplies are commonly reverse charge — the invoice must say so.
+  isReverseCharge Boolean     @default(false)
+
+  // ── References & compliance ─────────────────────────────
+  customerReference String?
+  ewayBillNumber    String?
+  ewayBillExpiry    DateTime?
+  invoiceNumber     String?
+  invoiceValue      Decimal?  @db.Decimal(14, 2)
+
+  // ── Lifecycle timestamps ────────────────────────────────
+  bookedAt               DateTime  @default(now())
+  bookedById             String?
+  /// Set when a customer booked this through the portal or the API.
+  /// Exactly one of `bookedById` / `bookedByCustomerUserId` is populated —
+  /// attributing a portal booking to a service principal would put the
+  /// wrong name on the chain of custody, and attribution cannot be
+  /// backfilled once the record exists.
+  bookedByCustomerUserId String?
+  pickupRequired         Boolean   @default(true)
+  pickedUpAt             DateTime?
+  dispatchedAt           DateTime?
+  expectedDeliveryAt     DateTime?
+  deliveredAt            DateTime?
+  closedAt               DateTime?
+  cancelledAt            DateTime?
+  cancelReasonId         String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  serviceType          ServiceType   @relation(fields: [serviceTypeId], references: [id])
+  packageType          PackageType?  @relation(fields: [packageTypeId], references: [id])
+  bookingBranch        Branch        @relation("ShipmentBookingBranch", fields: [bookingBranchId], references: [id])
+  originBranch         Branch        @relation("ShipmentOriginBranch", fields: [originBranchId], references: [id])
+  destinationBranch    Branch        @relation("ShipmentDestinationBranch", fields: [destinationBranchId], references: [id])
+  currentBranch        Branch?       @relation("ShipmentCurrentBranch", fields: [currentBranchId], references: [id])
+  consignor            Customer?     @relation("ShipmentConsignor", fields: [consignorId], references: [id])
+  consignorCity        City          @relation("ShipmentConsignorCity", fields: [consignorCityId], references: [id])
+  consigneeCity        City          @relation("ShipmentConsigneeCity", fields: [consigneeCityId], references: [id])
+  bookedBy             User?         @relation("ShipmentBookedBy", fields: [bookedById], references: [id])
+  bookedByCustomerUser CustomerUser? @relation("ShipmentBookedByCustomer", fields: [bookedByCustomerUserId], references: [id])
+  holdReason           ReasonCode?   @relation("ShipmentHoldReason", fields: [holdReasonId], references: [id])
+  cancelReason         ReasonCode?   @relation("ShipmentCancelReason", fields: [cancelReasonId], references: [id])
+
+  packages ShipmentPackage[]
+  charges  ShipmentCharge[]
+  events   ShipmentEvent[]
+  pickups  PickupRequest[]
+
+  // Phase 3
+  ftlTrips      Trip[]               @relation("FtlTrip")
+  manifestLines ManifestLine[]
+  scanRecords   ScanRecord[]
+  receiptLines  InboundReceiptLine[]
+  discrepancies ReceiptDiscrepancy[]
+
+  // Phase 4
+  deliveryTasks    DeliveryTask[]
+  deliveryAttempts DeliveryAttempt[]
+  pod              Pod?
+  codCollection    CodCollection?
+
+  // Phase 5
+  complaints       Complaint[]
+  notificationLogs NotificationLog[]
+
+  // Phase 6–8
+  freightCalculations FreightCalculation[]
+  invoiceLines        InvoiceLine[]
+  sla                 ShipmentSla?
+  exceptions          Exception[]
+
+  // The public tracking page resolves the tenant from the host before it
+  // looks anything up, so an LR number only has to be unique within a
+  // carrier.
+  @@unique([orgId, lrNumber])
+  @@index([currentStatus, bookedAt])
+  @@index([originBranchId, currentStatus])
+  @@index([destinationBranchId, currentStatus])
+  @@index([currentBranchId])
+  @@index([consignorId, bookedAt])
+  @@index([consigneePhone])
+  @@index([customerReference])
+  @@index([bookedAt])
+  @@map("shipment")
+}
+
+/// One row per physical package.
+///
+/// Shortage and damage detection is impossible without this: a manifest
+/// says 17 packages and the dock scans 15, and only package-level rows
+/// can say which two are missing.
+model ShipmentPackage {
+  id              String                @id @default(cuid())
+  shipmentId      String
+  sequence        Int
+  /// Printed as Code128, e.g. CL202608250001-03.
+  barcode         String                @unique
+  packageTypeId   String?
+  weight          Decimal?              @db.Decimal(10, 3)
+  lengthCm        Decimal?              @db.Decimal(8, 2)
+  breadthCm       Decimal?              @db.Decimal(8, 2)
+  heightCm        Decimal?              @db.Decimal(8, 2)
+  contents        String?
+  status          ShipmentPackageStatus @default(PENDING)
+  currentBranchId String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  shipment      Shipment        @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  packageType   PackageType?    @relation(fields: [packageTypeId], references: [id])
+  currentBranch Branch?         @relation("PackageCurrentBranch", fields: [currentBranchId], references: [id])
+  events        ShipmentEvent[]
+
+  loadingSheetLines LoadingSheetLine[]
+  scanRecords       ScanRecord[]
+  location          PackageLocation?
+
+  @@unique([shipmentId, sequence])
+  @@index([shipmentId])
+  @@index([currentBranchId, status])
+  @@map("shipment_package")
+}
+
+model ShipmentCharge {
+  id           String      @id @default(cuid())
+  shipmentId   String
+  chargeTypeId String
+  basis        ChargeBasis
+  rate         Decimal     @db.Decimal(12, 4)
+  quantity     Decimal     @db.Decimal(12, 3)
+  amount       Decimal     @db.Decimal(14, 2)
+  taxRateId    String?
+  taxPercent   Decimal?    @db.Decimal(6, 3)
+  taxAmount    Decimal     @default(0) @db.Decimal(14, 2)
+  /// True when a user overrode the calculated figure — always audited.
+  isManual     Boolean     @default(false)
+  remarks      String?
+  sortOrder    Int         @default(0)
+  createdAt    DateTime    @default(now())
+
+  shipment   Shipment   @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  chargeType ChargeType @relation(fields: [chargeTypeId], references: [id])
+  taxRate    TaxRate?   @relation(fields: [taxRateId], references: [id])
+
+  @@index([shipmentId])
+  @@map("shipment_charge")
+}
+
+/// APPEND-ONLY. The database grants no UPDATE or DELETE on this table.
+///
+/// A correction is a new STATUS_CORRECTED event carrying a reason code,
+/// never an edit — which is what makes the timeline answer a dispute six
+/// months later.
+model ShipmentEvent {
+  id         String            @id @default(cuid())
+  shipmentId String
+  /// Set when the event concerns one package rather than the consignment.
+  packageId  String?
+  eventType  ShipmentEventType
+
+  /// When the act happened, from the device clock. Timelines sort on this.
+  occurredAt        DateTime
+  /// When the server received it. Differs by hours after offline capture.
+  recordedAt        DateTime @default(now())
+  /// Device-vs-server clock offset at sync, in seconds. A large value
+  /// flags the event for review rather than silently trusting it.
+  clockDriftSeconds Int?
+
+  branchId       String?
+  userId         String?
+  /// The portal customer who caused this event, when it came from the
+  /// customer side rather than from staff.
+  customerUserId String?
+  vehicleId      String?
+  tripId         String?
+  manifestId     String?
+
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  deviceId  String?
+
+  reasonCodeId String?
+  remarks      String?
+  attachmentId String?
+
+  source         EventSource @default(WEB)
+  /// Client-generated UUID. The offline queue retries, so writes must be
+  /// safe to repeat.
+  idempotencyKey String      @unique
+  /// Event-specific detail — package counts, weights, previous status.
+  payload        Json?
+
+  /// Status the projection moved to because of this event, if any.
+  resultingStatus ShipmentStatus?
+
+  shipment     Shipment         @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  package      ShipmentPackage? @relation(fields: [packageId], references: [id])
+  branch       Branch?          @relation(fields: [branchId], references: [id])
+  user         User?            @relation(fields: [userId], references: [id])
+  customerUser CustomerUser?    @relation(fields: [customerUserId], references: [id])
+  reasonCode   ReasonCode?      @relation(fields: [reasonCodeId], references: [id])
+
+  @@index([shipmentId, occurredAt])
+  @@index([eventType, occurredAt])
+  @@index([branchId, occurredAt])
+  @@index([occurredAt])
+  @@map("shipment_event")
+}
+
+// ────────────────────────────────────────────────────────────
+// Bulk upload
+// ────────────────────────────────────────────────────────────
+
+enum BulkBatchStatus {
+  UPLOADED
+  VALIDATED
+  PARTIALLY_COMMITTED
+  COMMITTED
+  ABANDONED
+}
+
+enum BulkRowStatus {
+  PENDING
+  VALID
+  INVALID
+  COMMITTED
+  SKIPPED
+}
+
+model BulkUploadBatch {
+  id                       String          @id @default(cuid())
+  orgId                    String
+  branchId                 String
+  /// Set when a portal customer uploaded it rather than a branch clerk.
+  customerId               String?
+  fileName                 String
+  fileAssetId              String?
+  totalRows                Int             @default(0)
+  validRows                Int             @default(0)
+  invalidRows              Int             @default(0)
+  committedRows            Int             @default(0)
+  status                   BulkBatchStatus @default(UPLOADED)
+  uploadedById             String?
+  /// Set when a portal customer uploaded it rather than a branch clerk.
+  uploadedByCustomerUserId String?
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+
+  branch                 Branch          @relation(fields: [branchId], references: [id])
+  uploadedByCustomerUser CustomerUser?   @relation(fields: [uploadedByCustomerUserId], references: [id])
+  rows                   BulkUploadRow[]
+
+  @@index([branchId, createdAt])
+  @@map("bulk_upload_batch")
+}
+
+model BulkUploadRow {
+  id         String        @id @default(cuid())
+  batchId    String
+  rowNumber  Int
+  /// The row exactly as uploaded, so an operator can see what they sent.
+  raw        Json
+  status     BulkRowStatus @default(PENDING)
+  /// Field-keyed messages: { consigneePincode: "not serviceable" }
+  errors     Json?
+  shipmentId String?
+  lrNumber   String?
+  createdAt  DateTime      @default(now())
+
+  batch BulkUploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId, status])
+  @@map("bulk_upload_row")
+}

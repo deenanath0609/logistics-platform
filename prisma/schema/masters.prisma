@@ -1,0 +1,258 @@
+// ============================================================
+// OPERATIONAL MASTERS
+//
+// Everything operations must be able to change without a release:
+// service types, package types, charge heads, tax rates, reason
+// codes, and document number series.
+// ============================================================
+
+enum ShipmentMode {
+  FTL
+  PTL
+  COURIER
+}
+
+/// A sellable service, e.g. "Road Express PTL" or "Surface FTL".
+/// SLA hours per lane are attached in P8 (SlaPolicy).
+model ServiceType {
+  id                  String       @id @default(cuid())
+  orgId               String
+  code                String
+  name                String
+  mode                ShipmentMode
+  description         String?
+  /// Volumetric divisor: volumetric kg = (L × B × H in cm) / divisor.
+  /// Road freight in India commonly uses 4500 or 5000.
+  volumetricDivisor   Int          @default(5000)
+  /// Default transit hours when no lane-specific SLA is configured.
+  defaultTransitHours Int?
+  /// Whether COD may be offered on this service.
+  allowsCod           Boolean      @default(true)
+  allowsToPay         Boolean      @default(true)
+  /// Number of delivery attempts before RTO is proposed.
+  maxDeliveryAttempts Int          @default(3)
+  isActive            Boolean      @default(true)
+  sortOrder           Int          @default(0)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  shipments Shipment[]
+
+  @@unique([orgId, code])
+  @@index([mode, isActive])
+  @@map("service_type")
+}
+
+model PackageType {
+  id          String   @id @default(cuid())
+  orgId       String
+  code        String
+  name        String
+  description String?
+  /// Nudges the booking clerk toward the right handling instructions.
+  isFragile   Boolean  @default(false)
+  isStackable Boolean  @default(true)
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  shipments Shipment[]
+  packages  ShipmentPackage[]
+
+  @@unique([orgId, code])
+  @@map("package_type")
+}
+
+enum ChargeBasis {
+  FLAT
+  PER_KG
+  PER_PACKAGE
+  PER_KM
+  PER_HOUR
+  PERCENT_OF_FREIGHT
+  PERCENT_OF_DECLARED_VALUE
+  PERCENT_OF_COD
+}
+
+enum ChargeNature {
+  FREIGHT
+  SURCHARGE
+  HANDLING
+  STATUTORY
+  PENALTY
+  DISCOUNT
+}
+
+/// A billable head. Rate cards (P6) attach amounts to these; the
+/// booking screen renders one row per applicable charge type.
+model ChargeType {
+  id                String       @id @default(cuid())
+  orgId             String
+  code              String
+  name              String
+  nature            ChargeNature @default(SURCHARGE)
+  defaultBasis      ChargeBasis  @default(FLAT)
+  /// Included in the taxable value of the consignment note.
+  isTaxable         Boolean      @default(true)
+  taxRateId         String?
+  /// Shown to the customer on the invoice, or absorbed internally.
+  isCustomerVisible Boolean      @default(true)
+  isActive          Boolean      @default(true)
+  sortOrder         Int          @default(0)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  taxRate         TaxRate?         @relation(fields: [taxRateId], references: [id])
+  shipmentCharges ShipmentCharge[]
+  chargeRules     ChargeRule[]
+
+  @@unique([orgId, code])
+  @@map("charge_type")
+}
+
+enum TaxKind {
+  GST
+  IGST
+  CGST
+  SGST
+  CESS
+  TDS
+}
+
+model TaxRate {
+  id              String    @id @default(cuid())
+  orgId           String
+  code            String
+  name            String
+  kind            TaxKind   @default(GST)
+  ratePercent     Decimal   @db.Decimal(6, 3)
+  /// GTA services are commonly under reverse charge — the recipient
+  /// pays the tax, so the invoice must say so.
+  isReverseCharge Boolean   @default(false)
+  hsnSac          String?
+  effectiveFrom   DateTime  @db.Date
+  effectiveTo     DateTime? @db.Date
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  chargeTypes     ChargeType[]
+  shipmentCharges ShipmentCharge[]
+
+  @@unique([orgId, code])
+  @@index([kind, effectiveFrom])
+  @@map("tax_rate")
+}
+
+// ────────────────────────────────────────────────────────────
+// Reason codes
+// ────────────────────────────────────────────────────────────
+
+enum ReasonCategory {
+  PICKUP_FAILURE
+  DELIVERY_FAILURE
+  EXCEPTION
+  CANCELLATION
+  HOLD
+  DAMAGE
+  SHORTAGE
+  RTO
+  STATUS_CORRECTION
+}
+
+/// Operations owns this table. Adding a delivery failure reason or
+/// changing what it auto-triggers must never need a deployment.
+model ReasonCode {
+  id                String         @id @default(cuid())
+  orgId             String
+  category          ReasonCategory
+  code              String
+  name              String
+  description       String?
+  /// Does hitting this reason bill the customer?
+  isChargeable      Boolean        @default(false)
+  /// Auto-create a reattempt task when this reason is recorded.
+  triggersReattempt Boolean        @default(false)
+  /// Auto-open an exception in the control tower.
+  triggersException Boolean        @default(false)
+  /// Notify consignor / consignee automatically.
+  notifiesConsignor Boolean        @default(false)
+  notifiesConsignee Boolean        @default(false)
+  /// Photo is mandatory before the reason can be submitted.
+  requiresPhoto     Boolean        @default(false)
+  requiresRemarks   Boolean        @default(false)
+  isActive          Boolean        @default(true)
+  sortOrder         Int            @default(0)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  heldShipments      Shipment[]      @relation("ShipmentHoldReason")
+  cancelledShipments Shipment[]      @relation("ShipmentCancelReason")
+  shipmentEvents     ShipmentEvent[]
+  pickupAttempts     PickupAttempt[]
+
+  @@unique([orgId, category, code])
+  @@index([category, isActive])
+  @@map("reason_code")
+}
+
+// ────────────────────────────────────────────────────────────
+// Document numbering
+// ────────────────────────────────────────────────────────────
+
+enum SeriesDocument {
+  LR
+  MANIFEST
+  TRIP
+  PICKUP
+  DELIVERY_RUN
+  INVOICE
+  CREDIT_NOTE
+  DEBIT_NOTE
+  EXCEPTION
+  COMPLAINT
+  VENDOR_BILL
+  // These three are printed on documents a customer or a driver keeps,
+  // so they need the same advisory-locked series as everything else —
+  // counting rows within a financial year is not collision-safe.
+  PAYMENT
+  VENDOR_PAYMENT
+  SETTLEMENT
+}
+
+enum SeriesReset {
+  NEVER
+  DAILY
+  MONTHLY
+  FINANCIAL_YEAR
+}
+
+/// Counters are read under a Postgres advisory lock inside the
+/// creating transaction — never MAX(id)+1, which hands two clerks
+/// the same LR number on the first busy morning.
+model NumberSeries {
+  id           String         @id @default(cuid())
+  orgId        String
+  document     SeriesDocument
+  /// Null = one series for the whole network.
+  branchId     String?
+  /// Template tokens: {PREFIX} {BRANCH} {YYYY} {YY} {MM} {DD} {FY} {SEQ}
+  /// e.g. "{PREFIX}{YYYY}{MM}{DD}{SEQ}" → CL202608250001
+  pattern      String
+  prefix       String?
+  padding      Int            @default(4)
+  resetPolicy  SeriesReset    @default(DAILY)
+  currentValue Int            @default(0)
+  /// Period key the counter belongs to, e.g. "2026-08-25". When the
+  /// incoming key differs, the counter resets to 1.
+  periodKey    String?
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  branch Branch? @relation(fields: [branchId], references: [id])
+
+  @@unique([orgId, document, branchId])
+  @@map("number_series")
+}

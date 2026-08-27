@@ -1,0 +1,131 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { authorize, PermissionError } from "@/lib/auth/session";
+import {
+  createSettlement,
+  approveSettlement,
+  markSettlementPaid,
+  cancelSettlement,
+} from "@/lib/billing/settlement";
+import type { FinanceActionState } from "../action-state";
+
+const PATH = "/finance/settlements";
+
+function guard(error: unknown): FinanceActionState {
+  if (error instanceof PermissionError) {
+    return { error: "You do not have permission to do that." };
+  }
+  console.error("[finance/settlements]", error);
+  return { error: "Something went wrong. Nothing was saved." };
+}
+
+export async function prepareSettlementAction(
+  _prev: FinanceActionState,
+  formData: FormData,
+): Promise<FinanceActionState> {
+  try {
+    const actor = await authorize("expense.record");
+    const tripId = String(formData.get("tripId") ?? "");
+    if (!tripId) return { error: "Pick a trip." };
+
+    const deductionsRaw = formData.get("deductions");
+    const deductions = deductionsRaw ? Number(deductionsRaw) : 0;
+
+    const result = await createSettlement(
+      {
+        tripId,
+        deductions: Number.isFinite(deductions) ? deductions : 0,
+        deductionNote: (formData.get("deductionNote") as string) ?? null,
+        tripEarning: formData.get("tripEarning")
+          ? Number(formData.get("tripEarning"))
+          : undefined,
+      },
+      actor,
+    );
+
+    if (!result.ok) return { error: result.error };
+
+    revalidatePath(PATH);
+    return {
+      ok: true,
+      message: `${result.number} prepared — net payable ₹${result.netPayable.toFixed(2)}. It needs a second person to approve it.`,
+    };
+  } catch (error) {
+    return guard(error);
+  }
+}
+
+/** Sensitive: cash leaves the building on this. Audited with a reason. */
+export async function approveSettlementAction(
+  _prev: FinanceActionState,
+  formData: FormData,
+): Promise<FinanceActionState> {
+  try {
+    const actor = await authorize("settlement.approve");
+    const settlementId = String(formData.get("id") ?? "");
+    const reason = String(formData.get("reason") ?? "");
+
+    if (!settlementId) return { error: "Nothing selected." };
+    if (!reason.trim()) {
+      return {
+        error: "A reason is required.",
+        fieldErrors: { reason: "Say what you checked before releasing the payout." },
+      };
+    }
+
+    const result = await approveSettlement({ settlementId, reason }, actor);
+    if (!result.ok) return { error: result.error };
+
+    revalidatePath(PATH);
+    return { ok: true, message: `${result.number} approved for payout.` };
+  } catch (error) {
+    return guard(error);
+  }
+}
+
+export async function markSettlementPaidAction(
+  _prev: FinanceActionState,
+  formData: FormData,
+): Promise<FinanceActionState> {
+  try {
+    const actor = await authorize("payment.record");
+    const settlementId = String(formData.get("id") ?? "");
+    if (!settlementId) return { error: "Nothing selected." };
+
+    const result = await markSettlementPaid(
+      { settlementId, reference: (formData.get("reference") as string) ?? null },
+      actor,
+    );
+    if (!result.ok) return { error: result.error };
+
+    revalidatePath(PATH);
+    return { ok: true, message: "Marked as paid." };
+  } catch (error) {
+    return guard(error);
+  }
+}
+
+export async function cancelSettlementAction(
+  _prev: FinanceActionState,
+  formData: FormData,
+): Promise<FinanceActionState> {
+  try {
+    const actor = await authorize("settlement.approve");
+    const settlementId = String(formData.get("id") ?? "");
+    const reason = String(formData.get("reason") ?? "");
+
+    if (!settlementId) return { error: "Nothing selected." };
+    if (!reason.trim()) {
+      return { error: "A reason is required.", fieldErrors: { reason: "Say why." } };
+    }
+
+    const result = await cancelSettlement({ settlementId, reason }, actor);
+    if (!result.ok) return { error: result.error };
+
+    revalidatePath(PATH);
+    return { ok: true, message: "Settlement cancelled." };
+  } catch (error) {
+    return guard(error);
+  }
+}

@@ -1,0 +1,312 @@
+// ============================================================
+// GEOGRAPHY & NETWORK
+//
+// State → City → Pincode is the serviceability backbone.
+// Zone groups pincodes for rating and SLA (P6/P8).
+// Branch is every physical node: head office, hub, branch,
+// warehouse, franchise.
+// ============================================================
+
+model State {
+  id        String   @id @default(cuid())
+  orgId     String
+  code      String
+  name      String
+  /// GST state code, e.g. "06" for Haryana.
+  gstCode   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  cities City[]
+
+  @@unique([orgId, code])
+  @@map("state")
+}
+
+model City {
+  id        String   @id @default(cuid())
+  orgId     String
+  stateId   String
+  name      String
+  /// Short code used on labels and manifests, e.g. "DEL", "JAI".
+  code      String
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  isMetro   Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  state    State     @relation(fields: [stateId], references: [id])
+  pincodes Pincode[]
+  branches Branch[]
+
+  customerBillings   Customer[]        @relation("CustomerBillingCity")
+  customerAddresses  CustomerAddress[]
+  consignorShipments Shipment[]        @relation("ShipmentConsignorCity")
+  consigneeShipments Shipment[]        @relation("ShipmentConsigneeCity")
+  pickupRequests     PickupRequest[]
+
+  @@unique([orgId, code])
+  @@unique([stateId, name])
+  @@index([stateId])
+  @@map("city")
+}
+
+model Pincode {
+  id              String   @id @default(cuid())
+  /// Geography is per-tenant (ADR §4), so PIN 110001 exists once per
+  /// org — each tenant loads and owns its own pincode master, and
+  /// serviceability is a fact about that company, not about the PIN.
+  orgId           String
+  code            String
+  cityId          String
+  areaName        String?
+  latitude        Decimal? @db.Decimal(10, 7)
+  longitude       Decimal? @db.Decimal(10, 7)
+  /// False blocks booking to this PIN unless the user holds the
+  /// serviceability override permission.
+  isServiceable   Boolean  @default(true)
+  /// Out of delivery area — triggers the ODA charge and a longer SLA.
+  isOda           Boolean  @default(false)
+  /// Branch responsible for delivering this PIN.
+  servingBranchId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  city          City          @relation(fields: [cityId], references: [id])
+  servingBranch Branch?       @relation("PincodeServingBranch", fields: [servingBranchId], references: [id])
+  zones         ZonePincode[]
+
+  @@unique([orgId, code])
+  @@index([cityId])
+  @@index([servingBranchId])
+  @@index([isServiceable])
+  @@map("pincode")
+}
+
+/// Rating and SLA group. A pincode may belong to several zones
+/// (one per zone set), so the join carries the set.
+model Zone {
+  id          String   @id @default(cuid())
+  orgId       String
+  code        String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  pincodes ZonePincode[]
+
+  @@unique([orgId, code])
+  @@map("zone")
+}
+
+model ZonePincode {
+  zoneId    String
+  pincodeId String
+  createdAt DateTime @default(now())
+
+  zone    Zone    @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  pincode Pincode @relation(fields: [pincodeId], references: [id], onDelete: Cascade)
+
+  @@id([zoneId, pincodeId])
+  @@map("zone_pincode")
+}
+
+// ────────────────────────────────────────────────────────────
+// Network nodes
+// ────────────────────────────────────────────────────────────
+
+enum BranchType {
+  HEAD_OFFICE
+  HUB
+  BRANCH
+  WAREHOUSE
+  FRANCHISE
+}
+
+model Branch {
+  id            String     @id @default(cuid())
+  orgId         String
+  code          String
+  name          String
+  type          BranchType @default(BRANCH)
+  /// Reporting parent — a branch rolls up to its hub, a hub to HO.
+  parentId      String?
+  cityId        String
+  address       String
+  pincode       String
+  phone         String?
+  email         String?
+  gstin         String?
+  latitude      Decimal?   @db.Decimal(10, 7)
+  longitude     Decimal?   @db.Decimal(10, 7)
+  /// Local cut-off after which a booking's SLA clock starts next
+  /// working day. Stored as "HH:mm" in the org timezone.
+  bookingCutoff String?    @default("18:00")
+  openingTime   String?    @default("09:00")
+  closingTime   String?    @default("19:00")
+  /// 0 = Sunday … 6 = Saturday
+  weeklyOffDays Int[]      @default([])
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  deletedAt     DateTime?
+
+  org             Organization      @relation(fields: [orgId], references: [id])
+  city            City              @relation(fields: [cityId], references: [id])
+  parent          Branch?           @relation("BranchTree", fields: [parentId], references: [id])
+  children        Branch[]          @relation("BranchTree")
+  primaryUsers    User[]            @relation("UserPrimaryBranch")
+  userScopes      UserBranchScope[]
+  servedPincodes  Pincode[]         @relation("PincodeServingBranch")
+  geofences       Geofence[]
+  originLegs      RouteLeg[]        @relation("LegOrigin")
+  destinationLegs RouteLeg[]        @relation("LegDestination")
+  numberSeries    NumberSeries[]
+  holidays        BranchHoliday[]
+
+  customers            Customer[]
+  bookedShipments      Shipment[]        @relation("ShipmentBookingBranch")
+  originShipments      Shipment[]        @relation("ShipmentOriginBranch")
+  destinationShipments Shipment[]        @relation("ShipmentDestinationBranch")
+  currentShipments     Shipment[]        @relation("ShipmentCurrentBranch")
+  currentPackages      ShipmentPackage[] @relation("PackageCurrentBranch")
+  shipmentEvents       ShipmentEvent[]
+  bulkBatches          BulkUploadBatch[]
+  pickupRequests       PickupRequest[]
+
+  // Phase 3
+  vehicles             Vehicle[]
+  drivers              Driver[]
+  tripOrigins          Trip[]           @relation("TripOriginBranch")
+  tripDestinations     Trip[]           @relation("TripDestinationBranch")
+  manifestOrigins      Manifest[]       @relation("ManifestOriginBranch")
+  manifestDestinations Manifest[]       @relation("ManifestDestinationBranch")
+  loadingSheets        LoadingSheet[]
+  scanRecords          ScanRecord[]
+  inboundReceipts      InboundReceipt[]
+  sortBins             SortBin[]
+
+  // Phase 4
+  deliveryRuns   DeliveryRun[]
+  deliveryTasks  DeliveryTask[]
+  codCollections CodCollection[]
+  codDeposits    CodDeposit[]
+
+  // Phase 5
+  complaints Complaint[]
+
+  // Phase 6–8
+  invoices   Invoice[]
+  exceptions Exception[]
+
+  @@unique([orgId, code])
+  @@index([cityId])
+  @@index([parentId])
+  @@map("branch")
+}
+
+/// Branch-specific non-working days, used by the SLA calendar (P8).
+model BranchHoliday {
+  id        String   @id @default(cuid())
+  branchId  String
+  date      DateTime @db.Date
+  name      String
+  createdAt DateTime @default(now())
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, date])
+  @@map("branch_holiday")
+}
+
+// ────────────────────────────────────────────────────────────
+// Routes
+// ────────────────────────────────────────────────────────────
+
+/// A named lane made of one or more legs, e.g.
+/// Faridabad → Delhi → Jaipur → Ahmedabad.
+model Route {
+  id                   String   @id @default(cuid())
+  orgId                String
+  code                 String
+  name                 String
+  originBranchId       String?
+  destinationBranchId  String?
+  totalDistanceKm      Decimal? @db.Decimal(10, 2)
+  standardTransitHours Int?
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  legs  RouteLeg[]
+  trips Trip[]
+
+  @@unique([orgId, code])
+  @@map("route")
+}
+
+model RouteLeg {
+  id                  String   @id @default(cuid())
+  routeId             String
+  sequence            Int
+  originBranchId      String
+  destinationBranchId String
+  distanceKm          Decimal? @db.Decimal(10, 2)
+  transitHours        Int?
+  /// Encoded polyline of the planned path, used for deviation
+  /// detection in P7.
+  polyline            String?
+  createdAt           DateTime @default(now())
+
+  route             Route  @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  originBranch      Branch @relation("LegOrigin", fields: [originBranchId], references: [id])
+  destinationBranch Branch @relation("LegDestination", fields: [destinationBranchId], references: [id])
+
+  @@unique([routeId, sequence])
+  @@index([originBranchId, destinationBranchId])
+  @@map("route_leg")
+}
+
+// ────────────────────────────────────────────────────────────
+// Geofences  (evaluated in P7, defined from P1)
+// ────────────────────────────────────────────────────────────
+
+enum GeofenceType {
+  CIRCLE
+  POLYGON
+}
+
+model Geofence {
+  id            String       @id @default(cuid())
+  orgId         String
+  name          String
+  type          GeofenceType @default(CIRCLE)
+  /// Set when the fence wraps one of our own nodes — this is what
+  /// turns a vehicle entering it into an automatic arrival event.
+  branchId      String?
+  centerLat     Decimal?     @db.Decimal(10, 7)
+  centerLng     Decimal?     @db.Decimal(10, 7)
+  radiusMeters  Int?
+  /// GeoJSON ring for POLYGON fences.
+  polygon       Json?
+  // Phase 7 adds a PostGIS `geom geography(Geometry, 4326)` column here
+  // via raw migration, kept in sync by trigger and queried only through
+  // raw SQL (Prisma cannot select an Unsupported column).
+  /// Consecutive pings required inside/outside before firing, so a
+  /// truck idling on the boundary does not generate 40 arrivals.
+  debouncePings Int          @default(2)
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  branch Branch?         @relation(fields: [branchId], references: [id])
+  events GeofenceEvent[]
+
+  @@index([orgId])
+  @@index([branchId])
+  @@map("geofence")
+}

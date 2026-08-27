@@ -1,0 +1,337 @@
+// ============================================================
+// IDENTITY & ACCESS
+//
+// Single company today. Every scoped table still carries orgId
+// so a second company is a data change, not a rewrite.
+// ============================================================
+
+/// A tenant. One row per logistics company on the platform.
+///
+/// Everything a tenant owns carries `orgId` and is isolated by a Prisma
+/// extension with PostgreSQL RLS underneath — see docs/adr/001-multi-tenancy.md.
+model Organization {
+  id        String  @id @default(cuid())
+  name      String
+  legalName String?
+  slug      String  @unique
+  lrPrefix  String  @default("CL")
+
+  // ── Tenancy ─────────────────────────────────────────────
+  /// Resolved from the Host header before any query runs. An
+  /// unresolvable host is a 404 — never a fallback tenant.
+  subdomain    String       @unique
+  /// Set once a tenant brings their own domain.
+  customDomain String?      @unique
+  status       TenantStatus @default(PROVISIONING)
+  planId       String?
+
+  trialEndsAt   DateTime?
+  activatedAt   DateTime?
+  suspendedAt   DateTime?
+  suspendReason String?
+
+  // ── White-label ─────────────────────────────────────────
+  /// Overrides the CSS custom properties in globals.css. Every component
+  /// reads the tokens, so a tenant palette is a stylesheet, not a fork.
+  primaryColorHex String?
+  accentColorHex  String?
+  faviconUrl      String?
+  /// Printed on the LR, POD and invoice.
+  documentFooter  String?
+  termsText       String?
+  supportEmail    String?
+  supportPhone    String?
+  /// Per-tenant DLT sender header. Registration takes 1–3 weeks of
+  /// external approval per tenant and is tracked as an onboarding task.
+  dltSenderId     String?
+  smtpFrom        String?
+  gstin           String?
+  pan             String?
+  cin             String?
+  logoUrl         String?
+  address         String?
+  city            String?
+  state           String?
+  pincode         String?
+  phone           String?
+  email           String?
+  website         String?
+  currency        String   @default("INR")
+  timezone        String   @default("Asia/Kolkata")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  users    User[]
+  branches Branch[]
+  roles    Role[]
+  plan     TenantPlan? @relation(fields: [planId], references: [id])
+
+  @@index([status])
+  @@map("organization")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+/// Every human who logs in: office staff, hub operators, drivers,
+/// delivery agents. Customer portal logins live in CustomerUser (P5).
+model User {
+  id                 String     @id @default(cuid())
+  orgId              String
+  employeeCode       String?
+  name               String
+  /// Identity is unique *within* a tenant, not across the product: the same
+  /// person may work for two carriers on the platform and needs a login at
+  /// each. Sign-in resolves the tenant from the host before looking the user
+  /// up, so the pair below is never ambiguous at authentication time.
+  email              String?
+  mobile             String
+  passwordHash       String?
+  /// Field staff (driver / delivery agent / pickup exec) sign in with
+  /// mobile + OTP instead of a password.
+  isFieldUser        Boolean    @default(false)
+  status             UserStatus @default(ACTIVE)
+  avatarUrl          String?
+  /// Home branch. Additional visibility comes from UserBranchScope.
+  primaryBranchId    String?
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime?
+  mustChangePassword Boolean    @default(false)
+  failedLoginCount   Int        @default(0)
+  lockedUntil        DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  createdById        String?
+  deletedAt          DateTime?
+
+  org           Organization      @relation(fields: [orgId], references: [id])
+  primaryBranch Branch?           @relation("UserPrimaryBranch", fields: [primaryBranchId], references: [id])
+  roles         UserRole[]
+  branchScopes  UserBranchScope[]
+  sessions      Session[]
+  loginActivity LoginActivity[]
+  auditLogs     AuditLog[]
+
+  bookedShipments    Shipment[]         @relation("ShipmentBookedBy")
+  shipmentEvents     ShipmentEvent[]
+  pickupAssignments  PickupAssignment[] @relation("PickupAssignee")
+  scanRecords        ScanRecord[]
+  deliveryRuns       DeliveryRun[]      @relation("DeliveryAgent")
+  assignedComplaints Complaint[]        @relation("ComplaintAssignee")
+  complaintMessages  ComplaintMessage[] @relation("ComplaintAuthor")
+  assignedExceptions Exception[]        @relation("ExceptionAssignee")
+
+  @@unique([orgId, email])
+  @@unique([orgId, mobile])
+  @@index([orgId, status])
+  @@index([primaryBranchId])
+  @@map("app_user")
+}
+
+model Session {
+  id           String    @id @default(cuid())
+  sessionToken String    @unique
+  userId       String
+  expires      DateTime
+  ipAddress    String?
+  userAgent    String?
+  deviceId     String?
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model VerificationToken {
+  orgId      String
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([orgId, token])
+  @@unique([orgId, identifier, token])
+  @@map("verification_token")
+}
+
+enum OtpPurpose {
+  LOGIN
+  PICKUP
+  DELIVERY
+  PASSWORD_RESET
+}
+
+model OtpToken {
+  id          String     @id @default(cuid())
+  orgId       String
+  purpose     OtpPurpose
+  /// Mobile number the code was sent to.
+  destination String
+  codeHash    String
+  /// Free-form link to the thing being verified (shipmentId, userId…).
+  referenceId String?
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  consumedAt  DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime   @default(now())
+
+  @@index([orgId])
+  @@index([destination, purpose, expiresAt])
+  @@index([referenceId])
+  @@map("otp_token")
+}
+
+// ────────────────────────────────────────────────────────────
+// RBAC
+// ────────────────────────────────────────────────────────────
+
+/// How much data a role can see. Enforced in the repository layer,
+/// never only in the UI.
+enum DataScope {
+  OWN
+  BRANCH
+  BRANCH_SET
+  NETWORK
+}
+
+model Role {
+  id          String    @id @default(cuid())
+  orgId       String
+  code        String
+  name        String
+  description String?
+  scope       DataScope @default(BRANCH)
+  /// System roles ship with the product and cannot be deleted.
+  isSystem    Boolean   @default(false)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  org         Organization     @relation(fields: [orgId], references: [id])
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@unique([orgId, code])
+  @@map("role")
+}
+
+/// One row per `resource.action` pair, seeded from code.
+model Permission {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  resource    String
+  action      String
+  module      String
+  description String?
+  /// Sensitive actions (rate override, status correction, bulk export)
+  /// are listed separately in the UI and always audited.
+  isSensitive Boolean @default(false)
+
+  roles RolePermission[]
+
+  @@index([module])
+  @@map("permission")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  grantedAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permission")
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  assignedAt DateTime @default(now())
+  assignedBy String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_role")
+}
+
+/// Extra branches a user can see beyond their primary branch.
+/// Only meaningful when the role scope is BRANCH_SET.
+model UserBranchScope {
+  userId    String
+  branchId  String
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([userId, branchId])
+  @@map("user_branch_scope")
+}
+
+// ────────────────────────────────────────────────────────────
+// Access records
+// ────────────────────────────────────────────────────────────
+
+enum LoginOutcome {
+  SUCCESS
+  BAD_CREDENTIALS
+  LOCKED
+  INACTIVE
+  OTP_FAILED
+}
+
+model LoginActivity {
+  id         String       @id @default(cuid())
+  /// Carried explicitly rather than inherited through `user`: a failed login
+  /// with an unknown identifier has no user row to inherit from, and those
+  /// are exactly the rows a tenant needs to see.
+  orgId      String
+  userId     String?
+  identifier String
+  outcome    LoginOutcome
+  ipAddress  String?
+  userAgent  String?
+  deviceId   String?
+  createdAt  DateTime     @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([orgId])
+  @@index([userId, createdAt])
+  @@index([identifier, createdAt])
+  @@map("login_activity")
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  orgId       String
+  name        String
+  /// Only the hash is stored; the key is shown once at creation.
+  keyHash     String    @unique
+  keyPrefix   String
+  /// Permission codes this key may exercise.
+  scopes      String[]
+  /// Optional CIDR allowlist.
+  ipAllowlist String[]
+  /// Set when the key belongs to a customer integration (P5).
+  customerId  String?
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  createdById String?
+
+  @@index([orgId])
+  @@map("api_key")
+}

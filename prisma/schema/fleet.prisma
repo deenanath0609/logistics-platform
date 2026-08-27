@@ -1,0 +1,238 @@
+// ============================================================
+// FLEET & PEOPLE  (Phase 3)
+//
+// Own vehicles, vendor vehicles, and attached vehicles all live here.
+// The system never assumes a vehicle has working telematics — every
+// automatic event has a manual equivalent.
+// ============================================================
+
+model VehicleType {
+  id           String   @id @default(cuid())
+  orgId        String
+  code         String
+  name         String
+  /// Payload capacity, used for manifest utilisation.
+  capacityKg   Decimal  @db.Decimal(10, 2)
+  capacityCft  Decimal? @db.Decimal(10, 2)
+  lengthFt     Decimal? @db.Decimal(6, 2)
+  widthFt      Decimal? @db.Decimal(6, 2)
+  heightFt     Decimal? @db.Decimal(6, 2)
+  axles        Int?
+  /// Speed above which an overspeed alert is raised. Null disables the
+  /// check for this class — a detector with no threshold is worse than
+  /// none, because it looks like it is watching.
+  maxSpeedKmph Int?
+  isActive     Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  vehicles Vehicle[]
+
+  @@unique([orgId, code])
+  @@map("vehicle_type")
+}
+
+enum VehicleOwnership {
+  OWN
+  VENDOR
+  ATTACHED
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  ASSIGNED
+  LOADING
+  DISPATCHED
+  IN_TRANSIT
+  AT_HUB
+  UNLOADING
+  MAINTENANCE
+  INACTIVE
+}
+
+model Vehicle {
+  id                 String           @id @default(cuid())
+  orgId              String
+  /// Registration number, normalised without spaces: HR26AB1234. Unique
+  /// per organisation, not platform-wide: an RTO number is unique on the
+  /// road, but the same attached vendor vehicle can sit on two carriers'
+  /// books at once.
+  registrationNumber String
+  vehicleTypeId      String
+  ownership          VehicleOwnership @default(OWN)
+  vendorId           String?
+  /// Home branch for own vehicles.
+  branchId           String?
+  status             VehicleStatus    @default(AVAILABLE)
+  /// Telematics device id, matched against incoming GPS pings (Phase 7).
+  gpsDeviceId        String?
+  fastagId           String?
+  currentOdometerKm  Int?
+  make               String?
+  model              String?
+  manufactureYear    Int?
+  notes              String?
+  isActive           Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  deletedAt          DateTime?
+
+  vehicleType VehicleType         @relation(fields: [vehicleTypeId], references: [id])
+  branch      Branch?             @relation(fields: [branchId], references: [id])
+  vendor      Vendor?             @relation(fields: [vendorId], references: [id])
+  documents   VehicleDocument[]
+  statusLog   VehicleStatusLog[]
+  trips       Trip[]
+  maintenance MaintenanceRecord[]
+
+  @@unique([orgId, registrationNumber])
+  @@index([status, isActive])
+  @@index([branchId])
+  @@index([gpsDeviceId])
+  @@map("vehicle")
+}
+
+enum DocumentKind {
+  RC
+  INSURANCE
+  FITNESS
+  PERMIT_NATIONAL
+  PERMIT_STATE
+  PUC
+  ROAD_TAX
+  DRIVING_LICENCE
+  ID_PROOF
+  ADDRESS_PROOF
+  POLICE_VERIFICATION
+  OTHER
+}
+
+/// Expiry here is operational, not paperwork: a vehicle whose permit has
+/// lapsed cannot legally move, so assignment is blocked on it.
+model VehicleDocument {
+  id             String       @id @default(cuid())
+  vehicleId      String
+  kind           DocumentKind
+  documentNumber String?
+  issuedOn       DateTime?    @db.Date
+  expiresOn      DateTime?    @db.Date
+  fileAssetId    String?
+  /// Mandatory documents block assignment when expired; others only warn.
+  isMandatory    Boolean      @default(true)
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId, kind])
+  @@index([expiresOn])
+  @@map("vehicle_document")
+}
+
+model VehicleStatusLog {
+  id         String         @id @default(cuid())
+  vehicleId  String
+  fromStatus VehicleStatus?
+  toStatus   VehicleStatus
+  tripId     String?
+  branchId   String?
+  userId     String?
+  remarks    String?
+  createdAt  DateTime       @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId, createdAt])
+  @@map("vehicle_status_log")
+}
+
+model MaintenanceRecord {
+  id            String    @id @default(cuid())
+  vehicleId     String
+  description   String
+  dueOn         DateTime? @db.Date
+  dueOdometerKm Int?
+  completedOn   DateTime? @db.Date
+  costAmount    Decimal?  @db.Decimal(14, 2)
+  downtimeDays  Int?
+  vendorName    String?
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId, completedOn])
+  @@map("maintenance_record")
+}
+
+enum DriverStatus {
+  AVAILABLE
+  ON_TRIP
+  ON_LEAVE
+  SUSPENDED
+  INACTIVE
+}
+
+model Driver {
+  id                    String       @id @default(cuid())
+  orgId                 String
+  code                  String
+  name                  String
+  /// Unique per organisation only — the same driver may be on two
+  /// carriers' rosters.
+  mobile                String
+  altMobile             String?
+  address               String?
+  cityId                String?
+  /// Set when the driver also signs in to the field app.
+  userId                String?      @unique
+  vendorId              String?
+  branchId              String?
+  licenceNumber         String?
+  licenceClass          String?
+  licenceExpiry         DateTime?    @db.Date
+  bloodGroup            String?
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  status                DriverStatus @default(AVAILABLE)
+  photoAssetId          String?
+  notes                 String?
+  isActive              Boolean      @default(true)
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  deletedAt             DateTime?
+
+  branch      Branch?            @relation(fields: [branchId], references: [id])
+  vendor      Vendor?            @relation(fields: [vendorId], references: [id])
+  documents   DriverDocument[]
+  trips       Trip[]
+  settlements DriverSettlement[]
+
+  @@unique([orgId, code])
+  @@unique([orgId, mobile])
+  @@index([status, isActive])
+  @@index([licenceExpiry])
+  @@map("driver")
+}
+
+model DriverDocument {
+  id             String       @id @default(cuid())
+  driverId       String
+  kind           DocumentKind
+  documentNumber String?
+  issuedOn       DateTime?    @db.Date
+  expiresOn      DateTime?    @db.Date
+  fileAssetId    String?
+  isMandatory    Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([driverId, kind])
+  @@index([expiresOn])
+  @@map("driver_document")
+}

@@ -1,0 +1,309 @@
+// ============================================================
+// LAST MILE, POD, COD  (Phase 4)
+//
+// Delivery attempts are a permanent history, not a boolean. Attempt 1
+// "consignee not available" and attempt 2 "delivered" both survive, and
+// that is what makes first-attempt success rate measurable.
+// ============================================================
+
+enum DeliveryRunStatus {
+  PLANNED
+  STARTED
+  COMPLETED
+  CANCELLED
+}
+
+/// One agent's route for one day.
+model DeliveryRun {
+  id       String            @id @default(cuid())
+  orgId    String
+  number   String
+  branchId String
+  status   DeliveryRunStatus @default(PLANNED)
+
+  agentId   String
+  vehicleId String?
+  runDate   DateTime @db.Date
+
+  totalTasks     Int @default(0)
+  completedTasks Int @default(0)
+  failedTasks    Int @default(0)
+
+  /// What the agent is accountable for at day end.
+  codExpected  Decimal @default(0) @db.Decimal(14, 2)
+  codCollected Decimal @default(0) @db.Decimal(14, 2)
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+
+  branch Branch         @relation(fields: [branchId], references: [id])
+  agent  User           @relation("DeliveryAgent", fields: [agentId], references: [id])
+  tasks  DeliveryTask[]
+
+  @@unique([orgId, number])
+  @@index([branchId, runDate, status])
+  @@index([agentId, runDate])
+  @@map("delivery_run")
+}
+
+enum DeliveryTaskStatus {
+  PENDING
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RETURNED
+  CANCELLED
+}
+
+model DeliveryTask {
+  id         String             @id @default(cuid())
+  /// Carried on the row rather than inherited through branchId, because the
+  /// field app addresses a task directly by id (/delivery/task/[taskId])
+  /// with no branch in the path to scope it.
+  orgId      String
+  runId      String?
+  shipmentId String
+  branchId   String
+  status     DeliveryTaskStatus @default(PENDING)
+  /// Stop order within the run.
+  sequence   Int                @default(0)
+  /// Higher sorts earlier — used for reattempts and promised deliveries.
+  priority   Int                @default(0)
+
+  codAmount     Decimal? @db.Decimal(14, 2)
+  /// Which attempt this task represents. A reattempt is a new task.
+  attemptNumber Int      @default(1)
+
+  assignedAt   DateTime  @default(now())
+  assignedById String?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  run      DeliveryRun?      @relation(fields: [runId], references: [id])
+  shipment Shipment          @relation(fields: [shipmentId], references: [id])
+  branch   Branch            @relation(fields: [branchId], references: [id])
+  attempts DeliveryAttempt[]
+  pod      Pod?
+
+  @@index([orgId])
+  @@index([branchId, status])
+  @@index([shipmentId])
+  @@index([runId, sequence])
+  @@map("delivery_task")
+}
+
+/// Permanent. One row per visit to the door.
+model DeliveryAttempt {
+  id            String         @id @default(cuid())
+  taskId        String
+  shipmentId    String
+  attemptNumber Int
+  outcome       AttemptOutcome
+  reasonCodeId  String?
+
+  receiverName     String?
+  receiverRelation String?
+  otpVerified      Boolean @default(false)
+
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  deviceId  String?
+  remarks   String?
+
+  photoAssetId String?
+
+  attemptedAt       DateTime @default(now())
+  recordedAt        DateTime @default(now())
+  /// Offline capture: device clock minus server clock, in seconds.
+  clockDriftSeconds Int?
+  agentId           String?
+  /// Client-generated so the offline queue can retry safely.
+  idempotencyKey    String   @unique
+
+  task     DeliveryTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shipment Shipment     @relation(fields: [shipmentId], references: [id])
+
+  @@unique([taskId, attemptNumber])
+  @@index([shipmentId, attemptedAt])
+  @@map("delivery_attempt")
+}
+
+/// Proof of delivery. Assets upload in the background — a weak signal
+/// delays the PDF, never the delivery confirmation.
+model Pod {
+  id         String @id @default(cuid())
+  taskId     String @unique
+  shipmentId String @unique
+
+  receiverName     String
+  receiverRelation String?
+  receiverPhone    String?
+
+  signatureAssetId String?
+  photoAssetId     String?
+  otpReference     String?
+
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+
+  deliveredAt DateTime
+  recordedAt  DateTime @default(now())
+  agentId     String?
+  remarks     String?
+
+  /// Generated PDF, produced by a worker once assets have synced.
+  documentAssetId String?
+  generatedAt     DateTime?
+
+  task     DeliveryTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  shipment Shipment     @relation(fields: [shipmentId], references: [id])
+  assets   PodAsset[]
+
+  @@index([deliveredAt])
+  @@map("pod")
+}
+
+enum PodAssetKind {
+  SIGNATURE
+  DELIVERY_PHOTO
+  PACKAGE_PHOTO
+  ID_PROOF
+}
+
+model PodAsset {
+  id          String       @id @default(cuid())
+  podId       String
+  kind        PodAssetKind
+  fileAssetId String
+  capturedAt  DateTime?
+  createdAt   DateTime     @default(now())
+
+  pod Pod @relation(fields: [podId], references: [id], onDelete: Cascade)
+
+  @@index([podId])
+  @@map("pod_asset")
+}
+
+// ────────────────────────────────────────────────────────────
+// COD
+// ────────────────────────────────────────────────────────────
+
+enum CodMode {
+  CASH
+  UPI
+  CARD
+  CHEQUE
+  BANK_TRANSFER
+}
+
+enum CodState {
+  COLLECTED
+  DEPOSITED
+  RECONCILED
+  REMITTED
+}
+
+model CodCollection {
+  id         String  @id @default(cuid())
+  shipmentId String  @unique
+  taskId     String?
+  branchId   String
+  agentId    String?
+
+  amountExpected  Decimal @db.Decimal(14, 2)
+  amountCollected Decimal @db.Decimal(14, 2)
+  mode            CodMode @default(CASH)
+  /// UPI/cheque/transaction reference.
+  reference       String?
+
+  state        CodState @default(COLLECTED)
+  collectedAt  DateTime @default(now())
+  depositId    String?
+  remittanceId String?
+
+  remarks   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  shipment   Shipment       @relation(fields: [shipmentId], references: [id])
+  branch     Branch         @relation(fields: [branchId], references: [id])
+  deposit    CodDeposit?    @relation(fields: [depositId], references: [id])
+  remittance CodRemittance? @relation(fields: [remittanceId], references: [id])
+
+  @@index([branchId, state])
+  @@index([agentId, collectedAt])
+  @@map("cod_collection")
+}
+
+enum DepositStatus {
+  PENDING
+  VERIFIED
+  DISPUTED
+}
+
+/// Day-end handover from an agent to the branch.
+model CodDeposit {
+  id       String        @id @default(cuid())
+  branchId String
+  agentId  String
+  status   DepositStatus @default(PENDING)
+
+  depositDate    DateTime @db.Date
+  amountDeclared Decimal  @db.Decimal(14, 2)
+  amountVerified Decimal? @db.Decimal(14, 2)
+  /// Declared minus verified. Red on the day-end screen when non-zero.
+  shortfall      Decimal  @default(0) @db.Decimal(14, 2)
+
+  mode        CodMode @default(CASH)
+  reference   String?
+  slipAssetId String?
+
+  verifiedById String?
+  verifiedAt   DateTime?
+  remarks      String?
+  createdAt    DateTime  @default(now())
+
+  branch      Branch          @relation(fields: [branchId], references: [id])
+  collections CodCollection[]
+
+  @@index([branchId, depositDate])
+  @@index([agentId, depositDate])
+  @@map("cod_deposit")
+}
+
+enum RemittanceStatus {
+  DRAFT
+  SENT
+  SETTLED
+}
+
+/// Paying the customer what was collected on their behalf.
+model CodRemittance {
+  id         String           @id @default(cuid())
+  customerId String
+  status     RemittanceStatus @default(DRAFT)
+
+  periodFrom DateTime @db.Date
+  periodTo   DateTime @db.Date
+
+  grossAmount Decimal @db.Decimal(14, 2)
+  feeAmount   Decimal @default(0) @db.Decimal(14, 2)
+  netAmount   Decimal @db.Decimal(14, 2)
+
+  reference     String?
+  paidAt        DateTime?
+  adviceAssetId String?
+  remarks       String?
+  createdAt     DateTime  @default(now())
+  createdById   String?
+
+  customer    Customer        @relation(fields: [customerId], references: [id])
+  collections CodCollection[]
+
+  @@index([customerId, status])
+  @@map("cod_remittance")
+}

@@ -1,0 +1,25 @@
+// ============================================================
+// City Logistics — Prisma schema (multi-file)
+//
+//   schema.prisma   generator + datasource            (this file)
+//   identity        users, roles, permissions, auth
+//   geo             network: states → branches, routes, geofences
+//   masters         service types, charges, reason codes, series
+//   platform        audit, outbox, files, config, jobs
+//
+// Domains added later:
+//   parties (P2) · shipment (P2) · hub (P3) · transport (P3)
+//   fleet (P3) · lastmile (P4) · tracking (P7) · finance (P6)
+// ============================================================
+
+generator client {
+  provider = "prisma-client"
+  output   = "../../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // PostGIS is enabled in Phase 7, when geofence evaluation starts.
+  // Until then geofences are stored as lat/lng/radius and GeoJSON,
+  // which is enough to define them. See scripts/bootstrap-db.mjs.
+}

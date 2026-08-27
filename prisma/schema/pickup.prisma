@@ -1,0 +1,139 @@
+// ============================================================
+// PICKUP
+//
+// Two entry points: a booking that needs collecting, or a standalone
+// request a customer raises before they know what they are shipping.
+// ============================================================
+
+enum PickupStatus {
+  REQUESTED
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PickupSlot {
+  MORNING
+  AFTERNOON
+  EVENING
+  ANYTIME
+}
+
+model PickupRequest {
+  id       String       @id @default(cuid())
+  orgId    String
+  number   String
+  branchId String
+  status   PickupStatus @default(REQUESTED)
+
+  /// Set when collecting an existing booking. Null for a blind pickup
+  /// raised before the shipment is known.
+  shipmentId String?
+  customerId String?
+  addressId  String?
+
+  contactName String
+  phone       String
+  address     String
+  cityId      String
+  pincode     String
+  landmark    String?
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
+
+  requestedDate    DateTime   @db.Date
+  slot             PickupSlot @default(ANYTIME)
+  /// Higher sorts earlier in the executive's list.
+  priority         Int        @default(0)
+  expectedPackages Int?
+  expectedWeight   Decimal?   @db.Decimal(10, 3)
+  goodsDescription String?
+  notes            String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+  cancelledAt DateTime?
+
+  branch      Branch             @relation(fields: [branchId], references: [id])
+  shipment    Shipment?          @relation(fields: [shipmentId], references: [id])
+  customer    Customer?          @relation(fields: [customerId], references: [id])
+  address_    CustomerAddress?   @relation(fields: [addressId], references: [id])
+  city        City               @relation(fields: [cityId], references: [id])
+  assignments PickupAssignment[]
+
+  @@unique([orgId, number])
+  @@index([branchId, status, requestedDate])
+  @@index([shipmentId])
+  @@index([customerId])
+  @@map("pickup_request")
+}
+
+model PickupAssignment {
+  id              String       @id @default(cuid())
+  pickupRequestId String
+  /// The pickup executive. A driver is attached from Phase 3, when the
+  /// vehicle master exists.
+  assignedToId    String
+  /// Order of this stop in the executive's run for the day.
+  sequence        Int          @default(0)
+  status          PickupStatus @default(ASSIGNED)
+  assignedAt      DateTime     @default(now())
+  assignedById    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  /// Superseded when reassigned, so the history of who held it survives.
+  supersededAt    DateTime?
+
+  request    PickupRequest   @relation(fields: [pickupRequestId], references: [id], onDelete: Cascade)
+  assignedTo User            @relation("PickupAssignee", fields: [assignedToId], references: [id])
+  attempts   PickupAttempt[]
+
+  @@index([assignedToId, status])
+  @@index([pickupRequestId])
+  @@map("pickup_assignment")
+}
+
+enum AttemptOutcome {
+  COLLECTED
+  FAILED
+}
+
+/// One row per visit. A failed attempt is history, not a flag that gets
+/// overwritten when the second attempt succeeds.
+model PickupAttempt {
+  id            String         @id @default(cuid())
+  assignmentId  String
+  attemptNumber Int
+  outcome       AttemptOutcome
+  reasonCodeId  String?
+
+  /// What was actually collected, against what was expected. A mismatch
+  /// is recorded, never silently written over the booking — the
+  /// difference is money.
+  packagesCollected Int?
+  weightCollected   Decimal? @db.Decimal(10, 3)
+
+  receiverName     String?
+  photoAssetId     String?
+  signatureAssetId String?
+  otpVerified      Boolean @default(false)
+
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  deviceId  String?
+  remarks   String?
+
+  attemptedAt DateTime @default(now())
+  recordedAt  DateTime @default(now())
+  createdById String?
+
+  assignment PickupAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  reasonCode ReasonCode?      @relation(fields: [reasonCodeId], references: [id])
+
+  @@unique([assignmentId, attemptNumber])
+  @@index([assignmentId])
+  @@map("pickup_attempt")
+}
