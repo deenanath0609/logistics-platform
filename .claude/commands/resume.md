@@ -41,14 +41,20 @@ carrier user with a flag.
 
 ## Where it stands
 
-Branch **`phase-9-to-14-multi-tenancy`**, 8 commits, working tree clean,
-nothing pushed to any remote yet. `main` was never committed onto directly.
+Branch **`phase-9-to-14-multi-tenancy`**, 12 commits, **pushed** to
+<https://github.com/deenanath0609/logistics-platform> on 30 Aug 2026. No PR
+opened yet. `main` was never committed onto directly.
 
 ```
-1,453 tests · 75 files · 0 type errors
-tenant:verify 29/29 · verify-plan-gating 25/25
+1,468 tests · 77 files · 0 type errors · production build clean
+tenant:verify 29/29 · verify-plan-gating 25/25 · verify-gps 14/14
+restore drill 11/11 · load 27.8 req/s, p95 1511ms, 0 errors
 smoke.mjs 87 screens · smoke-platform 8/8 · smoke-portal 24/24
 ```
+
+Next.js is on **16.3.3**. `xlsx` now comes from SheetJS's own distribution
+(`cdn.sheetjs.com/xlsx-0.20.3/…`), not npm — `npm ci` needs to reach that
+host.
 
 ### Phases
 
@@ -68,37 +74,54 @@ smoke.mjs 87 screens · smoke-platform 8/8 · smoke-portal 24/24
 | 10 | Coverage for phases 0–9 | done | is the test |
 | 11 | Modules and plans | done | done |
 | 12 | Worker, object storage, PostGIS | 2 of 3 | partial |
-| 13 | Per-tenant integration credentials | SMS/SMTP/WhatsApp done | partial |
-| 14 | Hardening | security review done | partial |
+| 13 | Per-tenant integration credentials | done | done |
+| 14 | Hardening | done | CI has never run on GitHub |
 | 15 | Five manuals and UAT | not started | — |
-| 16 | Deployment | not started | — |
+| 16 | Deployment | GitHub done, server not started | — |
 
 The live version of this table, with what proves each row, is the **Road to
 Go-Live** artifact: <https://claude.ai/code/artifact/4f222412-26b8-4e47-87e1-613a75ee8fd9>
 Update that same URL rather than publishing a new one.
 
-### The six open items
+### The open items
 
 1. **Worker shutdown leaves one row claimed.** A graceful stop still strands a
    single outbox row in `PROCESSING`. The claim lease recovers it within five
    minutes so nothing is lost. Root cause never found — say so, do not paper
    over it.
-2. **GPS polling ignores the per-tenant provider.** The webhook route resolves
-   each carrier's credentials; the polling loop in `src/lib/tracking/runtime.ts`
-   still reads one environment-wide vendor. SMS, SMTP and WhatsApp are already
-   per-carrier and encrypted.
-3. **Next.js is on 16.1.6**; a bump to ≥16.2.6 is outstanding. Separately,
-   `xlsx` from npm has no fixed release for its advisories — moving to the
-   vendor's own distribution or replacing it is a decision for the user.
-4. **No CI, no load test, no restore drill.** Every verification script runs
-   only when someone remembers. A naive `pg_restore` does not bring the RLS
-   roles and policies back.
-5. **PostGIS and Redis are absent locally.** Geofences evaluate in JavaScript
+2. **PostGIS and Redis are absent locally.** Geofences evaluate in JavaScript
    and the outbox drains on a lease rather than BullMQ. Both are correct as
    written; the parity tests come with the switch on the server, not before.
-6. **`Trip.freightPayable` is never written.** The column exists, vendor
+3. **`Trip.freightPayable` is never written.** The column exists, vendor
    settlement reads it, nothing sets it. A product gap, not a security defect —
    needs the user's call on where the number comes from.
+4. **Email is not implemented.** `emailAdapter` resolves the carrier's relay
+   and then refuses to send — there is no transport behind it, deliberately.
+   `nodemailer` was dropped rather than carried unused; add it back with the
+   transport, on a version its SMTP-injection advisory does not name.
+5. **Two advisories cannot be fixed from here.** `@auth/core` pins the
+   nodemailer version that advisory names, and the only offered fix is
+   next-auth v4; `@prisma/config` brings a deepmerge-ts advisory whose fix is
+   Prisma 6.12. Both mean downgrading a framework this is built on, and the
+   nodemailer path is Auth.js's email provider, which this app does not use.
+   The CI audit job therefore reports and does not enforce.
+6. **acme-freight has no vehicles with device ids.** The demo seed fits the
+   default carrier's fleet only, so tracking probes against the second carrier
+   skip rather than run. `verify-gps-tenancy.ts` says `[SKIP]` when it happens
+   — that is not a pass.
+
+### Closed since the last handoff
+
+- **GPS polling now resolves per carrier** — `resolvePollProviders`, proved by
+  `npm run verify:gps` (14/14) against the real database.
+- **Next.js 16.1.6 → 16.3.3**, and `xlsx` moved to SheetJS's own distribution.
+  The user chose that over replacing it with exceljs.
+- **CI, a load test and a restore drill exist**: `.github/workflows/ci.yml`,
+  `npm run load`, `npm run verify:restore`. The workflow has never actually
+  run on GitHub — that is the next thing to watch.
+- **The demo fleet was never fitted with devices**, so the whole tracking
+  module was unreachable on seeded data. Fixed in the seed; re-run
+  `npm run db:seed:demo` on any existing database.
 
 ---
 
@@ -145,6 +168,13 @@ These were stated explicitly and hold until the user changes them.
   once left a migration half-applied with Prisma recording it as done. Never use
   Python regex with `\1` or `\n` to patch TypeScript — it has written literal
   control characters and real newlines into source three times.
+- **`runCrossTenant(reason, () => prisma.x.count(...))` does not work.** A
+  Prisma promise is lazy, so the unawaited call is handed back and the scope
+  pops before the query runs — the extension then refuses it. The callback must
+  be `async` with the `await` inside it. This shipped green because the
+  watchdog's test mocked `runCrossTenant` as `fn => fn()`, which has no
+  AsyncLocalStorage in it: a mock that removes the mechanism cannot test the
+  mechanism. See `worker-watchdog.scope.test.ts`.
 - **The extension rewrites top-level `where` only.** A relation filter reaches
   across carriers, which is why all 110 tenant-owned tables carry `orgId`
   directly rather than relying on a join.
@@ -181,7 +211,14 @@ npm run smoke:api             # partner API
 npm run verify:field          # the whole delivery cycle as a field agent
 npm run verify:worker         # outbox drains outside the web server
 npm run verify:spine          # a consignment booking to close
+npm run verify:gps            # each carrier polls its own telematics account
+npm run verify:restore        # a dump restores with its RLS roles and policies
+npm run load                  # 20 concurrent staff; needs the built app
 ```
+
+`npm run load` against `npm run dev:3010` reports p95 3.4s and means nothing —
+a dev server compiles on first request. Build and `npm run start` before
+quoting a number.
 
 A script that cannot fail is not a test. Every one exits non-zero on failure and
 prints PASS/FAIL per check.
@@ -201,16 +238,28 @@ quietly fixing them, so each is attributed to the phase that owns it.
 Start the dev server, launch parallel agents across the modules, and hold the
 existing suites green throughout.
 
+Phases 13 and 14 were finished first, on 30 Aug 2026, at the user's
+instruction — *"pahle bache huye phases complete karo uske bad sabki testing
+ak sath karenge"* — so this testing pass now covers them too. Tracking in
+particular has never been exercised on data that could exercise it: until the
+seed fitted device ids, the live map, the geofences and the ETAs all rendered
+an empty yard.
+
 ### After that, in order
 
-- **Phase 13 remainder** — wire GPS polling to each carrier's own credentials.
-- **Phase 14 remainder** — Next.js bump, the `xlsx` decision, CI, load test,
-  restore drill.
 - **Phase 15 — the manuals.** Five documents, agreed scope, **start only when
   the user says so**: four written for one audience each (carrier office staff,
   field agents, customers, platform operator) plus one combined document for the
   user's own testing. With screenshots, taken on both hosts side by side so the
   white-label behaviour is visible rather than described.
-- **Phase 16 — deployment.** GitHub, then Oracle from GitHub. Wildcard DNS and
-  certificate, the restricted database role in production with `TENANT_RLS=on`,
-  the worker as its own process, backups and the GPS retention job scheduled.
+- **Phase 16 — deployment.** GitHub is done; the server is not. The user chose
+  to defer it on 30 Aug 2026 and to run on an IP without a domain for now,
+  which means subdomain routing — and therefore every carrier host — does not
+  work until a domain is chosen. `credohrms.com`'s nameservers are GoDaddy's
+  (`ns49`/`ns50.domaincontrol.com`), so a wildcard `A` record goes there, not
+  at Linode; a wildcard certificate needs Let's Encrypt DNS-01 with a GoDaddy
+  API token. Sizing, measured on this data: 8 GB RAM (4 GB minimum, and
+  `next build` alone peaks at 2–4 GB, so build in CI or add swap), 100 GB disk
+  (40 GB minimum — GPS pings are the growth, ~70 MB/day per 100 vehicles held
+  90 days). Then the restricted database role with `TENANT_RLS=on`, the worker
+  as its own process, backups, and the GPS retention job scheduled.
