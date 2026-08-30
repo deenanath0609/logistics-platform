@@ -161,6 +161,20 @@ const DRIVERS = [
 
 const DEMO_PASSWORD = "Portal@123";
 
+/**
+ * The telematics device the demo fleet is fitted with.
+ *
+ * Derived from the registration rather than random, so re-seeding does not
+ * orphan the pings already stored against the old id — and so an operator
+ * looking at a ping in the database can tell at a glance which truck it is.
+ * The same registration in two tenants yields the same device id, which is
+ * exactly the collision `trackedDeviceIds` is scoped to survive: a poll only
+ * ever asks about its own carrier's vehicles.
+ */
+function deviceIdFor(registration: string): string {
+  return `DEV-${registration.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}`;
+}
+
 function daysFromNow(days: number): Date {
   const date = new Date();
   date.setUTCHours(0, 0, 0, 0);
@@ -279,9 +293,22 @@ export async function seedDemo(orgId: string) {
         make: v.make,
         model: v.model,
         manufactureYear: v.year,
+        gpsDeviceId: deviceIdFor(v.reg),
       },
       update: { make: v.make, model: v.model },
     });
+
+    // Backfilled rather than overwritten. Without a device id the whole
+    // tracking module is unreachable on demo data — `trackedDeviceIds`
+    // returns nothing, so the poll finds no devices, the live map stays
+    // empty and no geofence can ever fire. A vehicle somebody has since
+    // fitted a real device to keeps the id they entered.
+    if (!vehicle.gpsDeviceId) {
+      await db.vehicle.update({
+        where: { id: vehicle.id },
+        data: { gpsDeviceId: deviceIdFor(v.reg) },
+      });
+    }
 
     for (const d of v.docs) {
       const existing = await db.vehicleDocument.findFirst({
