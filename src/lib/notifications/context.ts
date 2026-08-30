@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { getEnv } from "@/lib/env";
 import type { NotificationChannel, RecipientKind } from "@/generated/prisma/client";
 import type { TemplateVariables } from "./render";
+import { carrierIdentity, firstConfigured, trackingLink } from "./carrier";
 import { maskPhone } from "./mask";
 
 /**
@@ -184,26 +185,37 @@ const PAYMENT_LABEL: Record<string, string> = {
  * Anything the event itself knows — a failure reason, an OTP — is merged
  * over the top by `eventVariables`.
  */
-export function baseVariables(
+export async function baseVariables(
   context: NonNullable<ShipmentContext>,
-): TemplateVariables {
+): Promise<TemplateVariables> {
   const env = getEnv();
-  const track = `${env.APP_URL}/track/${encodeURIComponent(context.lrNumber)}`;
+  const carrier = await carrierIdentity();
 
   return {
-    brandName: env.APP_NAME,
+    // The carrier's trading name, never ours. `APP_NAME` is whatever the
+    // shell that started the server was configured with, which is the right
+    // answer only when there is no tenant at all — a preview, or a test.
+    brandName: carrier?.brandName ?? env.APP_NAME,
     // Branch first, because a consignee ringing about a delivery wants the
-    // branch handling it — not a head-office switchboard. `SUPPORT_PHONE`
-    // is the backstop so a branch with no number on file cannot fail the
-    // render of a delivery confirmation over a footer line.
+    // branch handling it — not a head-office switchboard. Behind it the
+    // carrier's own central number, and only then `SUPPORT_PHONE`, so a
+    // branch with no number on file cannot fail the render of a delivery
+    // confirmation over a footer line.
     supportPhone:
-      context.originBranch?.phone ??
-      context.destinationBranch?.phone ??
-      process.env.SUPPORT_PHONE?.trim() ??
-      "",
+      firstConfigured(
+        context.originBranch?.phone,
+        context.destinationBranch?.phone,
+        carrier?.supportPhone,
+        env.SUPPORT_PHONE,
+      ) ?? "",
+    // No branch ahead of the carrier here, unlike the phone: a branch
+    // mailbox is an internal routing address — it is what BRANCH-addressed
+    // templates are delivered *to* — while the carrier's support address is
+    // the published, monitored one a consignee may reply to.
+    supportEmail: carrier?.supportEmail ?? "",
 
     lrNumber: context.lrNumber,
-    trackingUrl: track,
+    trackingUrl: await trackingLink(context.lrNumber),
     consignorName: context.consignorName,
     consigneeName: context.consigneeName,
     originCity: context.consignorCity?.name ?? null,
@@ -317,7 +329,7 @@ export async function eventVariables(
         failureReason: reason?.name ?? attempt?.remarks ?? "Attempt unsuccessful",
         attemptNumber: attempt?.attemptNumber ?? context.attemptCount,
         nextAttemptDate: day(next?.assignedAt) ?? "the next working day",
-        rescheduleUrl: `${getEnv().APP_URL}/track/${encodeURIComponent(context.lrNumber)}/reschedule`,
+        rescheduleUrl: await trackingLink(context.lrNumber, "/reschedule"),
       };
     }
 
@@ -333,7 +345,7 @@ export async function eventVariables(
       return {
         receiverName: attempt?.receiverName ?? context.consigneeName,
         deliveredAt: dayTime(context.deliveredAt),
-        podUrl: `${getEnv().APP_URL}/track/${encodeURIComponent(context.lrNumber)}/pod`,
+        podUrl: await trackingLink(context.lrNumber, "/pod"),
       };
     }
 

@@ -1,9 +1,16 @@
 import { getEnv } from "@/lib/env";
+import { credentialFor, type ResolvedCredential } from "@/lib/integrations/credentials";
 import type { ChannelAdapter, OutboundMessage, SendResult } from "./types";
 import { ChannelNotConfiguredError, ProviderNotImplementedError } from "./types";
+import { resolveSenderId, senderHeaderFor } from "./sender";
 import { mockAdapter } from "./mock";
 
 const FILE = "src/lib/notifications/channels/sms.ts";
+
+// Re-exported because this is where a reader looks for it, and where the
+// tests already import it from. The chain lives in `sender.ts` so `mock.ts`
+// can warn about the same answer without importing this file back.
+export { resolveSenderId, senderHeaderFor };
 
 /**
  * SMS.
@@ -12,6 +19,12 @@ const FILE = "src/lib/notifications/channels/sms.ts";
  * way until an aggregator is contracted — writing a speculative client for
  * an API nobody has read would be worse than having none, because it would
  * look finished.
+ *
+ * The provider *code* stays a deployment-wide choice while the API key does
+ * not: a code selects which client in this folder runs, and a client is
+ * code that has to exist before anyone can be pointed at it. The account
+ * that code authenticates with is per carrier — see
+ * `lib/integrations/credentials.ts`.
  *
  * Whoever wires the real one only has to fill in `dispatch()` below. The
  * DLT guard above it applies to every Indian provider and should stay.
@@ -25,13 +38,14 @@ export function smsAdapter(): ChannelAdapter {
     provider,
     channel: "SMS",
     async send(message: OutboundMessage): Promise<SendResult> {
-      const missing: string[] = [];
-      if (!process.env.SMS_API_KEY) missing.push("SMS_API_KEY");
-      if (!process.env.SMS_SENDER_ID && !message.dltSenderId) {
-        missing.push("SMS_SENDER_ID");
-      }
-      if (missing.length > 0) {
-        throw new ChannelNotConfiguredError("SMS", provider, missing);
+      // The carrier's own aggregator account where they have one, ours
+      // where they do not. Resolved before anything else because the sender
+      // header may be registered against that account rather than against
+      // the organisation.
+      const account = await credentialFor("SMS");
+
+      if (!account.secret) {
+        throw new ChannelNotConfiguredError("SMS", provider, ["SMS_API_KEY"]);
       }
 
       // DLT is not optional and not recoverable at send time: an unregistered
@@ -46,7 +60,12 @@ export function smsAdapter(): ChannelAdapter {
         );
       }
 
-      return dispatch(provider, message);
+      return dispatch(
+        provider,
+        message,
+        await resolveSenderId(message, account),
+        account,
+      );
     },
   };
 }
@@ -60,10 +79,17 @@ export function smsAdapter(): ChannelAdapter {
  */
 async function dispatch(
   provider: string,
-  // The parameter stays in the signature because it is the whole input the
-  // real client needs; it is unused only because there is no client yet.
+  // The parameters stay in the signature because they are the whole input the
+  // real client needs; they are unused only because there is no client yet.
+  // Neither the sender id nor the account is read from the environment
+  // inside: both belong to the carrier this message is for, and the
+  // environment does not know which carrier that is.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   message: OutboundMessage,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  senderId: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  account: ResolvedCredential<"SMS">,
 ): Promise<SendResult> {
   throw new ProviderNotImplementedError("SMS", provider, FILE);
 }

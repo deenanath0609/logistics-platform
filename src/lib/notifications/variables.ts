@@ -23,8 +23,9 @@ export type VariableSpec = {
 
 /** Available on every notification, whatever the trigger. */
 export const COMMON_VARIABLES: VariableSpec[] = [
-  { name: "brandName", description: "Trading name of the operator", sample: "City Logistics" },
-  { name: "supportPhone", description: "Customer support number printed in the footer", sample: "1800-000-000" },
+  { name: "brandName", description: "Trading name of the carrier this message goes out as", sample: "Acme Logistics" },
+  { name: "supportPhone", description: "Handling branch's number, or the carrier's central one", sample: "1800-000-000" },
+  { name: "supportEmail", description: "Carrier's published support address", sample: "support@acme-logistics.example" },
 ];
 
 /** Available on any event whose aggregate is a shipment. */

@@ -1,6 +1,13 @@
 import type { NotificationChannel } from "@/generated/prisma/client";
 import { maskRecipient } from "../mask";
+import { senderHeaderFor } from "./sender";
 import type { ChannelAdapter, OutboundMessage, SendResult } from "./types";
+
+// Imported and re-exported: the definition moved out because the template
+// editor is a client component, and this file reaches the database.
+import { segmentsFor } from "../segments";
+
+export { segmentsFor };
 
 /**
  * The default adapter, and the one every environment runs on until the
@@ -26,6 +33,28 @@ export function mockAdapter(channel: NotificationChannel): ChannelAdapter {
           "no DLT template id — a real Indian operator would drop this silently",
         );
       }
+      // Warned about here as well as refused in `sms.ts`, because every
+      // environment still runs on this adapter: a carrier onboarded without
+      // a sender header would otherwise look fine right up to the day the
+      // real gateway is switched on, and the registration that fixes it
+      // takes weeks to obtain.
+      if (channel === "SMS" && !(await senderHeaderFor(message))) {
+        warnings.push(
+          "no DLT sender header on the template or the carrier — the real " +
+            "adapter refuses this send",
+        );
+      }
+
+      // The body, only in development. This adapter is the *default* on a
+      // fresh deployment — SMS and WhatsApp default to "mock" and email
+      // falls back to it with no SMTP host — so a first deploy that has not
+      // set those three variables would otherwise print every one-time code
+      // and every tracking link to stdout.
+      const detail =
+        process.env.NODE_ENV === "development"
+          ? `
+${message.body}`
+          : ` | ${message.body.length} chars`;
 
       console.info(
         `[notify:mock] ${channel} → ${target}` +
@@ -50,20 +79,3 @@ export function mockAdapter(channel: NotificationChannel): ChannelAdapter {
   };
 }
 
-/**
- * GSM-7 counts 160 characters per segment and 153 in a concatenated one.
- * Anything outside that alphabet drops the message to UCS-2 at 70/67.
- * Approximate, but close enough to make a template that quietly costs
- * three segments visible before the first invoice does.
- */
-export function segmentsFor(body: string): number {
-  const unicode = /[^\r\n@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&'()*+,\-./0-9:;<=>?¡A-ZÄÖÑÜ§¿a-zäöñüà^{}[\]~|€\\]/.test(
-    body,
-  );
-  const single = unicode ? 70 : 160;
-  const multi = unicode ? 67 : 153;
-
-  if (body.length === 0) return 1;
-  if (body.length <= single) return 1;
-  return Math.ceil(body.length / multi);
-}

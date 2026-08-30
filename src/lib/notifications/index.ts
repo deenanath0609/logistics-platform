@@ -1,18 +1,20 @@
 /**
  * Notification engine — public surface.
  *
- * Wiring it up is one call, made wherever the outbox drain is started:
+ * Wiring it up is one call, made in the process that drains the outbox —
+ * `workers/index.ts`, not the web server:
  *
  * ```ts
  * import { registerNotificationDispatch } from "@/lib/notifications";
- * import { startOutboxDrain } from "@/server/services/outbox";
+ * import { outboxPass } from "@/server/services/outbox";
  *
  * registerNotificationDispatch();
- * startOutboxDrain();
+ * // ...then schedule outboxPass.
  * ```
  *
- * Registration must happen before the first drain tick, and is safe to call
- * repeatedly — the guard inside is what keeps a hot reload from doubling
+ * Registration must happen before the first drain tick — an event marked
+ * DONE with nothing listening is delivered to nobody, once — and is safe to
+ * call repeatedly: the guard inside is what keeps a hot reload from doubling
  * every send.
  */
 

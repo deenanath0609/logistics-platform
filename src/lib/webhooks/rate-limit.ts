@@ -1,100 +1,93 @@
+import {
+  rateLimitStore,
+  type RateLimitResult,
+  type RateLimitRule,
+} from "@/lib/rate-limit/store";
+
 /**
- * Per-key rate limiting.
+ * The limits the partner API runs on.
  *
- * A fixed window held in a plain map, because Redis is not available in
- * this environment and an API without a limit is worse than an API with an
- * approximate one. The consequences of the in-process store are stated
- * rather than hidden: the limit is per instance, and it resets on deploy.
+ * Two of them, guarding different things. The per-key quota is a fair-use
+ * budget for a partner who has already authenticated. The failure budget
+ * is a brute-force brake on callers who have not: it is counted per
+ * address rather than per key, because an attacker guessing keys has no
+ * key to count against.
  *
- * `consume` takes its store, its clock and its limits as arguments, so the
- * window arithmetic is testable without waiting for real seconds to pass.
- * Moving to Redis replaces the store, not the caller.
+ * The window arithmetic and its in-process store live in
+ * `lib/rate-limit/store.ts`, along with a note on what the limits below
+ * do and do not mean until a shared store replaces it.
  */
 
-export type RateWindow = { count: number; resetAt: number };
-
-export type RateVerdict = {
-  allowed: boolean;
-  limit: number;
-  remaining: number;
-  /** Epoch milliseconds at which the window rolls over. */
-  resetAt: number;
-  /** Seconds to wait, for the `Retry-After` header. Zero when allowed. */
-  retryAfterSeconds: number;
-};
-
-export function consume(
-  store: Map<string, RateWindow>,
-  key: string,
-  limit: number,
-  windowMs: number,
-  now: number,
-): RateVerdict {
-  const existing = store.get(key);
-
-  if (!existing || existing.resetAt <= now) {
-    const window: RateWindow = { count: 1, resetAt: now + windowMs };
-    store.set(key, window);
-    return {
-      allowed: true,
-      limit,
-      remaining: Math.max(0, limit - 1),
-      resetAt: window.resetAt,
-      retryAfterSeconds: 0,
-    };
-  }
-
-  if (existing.count >= limit) {
-    return {
-      allowed: false,
-      limit,
-      remaining: 0,
-      resetAt: existing.resetAt,
-      retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
-    };
-  }
-
-  existing.count++;
-  return {
-    allowed: true,
-    limit,
-    remaining: Math.max(0, limit - existing.count),
-    resetAt: existing.resetAt,
-    retryAfterSeconds: 0,
-  };
-}
-
-/** Drops windows that have rolled over, so the map cannot grow forever. */
-export function sweep(store: Map<string, RateWindow>, now: number): number {
-  let removed = 0;
-  for (const [key, window] of store) {
-    if (window.resetAt <= now) {
-      store.delete(key);
-      removed++;
-    }
-  }
-  return removed;
-}
-
-const globalForRateLimit = globalThis as unknown as {
-  apiRateWindows: Map<string, RateWindow> | undefined;
-};
-
-/** The process-wide store used by the v1 route handlers. */
-export const apiRateWindows: Map<string, RateWindow> =
-  globalForRateLimit.apiRateWindows ?? new Map<string, RateWindow>();
-
-globalForRateLimit.apiRateWindows = apiRateWindows;
+export type RateVerdict = RateLimitResult;
 
 export const DEFAULT_RATE_LIMIT = 120;
 export const DEFAULT_RATE_WINDOW_MS = 60_000;
 
-/** Convenience wrapper over the shared store with the default window. */
+/**
+ * Failed authentications tolerated from one address in five minutes.
+ *
+ * Twenty is far above any integration's accident — a partner with a stale
+ * key retries, notices the 401 and stops — and far below the volume a key
+ * search needs. Note what a *failed* request costs when it is not braked:
+ * a tenant resolution, a key lookup, a SHA-256 and the body parse, all
+ * before anything has proved the caller is anybody.
+ */
+export const AUTH_FAILURE_RULE: RateLimitRule = {
+  limit: 20,
+  windowMs: 300_000,
+};
+
+/** Fair-use budget for one authenticated key. */
 export function consumeApiQuota(
   keyId: string,
   limit = DEFAULT_RATE_LIMIT,
   now = Date.now(),
-): RateVerdict {
-  if (apiRateWindows.size > 5_000) sweep(apiRateWindows, now);
-  return consume(apiRateWindows, keyId, limit, DEFAULT_RATE_WINDOW_MS, now);
+): Promise<RateVerdict> {
+  return rateLimitStore.consume(
+    `api-key:${keyId}`,
+    { limit, windowMs: DEFAULT_RATE_WINDOW_MS },
+    now,
+  );
+}
+
+/**
+ * Whether this address has already spent its failure budget.
+ *
+ * Deliberately a peek rather than a consume: a caller presenting a good
+ * key must never be throttled by this limit, however many bad requests
+ * came from the same address a moment earlier. Only `noteAuthFailure`
+ * spends budget, and only after a request has actually failed.
+ */
+export function checkAuthFailures(
+  bucketKey: string,
+  now = Date.now(),
+): Promise<RateVerdict> {
+  return rateLimitStore.peek(bucketKey, AUTH_FAILURE_RULE, now);
+}
+
+/** Charges one failed authentication to the calling address. */
+export function noteAuthFailure(
+  bucketKey: string,
+  now = Date.now(),
+): Promise<RateVerdict> {
+  return rateLimitStore.consume(bucketKey, AUTH_FAILURE_RULE, now);
+}
+
+/**
+ * Claims the right to write one durable record for this address's burst.
+ *
+ * A budget of one over the same window: the first caller past the failure
+ * limit gets `ok`, every caller after it does not, and the persistent
+ * record is therefore written once per address per window rather than once
+ * per bogus request.
+ */
+export function claimAuthFailureReport(
+  bucketKey: string,
+  now = Date.now(),
+): Promise<RateVerdict> {
+  return rateLimitStore.consume(
+    `${bucketKey}:reported`,
+    { limit: 1, windowMs: AUTH_FAILURE_RULE.windowMs },
+    now,
+  );
 }

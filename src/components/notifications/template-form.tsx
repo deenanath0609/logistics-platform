@@ -18,7 +18,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { segmentsFor } from "@/lib/notifications/channels/mock";
+import { segmentsFor } from "@/lib/notifications/segments";
 import {
   extractPlaceholders,
   renderSubject,

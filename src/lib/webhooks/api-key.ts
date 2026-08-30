@@ -159,13 +159,59 @@ export function ipAllowed(
   return allowlist.some((rule) => ipInCidr(address, rule));
 }
 
-/** First address in an `X-Forwarded-For` chain — the client, not a proxy. */
-export function clientAddress(
-  forwardedFor: string | null | undefined,
-  realIp?: string | null,
-): string | null {
-  const first = forwardedFor?.split(",")[0]?.trim();
-  return first || realIp?.trim() || null;
+// The address itself is derived in `lib/net/client-ip.ts`, which is told
+// how many proxies stand in front of this process. What used to be here —
+// "the first entry of X-Forwarded-For is the client" — made the allowlist
+// below decorative: the first entry is whatever the caller typed.
+
+// ────────────────────────────────────────────────────────────
+// Scopes
+// ────────────────────────────────────────────────────────────
+
+/**
+ * The scopes a key may actually be issued with.
+ *
+ * Three sets intersected, and the third is the one that was missing: what
+ * was asked for, what the catalogue permits a key to carry at all, and
+ * what the person doing the issuing holds themselves. Without the last,
+ * `apikey.manage` was a general-purpose privilege escalation — mint a key
+ * with `pickup.create`, call the API, do the thing your own account cannot.
+ */
+export function grantableScopes(
+  requested: readonly string[],
+  catalogue: ReadonlySet<string>,
+  issuerPermissions: ReadonlySet<string>,
+): { granted: string[]; refused: string[] } {
+  const granted: string[] = [];
+  const refused: string[] = [];
+
+  for (const scope of new Set(requested)) {
+    if (!catalogue.has(scope)) {
+      refused.push(scope);
+    } else if (!issuerPermissions.has(scope)) {
+      refused.push(scope);
+    } else {
+      granted.push(scope);
+    }
+  }
+
+  return { granted, refused };
+}
+
+/**
+ * What a key can do *today*, as opposed to what it was issued with.
+ *
+ * Recomputed on every request against its owner's current permissions,
+ * because the two drift: a key issued last year by someone who has since
+ * been moved off the despatch desk must lose what that desk could do, on
+ * the next request and not at the next reissue. `scopes` on the row is a
+ * ceiling, never a grant.
+ */
+export function effectiveScopes(
+  keyScopes: readonly string[],
+  ownerPermissions: ReadonlySet<string>,
+): Set<string> {
+  return new Set(keyScopes.filter((scope) => ownerPermissions.has(scope)));
 }
 
 // ────────────────────────────────────────────────────────────
@@ -193,6 +239,12 @@ export function verifyApiKey(input: {
   record: ApiKeyRecord | null;
   requiredScope?: string;
   address?: string | null;
+  /**
+   * Whether `address` came from a proxy the deployment configured as
+   * trusted. An allowlist checked against a self-declared address is not
+   * an allowlist, so a false here refuses rather than compares.
+   */
+  addressTrusted?: boolean;
   now?: Date;
 }): VerifyResult {
   const now = input.now ?? new Date();
@@ -235,13 +287,30 @@ export function verifyApiKey(input: {
     };
   }
 
-  if (!ipAllowed(input.address, record.ipAllowlist)) {
-    return {
-      ok: false,
-      code: "ip",
-      status: 403,
-      message: "That API key is not permitted from this address.",
-    };
+  if (record.ipAllowlist.length > 0) {
+    // Fail closed when the deployment cannot establish who is calling. A
+    // key restricted to an address must stop working if the address cannot
+    // be believed — the alternative is a restriction any caller can
+    // satisfy by claiming to be the allowed address, which reads as
+    // security on the screen and is none.
+    if (!input.addressTrusted) {
+      return {
+        ok: false,
+        code: "ip",
+        status: 403,
+        message:
+          "This deployment cannot establish the calling address, so an address-restricted key cannot be honoured. Set TRUSTED_PROXY_HOPS, or reissue the key without an allowlist.",
+      };
+    }
+
+    if (!ipAllowed(input.address, record.ipAllowlist)) {
+      return {
+        ok: false,
+        code: "ip",
+        status: 403,
+        message: "That API key is not permitted from this address.",
+      };
+    }
   }
 
   if (input.requiredScope && !record.scopes.includes(input.requiredScope)) {

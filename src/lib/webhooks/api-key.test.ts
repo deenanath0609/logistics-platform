@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   API_KEY_PREFIX,
-  clientAddress,
+  effectiveScopes,
   generateApiKey,
+  grantableScopes,
   hashApiKey,
   ipAllowed,
   ipInCidr,
@@ -141,18 +142,83 @@ describe("ipAllowed", () => {
   });
 });
 
-describe("clientAddress", () => {
-  it("takes the first hop of an X-Forwarded-For chain", () => {
-    expect(clientAddress("203.0.113.7, 10.0.0.1, 10.0.0.2")).toBe("203.0.113.7");
+/**
+ * A key may never carry more than the person who issued it holds, and may
+ * never keep carrying it after they stop holding it. Both halves were
+ * promised — in the guard's doc comment and on the issue form — and
+ * neither was checked anywhere.
+ */
+describe("grantableScopes", () => {
+  const catalogue = new Set(["shipment.create", "shipment.read", "pickup.create"]);
+
+  it("grants what the issuer holds", () => {
+    const { granted, refused } = grantableScopes(
+      ["shipment.create", "shipment.read"],
+      catalogue,
+      new Set(["shipment.create", "shipment.read", "apikey.manage"]),
+    );
+    expect(granted).toEqual(["shipment.create", "shipment.read"]);
+    expect(refused).toEqual([]);
   });
 
-  it("falls back to X-Real-IP", () => {
-    expect(clientAddress(null, "203.0.113.7")).toBe("203.0.113.7");
-    expect(clientAddress("", "203.0.113.7")).toBe("203.0.113.7");
+  it("refuses a scope the issuer does not hold themselves", () => {
+    // The escalation: `apikey.manage` alone used to be enough to mint a key
+    // that creates pickups, which the issuer's own account cannot do.
+    const { granted, refused } = grantableScopes(
+      ["pickup.create"],
+      catalogue,
+      new Set(["apikey.manage"]),
+    );
+    expect(granted).toEqual([]);
+    expect(refused).toEqual(["pickup.create"]);
   });
 
-  it("returns null when neither header is present", () => {
-    expect(clientAddress(null, null)).toBeNull();
+  it("refuses a scope outside the catalogue however privileged the issuer", () => {
+    const { refused } = grantableScopes(
+      ["shipment.cancel"],
+      catalogue,
+      new Set(["shipment.cancel", "apikey.manage"]),
+    );
+    expect(refused).toEqual(["shipment.cancel"]);
+  });
+
+  it("keeps every scope asked for, not just the first", () => {
+    // The form posts one `scopes` entry per ticked checkbox. Reading it
+    // with `get` instead of `getAll` meant every multi-scope key ever
+    // issued stored exactly one scope.
+    const holder = new Set(["shipment.create", "shipment.read", "pickup.create"]);
+    const { granted } = grantableScopes(
+      ["shipment.create", "shipment.read", "pickup.create"],
+      catalogue,
+      holder,
+    );
+    expect(granted).toHaveLength(3);
+  });
+
+  it("de-duplicates rather than storing a scope twice", () => {
+    const { granted } = grantableScopes(
+      ["shipment.read", "shipment.read"],
+      catalogue,
+      new Set(["shipment.read"]),
+    );
+    expect(granted).toEqual(["shipment.read"]);
+  });
+});
+
+describe("effectiveScopes", () => {
+  it("is the key's scopes narrowed by what its owner holds today", () => {
+    expect([
+      ...effectiveScopes(
+        ["shipment.create", "pickup.create"],
+        new Set(["shipment.create"]),
+      ),
+    ]).toEqual(["shipment.create"]);
+  });
+
+  it("empties when the owner's role is revoked", () => {
+    // Revoking somebody's role has to disable the keys they issued. It did
+    // not: the guard admitted a request on `scopes` alone.
+    expect(effectiveScopes(["shipment.create"], new Set()).size).toBe(0);
   });
 });
 
@@ -214,6 +280,7 @@ describe("verifyApiKey", () => {
       presented: key,
       record: row,
       address: "198.51.100.9",
+      addressTrusted: true,
       now: NOW,
     });
 
@@ -223,8 +290,47 @@ describe("verifyApiKey", () => {
   it("accepts a caller inside the allowlist", () => {
     const { key, row } = issued({ ipAllowlist: ["203.0.113.0/24"] });
     expect(
-      verifyApiKey({ presented: key, record: row, address: "203.0.113.9", now: NOW })
-        .ok,
+      verifyApiKey({
+        presented: key,
+        record: row,
+        address: "203.0.113.9",
+        addressTrusted: true,
+        now: NOW,
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("refuses an allowlisted key when the address is not vouched for", () => {
+    // The allowlist used to be checked against the leftmost
+    // `X-Forwarded-For` entry — a value the caller writes — so satisfying
+    // it was a matter of typing the allowed address into a header. An
+    // address nothing vouches for now fails the check outright rather than
+    // being compared, and the message says what to configure.
+    const { key, row } = issued({ ipAllowlist: ["203.0.113.0/24"] });
+    const result = verifyApiKey({
+      presented: key,
+      record: row,
+      address: "203.0.113.9",
+      addressTrusted: false,
+      now: NOW,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "ip", status: 403 });
+    if (!result.ok) expect(result.message).toContain("TRUSTED_PROXY_HOPS");
+  });
+
+  it("leaves a key with no allowlist unaffected by all of that", () => {
+    // Most keys have no allowlist, and they must not start failing because
+    // the deployment cannot identify the caller.
+    const { key, row } = issued({ ipAllowlist: [] });
+    expect(
+      verifyApiKey({
+        presented: key,
+        record: row,
+        address: null,
+        addressTrusted: false,
+        now: NOW,
+      }).ok,
     ).toBe(true);
   });
 

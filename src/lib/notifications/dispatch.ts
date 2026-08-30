@@ -151,7 +151,7 @@ export async function dispatchEvent(
   const eventKey = asString(input.payload.eventId) ?? input.outboxId;
 
   const variables = {
-    ...baseVariables(context),
+    ...(await baseVariables(context)),
     ...(await eventVariables(input.eventType, context, input.payload)),
   };
 
@@ -395,6 +395,10 @@ type WriteLogInput = {
 
 async function writeLog(args: WriteLogInput): Promise<{ id: string }> {
   const data = {
+    // From the template, not from the ambient tenant: a log row must belong
+    // to the same carrier as the template that produced it, and the
+    // extension refuses the write if the two ever disagree.
+    orgId: args.template.orgId,
     templateId: args.template.id,
     channel: args.template.channel,
     eventType: args.input.eventType,
@@ -450,6 +454,7 @@ async function logSkipped(
 
   await prisma.notificationLog.create({
     data: {
+      orgId: template.orgId,
       templateId: template.id,
       channel: template.channel,
       eventType: input.eventType,

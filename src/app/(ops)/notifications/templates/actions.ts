@@ -112,7 +112,9 @@ export async function createTemplate(
     if (issue) return { error: issue };
 
     const created = await prisma.notificationTemplate.create({
-      data: toData(parsed.data),
+      // Stamped here rather than inside `toData`, which `updateTemplate`
+      // shares — an edit has no business restating the owner.
+      data: { ...toData(parsed.data), orgId: user.orgId },
       select: { id: true, code: true, channel: true, dltTemplateId: true },
     });
 

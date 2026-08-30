@@ -6,7 +6,7 @@ import {
   signWebhook,
   verifyWebhook,
 } from "./signature";
-import { consume, sweep, type RateWindow } from "./rate-limit";
+import { AUTH_FAILURE_RULE, DEFAULT_RATE_LIMIT } from "./rate-limit";
 import {
   findForbiddenKey,
   maskPhone,
@@ -178,49 +178,23 @@ describe("backoffSeconds", () => {
   });
 });
 
+/**
+ * The window arithmetic itself now lives in `lib/rate-limit/store.ts` and
+ * is tested there. What belongs here is the shape of the two budgets the
+ * partner API runs on, because those numbers are a policy.
+ */
 describe("rate limiting", () => {
-  it("allows up to the limit inside one window", () => {
-    const store = new Map<string, RateWindow>();
-    for (let call = 1; call <= 3; call++) {
-      expect(consume(store, "key_1", 3, 60_000, 1_000).allowed).toBe(true);
-    }
+  it("keeps the per-key quota generous enough for a real integration", () => {
+    expect(DEFAULT_RATE_LIMIT).toBeGreaterThanOrEqual(60);
   });
 
-  it("refuses the call past the limit and says how long to wait", () => {
-    const store = new Map<string, RateWindow>();
-    for (let call = 1; call <= 3; call++) consume(store, "key_1", 3, 60_000, 1_000);
-
-    const verdict = consume(store, "key_1", 3, 60_000, 1_000);
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.remaining).toBe(0);
-    expect(verdict.retryAfterSeconds).toBe(60);
-  });
-
-  it("lets the caller through again once the window rolls over", () => {
-    const store = new Map<string, RateWindow>();
-    for (let call = 1; call <= 3; call++) consume(store, "key_1", 3, 60_000, 1_000);
-    expect(consume(store, "key_1", 3, 60_000, 61_001).allowed).toBe(true);
-  });
-
-  it("counts each key separately", () => {
-    const store = new Map<string, RateWindow>();
-    for (let call = 1; call <= 3; call++) consume(store, "key_1", 3, 60_000, 1_000);
-    expect(consume(store, "key_2", 3, 60_000, 1_000).allowed).toBe(true);
-  });
-
-  it("reports the remaining budget honestly", () => {
-    const store = new Map<string, RateWindow>();
-    expect(consume(store, "key_1", 3, 60_000, 1_000).remaining).toBe(2);
-    expect(consume(store, "key_1", 3, 60_000, 1_000).remaining).toBe(1);
-    expect(consume(store, "key_1", 3, 60_000, 1_000).remaining).toBe(0);
-  });
-
-  it("sweeps windows that have rolled over so the map cannot grow forever", () => {
-    const store = new Map<string, RateWindow>();
-    consume(store, "key_1", 3, 60_000, 1_000);
-    consume(store, "key_2", 3, 60_000, 1_000);
-    expect(sweep(store, 61_001)).toBe(2);
-    expect(store.size).toBe(0);
+  it("sets the failure budget far below what guessing a key needs", () => {
+    // A partner with a stale key retries a handful of times and stops. A
+    // caller searching the key space cannot work inside twenty attempts in
+    // five minutes — and until this existed, every failure returned before
+    // any limit was counted, so there was no budget at all.
+    expect(AUTH_FAILURE_RULE.limit).toBeLessThanOrEqual(25);
+    expect(AUTH_FAILURE_RULE.windowMs).toBeGreaterThanOrEqual(60_000);
   });
 });
 

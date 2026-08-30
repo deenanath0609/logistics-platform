@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant/resolve";
+import { currentOrgId } from "@/lib/tenant/context";
+import { forEachTenant } from "@/lib/tenant/for-each-tenant";
 import type { Prisma } from "@/generated/prisma/client";
 import { onOutbox } from "@/server/services/outbox";
 import { toWebhookBody } from "./public-payload";
@@ -25,6 +28,15 @@ import {
  * An endpoint that has rejected fifteen consecutive deliveries is not
  * coming back on the sixteenth, and a queue grinding against a dead URL
  * buries the deliveries that could still succeed.
+ *
+ * Both stages run per tenant. Fan-out inherits the drain's tenant; delivery
+ * gets its own, one organisation at a time, because a partner endpoint that
+ * has gone dark must not delay another carrier's partner.
+ *
+ * `WebhookDelivery` is the one table here with no `orgId` of its own — it is
+ * isolated through the subscription it hangs off — so the extension adds
+ * nothing to queries against it and the tenant predicate is written by hand
+ * wherever a delivery is reached by id or in bulk.
  */
 
 /** Consecutive failed deliveries before a subscription is paused. */
@@ -34,7 +46,7 @@ export const PAUSE_AFTER_FAILURES = 15;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 const BATCH_SIZE = 25;
-const DISPATCH_INTERVAL_MS = 10_000;
+export const DISPATCH_INTERVAL_MS = 10_000;
 
 /** How long a claimed delivery is held before another dispatcher may take it. */
 const LEASE_MS = 60_000;
@@ -59,7 +71,10 @@ export async function fanOutEvent(event: {
 }): Promise<number> {
   const subscriptions = await prisma.webhookSubscription.findMany({
     where: { isActive: true, pausedAt: null },
-    select: { id: true, events: true, customerId: true },
+    // orgId is carried through to the delivery rows below rather than
+    // resolved again: a delivery belongs to the carrier whose subscription
+    // asked for it.
+    select: { id: true, orgId: true, events: true, customerId: true },
   });
 
   if (subscriptions.length === 0) return 0;
@@ -92,6 +107,7 @@ export async function fanOutEvent(event: {
 
   await prisma.webhookDelivery.createMany({
     data: targets.map((subscription) => ({
+      orgId: subscription.orgId,
       subscriptionId: subscription.id,
       eventType: event.eventType,
       payload: body as Prisma.InputJsonValue,
@@ -104,6 +120,7 @@ export async function fanOutEvent(event: {
 const globalForWebhooks = globalThis as unknown as {
   webhookHandlerRegistered: boolean | undefined;
   webhookTimer: NodeJS.Timeout | undefined;
+  webhookPassInFlight: boolean | undefined;
 };
 
 /**
@@ -159,7 +176,7 @@ export async function deliverOne(delivery: {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "CityLogistics-Webhooks/1",
+        "User-Agent": "Webhooks/1",
         [SIGNATURE_HEADER]: signWebhook(delivery.subscription.secret, timestamp, body),
         [TIMESTAMP_HEADER]: String(timestamp),
         [EVENT_HEADER]: delivery.eventType,
@@ -243,7 +260,11 @@ export async function deliverDue(limit = BATCH_SIZE): Promise<{
     where: {
       status: "PENDING",
       nextAttemptAt: { lte: new Date() },
-      subscription: { isActive: true, pausedAt: null },
+      // The `orgId` here is not decoration. Nothing else in this query is
+      // tenant-scoped — the extension leaves `WebhookDelivery` alone — so
+      // without it one tenant's dispatcher would claim, sign and POST
+      // another tenant's payloads to another tenant's partner.
+      subscription: { orgId: currentOrgId(), isActive: true, pausedAt: null },
     },
     orderBy: { createdAt: "asc" },
     take: limit,
@@ -289,7 +310,15 @@ export async function deliverDue(limit = BATCH_SIZE): Promise<{
 /** Re-queues one delivery by hand, from the ops screen. */
 export async function redeliver(deliveryId: string): Promise<void> {
   await prisma.webhookDelivery.update({
-    where: { id: deliveryId },
+    // The id comes off a screen, so it comes off a URL. Same reason as in
+    // `deliverDue`: the extension cannot scope this table, and an id from
+    // one tenant must not resolve inside another.
+    // `requireTenantOrgId()`, not `currentOrgId()`: `deliverDue` above runs
+    // in the worker under `runWithTenant`, where the synchronous form works,
+    // but this one is called from a server action on the integrations screen
+    // — and inside a request the tenant comes from the `Host` header, not
+    // from AsyncLocalStorage. The sync form would throw on every redelivery.
+    where: { id: deliveryId, subscription: { orgId: await requireTenantOrgId() } },
     data: {
       status: "PENDING",
       nextAttemptAt: new Date(),
@@ -307,32 +336,52 @@ export function generateWebhookSecret(): string {
 }
 
 // ────────────────────────────────────────────────────────────
-// In-process scheduler
+// The pass, and the timer that used to be the only way to run it
 // ────────────────────────────────────────────────────────────
 
 /**
- * Starts the delivery timer.
+ * One delivery tick, over every tenant.
  *
- * Same arrangement as the outbox drain, and for the same reason: Redis is
- * not available here yet. When it is, this becomes a BullMQ worker and
- * `deliverDue` is what the worker calls — nothing else moves.
+ * The unit of work the worker schedules — and the one a BullMQ job would
+ * invoke instead, with `deliverDue` and the lease underneath it untouched.
+ * Never throws.
+ */
+export async function webhookPass(): Promise<void> {
+  if (globalForWebhooks.webhookPassInFlight) return;
+  globalForWebhooks.webhookPassInFlight = true;
+
+  try {
+    const pass = await forEachTenant({ job: "webhooks" }, () => deliverDue());
+
+    const failed = pass.results.reduce((n, row) => n + row.value.failed, 0);
+    if (failed > 0) {
+      console.warn(`[webhooks] ${failed} delivery(ies) failed and will retry`);
+    }
+  } catch (error) {
+    // Only a failure to enumerate tenants lands here; a tenant whose
+    // partner is unreachable is caught inside the pass and logged there.
+    console.error("[webhooks] dispatch failed", error);
+  } finally {
+    globalForWebhooks.webhookPassInFlight = false;
+  }
+}
+
+/**
+ * Starts the delivery timer inside whatever process calls it.
+ *
+ * Only reached when `RUN_JOBS_IN_WEB=true`. The worker schedules
+ * `webhookPass` itself, so that a shutdown can wait for an in-flight POST
+ * to be recorded rather than abandoning a delivery that has already been
+ * sent — which would post it a second time when the lease lapsed.
  */
 export function startWebhookDispatch(): void {
   registerWebhookDispatch();
   if (globalForWebhooks.webhookTimer) return;
 
-  const tick = async () => {
-    try {
-      const { failed } = await deliverDue();
-      if (failed > 0) {
-        console.warn(`[webhooks] ${failed} delivery(ies) failed and will retry`);
-      }
-    } catch (error) {
-      console.error("[webhooks] dispatch failed", error);
-    }
-  };
-
-  globalForWebhooks.webhookTimer = setInterval(tick, DISPATCH_INTERVAL_MS);
+  globalForWebhooks.webhookTimer = setInterval(
+    () => void webhookPass(),
+    DISPATCH_INTERVAL_MS,
+  );
   globalForWebhooks.webhookTimer.unref?.();
 }
 
