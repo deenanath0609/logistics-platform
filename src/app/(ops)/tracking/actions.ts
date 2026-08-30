@@ -214,7 +214,8 @@ export async function pollNowAction(
   try {
     await authorize("geofence.manage");
 
-    const result = await pollOnce();
+    // Forced: the button exists precisely to jump the vendor's own interval.
+    const result = await pollOnce({ force: true });
     revalidatePath("/tracking");
     revalidatePath("/tracking/providers");
 
@@ -225,10 +226,26 @@ export async function pollNowAction(
       };
     }
 
-    return {
-      ok: true,
-      message: `Polled ${result.devices} device(s): ${result.accepted} new fix(es), ${result.duplicates} duplicate(s), ${result.fenceEvents} fence event(s), ${result.shipmentEvents} consignment event(s).`,
-    };
+    const polled =
+      `Polled ${result.devices} device(s) through ${result.providers} provider(s): ` +
+      `${result.accepted} new fix(es), ${result.duplicates} duplicate(s), ` +
+      `${result.fenceEvents} fence event(s), ${result.shipmentEvents} consignment event(s).`;
+
+    // A vendor that refused is reported here rather than left as a quiet
+    // zero. Whoever pressed this is standing next to a device asking whether
+    // it works, and "0 new fixes" with no reason is the wrong answer to give
+    // them when the reason is known.
+    if (result.failures.length > 0) {
+      const detail = result.failures
+        .map((failure) => `${failure.code}: ${failure.message}`)
+        .join("; ");
+
+      return result.providers === 0
+        ? { error: `No provider answered — ${detail}` }
+        : { ok: true, message: `${polled} Not answering — ${detail}` };
+    }
+
+    return { ok: true, message: polled };
   } catch (error) {
     if (error instanceof PermissionError) {
       return { error: "You do not have permission to poll the tracking provider." };

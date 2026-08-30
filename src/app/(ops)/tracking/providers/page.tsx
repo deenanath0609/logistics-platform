@@ -67,16 +67,20 @@ export default async function TrackingProvidersPage() {
       <div className="mb-4 grid gap-3 lg:grid-cols-2">
         <section className="rounded-lg border bg-card px-4 py-3">
           <h2 className="font-mono text-[0.65rem] uppercase tracking-[0.13em] text-muted-foreground">
-            Environment default
+            Fallback, and the tick
           </h2>
           <p className="mt-2 text-sm">
+            Your own rows below are what we poll. With none, we fall back to{" "}
             <span className="font-mono">GPS_PROVIDER</span> ={" "}
-            <span className="font-mono font-medium">{env.GPS_PROVIDER}</span>,
-            polling every{" "}
-            <span className="tabular">{env.GPS_POLL_INTERVAL_SECONDS}</span>{" "}
-            seconds.
+            <span className="font-mono font-medium">{env.GPS_PROVIDER}</span> —
+            or to the vendor account held for you by the platform, if one has
+            been entered.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
+            Each row carries its own interval; the process ticks every{" "}
+            <span className="tabular">{env.GPS_POLL_INTERVAL_SECONDS}</span>{" "}
+            seconds and a row is skipped until its own interval has elapsed, so
+            that tick is the floor — nothing is pulled more often than it.
             Adapters compiled in: {codes.join(", ")}. A code with no adapter
             behind it is refused at save rather than producing a configuration
             that looks healthy and polls nothing.
@@ -110,7 +114,7 @@ export default async function TrackingProvidersPage() {
         {providers.length === 0 ? (
           <EmptyState
             title="No provider configured"
-            description={`Nothing is configured for this organisation, so polling falls back to the environment default (${env.GPS_PROVIDER}) with no stored credentials. Add a provider to attach a vendor.`}
+            description={`Nothing is configured for this organisation, so polling falls back to the vendor account held for you by the platform — and to ${env.GPS_PROVIDER} if there is none of those either. Add a provider to poll your own account instead.`}
             action={<ProviderDialog codes={codes} />}
           />
         ) : (
@@ -188,11 +192,14 @@ export default async function TrackingProvidersPage() {
       </TableFrame>
 
       <p className="mt-4 max-w-prose text-xs text-muted-foreground">
-        A provider row is not required to run. With none configured the pipeline
-        uses the environment default and no stored credentials, which is exactly
-        what the simulated fleet needs. Rows exist for the case that actually
-        turns up in practice — one organisation on two telematics contracts
-        after buying a competitor, with both fleets on one live map.
+        A provider row is not required to run: with none, the pipeline falls
+        back to the account held for you and then to the simulated fleet, which
+        is exactly what a demonstration needs. Every row here is polled, not
+        just the first — which is the case that actually turns up in practice,
+        one organisation on two telematics contracts after buying a competitor,
+        with both fleets on one live map. A row set to <span className="font-mono">they push</span>{" "}
+        is not polled at all; its vendor delivers to the webhook above, and
+        pulling as well would double every fix.
       </p>
     </>
   );
