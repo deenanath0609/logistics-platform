@@ -20,10 +20,13 @@ const FILE = "src/lib/notifications/channels/email.ts";
  * have been stuck on the mock for ever. So the adapter is always built, and
  * decides per message — which is also per tenant, because the credential is.
  *
- * `nodemailer` is already a dependency of this project, so the real
- * implementation is a transport built from the resolved settings and a
- * `sendMail` call — but it is not written here, because a relay that has
- * never been tested against is not a relay.
+ * The real implementation is a transport built from the resolved settings
+ * and one `sendMail` call — but it is not written here, because a relay
+ * that has never been tested against is not a relay. `nodemailer` was
+ * carried as a dependency in anticipation of it and has been dropped again:
+ * an unused package with a live SMTP-injection advisory against it is a
+ * standing audit failure bought in exchange for nothing. Add it back with
+ * the transport, on a version the advisory does not name.
  */
 export function emailAdapter(): ChannelAdapter {
   const noRelay = mockAdapter("EMAIL");
