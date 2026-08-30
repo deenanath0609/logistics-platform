@@ -59,7 +59,7 @@ ${message.body}`
       console.info(
         `[notify:mock] ${channel} → ${target}` +
           (message.subject ? ` | ${message.subject}` : "") +
-          `\n${message.body}` +
+          detail +
           (warnings.length ? `\n  ⚠ ${warnings.join("; ")}` : ""),
       );
 

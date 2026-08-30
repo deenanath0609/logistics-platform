@@ -50,18 +50,12 @@ import {
   startRun,
 } from "../src/lib/delivery/runs";
 import { recordDelivery, recordFailedAttempt } from "../src/lib/delivery/execute";
-import { periodKeyFor } from "../src/lib/numbering/number-series";
+
 import type { ShipmentEventType, ShipmentStatus } from "../src/generated/prisma/client";
 
 let failures = 0;
 let passes = 0;
 
-/**
- * A number-series row this script had to create to get past a bug, removed
- * again on the way out. Module-level so the cleanup in `main` reaches it
- * however `run` returned.
- */
-let fixtureSeriesId: string | null = null;
 
 function check(label: string, ok: boolean, detail = "") {
   if (ok) passes += 1;
@@ -764,18 +758,7 @@ async function main() {
     `\nField delivery cycle — acting as ${tenant.slug} (${tenant.subdomain})\n`,
   );
 
-  await runWithTenant(tenant, async () => {
-    try {
-      await run();
-    } finally {
-      // Only the row this run invented. A series the tenant configured for
-      // itself is left exactly where it was.
-      if (fixtureSeriesId) {
-        await prisma.numberSeries.delete({ where: { id: fixtureSeriesId } });
-        console.log("\n  removed the stand-in DELIVERY_RUN series");
-      }
-    }
-  });
+  await runWithTenant(tenant, () => run());
 
   console.log(`\n${passes} passed, ${failures} failed`);
   console.log(failures === 0 ? "PASS\n" : "FAIL\n");
