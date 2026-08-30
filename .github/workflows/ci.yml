@@ -1,0 +1,200 @@
+# Every verification this project has, run without anybody remembering to.
+#
+# Until now the suites existed and were green whenever somebody typed them.
+# That is not the same thing as a gate: the isolation probes, the plan
+# gating, the field cycle and the worker drain are exactly the checks that
+# fail quietly weeks after the change that broke them, and a green terminal
+# from last Tuesday proves nothing about today's push.
+#
+# The job builds a database that looks like production rather than like a
+# developer's laptop: migrations run as the owner, row-level security is
+# applied, and the application connects as `logistics_app`, a role that owns
+# nothing. Running the HTTP suites against an app connected as the owner
+# would pass while proving the opposite of what they claim, because RLS does
+# not apply to a table's owner.
+#
+# Two carriers are provisioned because every isolation and gating probe
+# needs a second one to try to reach.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Types, tests, and the whole app over HTTP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: logistics
+        ports:
+          - 5432:5432
+        # Without this the first migration races the server's own startup.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # The owner. Migrations and the RLS bootstrap only.
+      MIGRATE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/logistics
+      # The application. Owns nothing, so the policies actually apply to it.
+      DATABASE_URL: postgresql://logistics_app:ci-app-password@127.0.0.1:5432/logistics
+      APP_DB_PASSWORD: ci-app-password
+      TENANT_RLS: "on"
+
+      # Test-only values. Nothing here unlocks anything outside this runner:
+      # the database is thrown away with the job and no external service is
+      # reachable from it. Real secrets belong in repository secrets, and
+      # none of them are needed to run the suites.
+      AUTH_SECRET: ci-auth-secret-not-used-anywhere-else
+      CREDENTIALS_KEY: Y2ktY3JlZGVudGlhbHMta2V5LTMyLWJ5dGVzLXh4
+      APP_URL: http://localhost:3010
+      APP_ROOT_DOMAIN: localhost
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Migrate, as the owner
+        run: npx prisma migrate deploy
+
+      # Creates `logistics_app` and every policy. Connects as the owner,
+      # which is why it runs before DATABASE_URL is ever used.
+      - name: Apply row-level security
+        run: node scripts/apply-rls.mjs --apply
+
+      - name: Seed
+        run: |
+          npm run db:seed
+          npm run db:seed:demo
+
+      # The second carrier. Every isolation probe needs someone to try to
+      # reach, and every gating probe needs a plan that withholds something.
+      - name: Provision the second carrier
+        run: |
+          npx tsx scripts/provision-tenant.ts \
+            --slug acme-freight --name "Acme Freight" --subdomain acme \
+            --owner-mobile 9800000001 --owner-name "Priya Rao"
+
+      - name: Types
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      # `next start`, not `next dev`: the suites should walk the same output
+      # that would be deployed, and a dev server compiles a route on first
+      # request, which turns a cold screen into a timeout rather than a
+      # result.
+      - name: Start the app
+        run: |
+          npm run start -- --port 3010 > /tmp/app.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -sf -H "Host: city-logistics.localhost:3010" \
+              http://127.0.0.1:3010/api/health > /dev/null; then
+              echo "up after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the app never became ready"
+          cat /tmp/app.log
+          exit 1
+
+      # Each of these exits non-zero on its own failures and prints PASS/FAIL
+      # per check, so the step that fails names the probe that failed.
+      - name: Tenant isolation
+        run: npm run tenant:verify
+
+      - name: Plan gating
+        run: npx tsx scripts/verify-plan-gating.ts
+
+      - name: Ops screens
+        run: node scripts/smoke.mjs
+
+      - name: Operator console
+        run: npm run smoke:platform
+
+      - name: Customer portal
+        run: npm run smoke:portal
+
+      - name: Partner API
+        run: npm run smoke:api
+
+      - name: The delivery cycle, as a field agent
+        run: npm run verify:field
+
+      - name: A consignment from booking to close
+        run: npm run verify:spine
+
+      - name: The outbox drains outside the web server
+        run: npm run verify:worker
+
+      - name: Each carrier polls its own telematics account
+        run: npm run verify:gps
+
+      # The app's own log, whatever happened above. A 500 on one screen is
+      # a stack trace here and a one-line FAIL up there; both are wanted.
+      - name: The app's log
+        if: always()
+        run: cat /tmp/app.log || true
+
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Reported, not enforced — deliberately, and this is the honest reason:
+      # `xlsx` has open advisories with no fixed release on npm, and
+      # `next-auth` pins a `nodemailer` that is itself named in one. A gate
+      # that is red on every run for reasons no commit can fix is a gate
+      # people learn to ignore, and it would then be ignored on the day it is
+      # red for a new reason. So the step always passes and the output is
+      # read. When those two are resolved, add `--audit-level=high` and let
+      # it fail.
+      - name: npm audit
+        run: npm audit || true
