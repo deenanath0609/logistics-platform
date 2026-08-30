@@ -18,7 +18,7 @@ import {
   DEFAULT_RATE_LIMIT,
   noteAuthFailure,
 } from "@/lib/webhooks/rate-limit";
-import { requireTenantOrgId } from "@/lib/tenant";
+import { requireTenantOrgId, resolveTenant } from "@/lib/tenant";
 import { fail, ok, requestIdFrom } from "./respond";
 
 /**
@@ -261,6 +261,26 @@ export async function withApiKey(
       "Too many failed authentications from this address.",
       requestId,
       { headers: { "Retry-After": String(brake.retryAfterSeconds) } },
+    );
+  }
+
+  // No carrier on this host, so there is no partner API here.
+  //
+  // The key lookup below is tenant-scoped by the extension, which is the
+  // whole of the isolation story on this route — and on the bare platform
+  // domain, where the operator console lives, there is no tenant for it to
+  // scope to. The extension threw, nothing caught it, and a valid key
+  // presented against the console answered 500 with a request id: an
+  // internal error standing in for "this endpoint is not served here".
+  //
+  // 404 rather than 401, deliberately. A caller on the wrong host learns
+  // that the route does not exist there, and nothing about whether the key
+  // they hold is real — the same answer a stranger gets.
+  if (!(await resolveTenant())) {
+    return fail(
+      "not_found",
+      "The partner API is served on a carrier's own subdomain.",
+      requestId,
     );
   }
 
