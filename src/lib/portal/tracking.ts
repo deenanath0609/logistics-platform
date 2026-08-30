@@ -65,7 +65,7 @@ export async function lookupTracking(
   const numbers = parseTrackingQuery(raw);
   if (numbers.length === 0) return { ok: false, reason: "EMPTY" };
 
-  const limit: RateLimitResult = checkRateLimit(
+  const limit: RateLimitResult = await checkRateLimit(
     clientKey(headers, "track"),
     TRACKING_RULE,
   );

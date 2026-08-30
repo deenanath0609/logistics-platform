@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { KeyRound, LogOut, Truck } from "lucide-react";
+import { KeyRound, LogOut } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
 import { signOut } from "@/lib/auth";
 import {
@@ -7,6 +7,8 @@ import {
   isAccountOwner,
   requireCustomerUser,
 } from "@/lib/auth/customer-session";
+import { TenantMark } from "@/components/brand/tenant-mark";
+import { requireTenantPage } from "@/lib/tenant/page";
 import { PortalNav } from "@/components/portal/portal-nav";
 import { visibleNav } from "@/components/portal/nav";
 
@@ -23,6 +25,7 @@ export default async function PortalAppLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const { branding } = await requireTenantPage();
   const session = await requireCustomerUser();
 
   const items = visibleNav({
@@ -38,13 +41,12 @@ export default async function PortalAppLayout({
   return (
     <div className="grid min-h-dvh lg:grid-cols-[236px_minmax(0,1fr)]">
       <aside className="hidden border-r bg-sidebar lg:flex lg:flex-col">
-        <div className="flex h-14 items-center gap-2.5 border-b px-4">
-          <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Truck className="size-4" />
-          </span>
-          <Link href="/portal" className="font-semibold tracking-tight">
-            City Logistics
-          </Link>
+        <div className="flex h-14 items-center border-b px-4">
+          <TenantMark
+            name={branding.name}
+            logoUrl={branding.logoUrl}
+            href="/portal"
+          />
         </div>
 
         <div className="flex flex-col gap-1 border-b px-4 py-4">
@@ -80,10 +82,18 @@ export default async function PortalAppLayout({
 
       <div className="flex min-w-0 flex-col">
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b bg-background/95 px-4 backdrop-blur lg:hidden">
-          <Link href="/portal" className="flex items-center gap-2">
-            <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Truck className="size-4" />
-            </span>
+          {/*
+            The carrier's mark beside the customer's own name: on a phone
+            this header is the only place the account they are signed in as
+            appears, so the name here stays theirs and not the carrier's.
+          */}
+          <Link href="/portal" className="flex items-center gap-2.5">
+            <TenantMark
+              name={branding.name}
+              logoUrl={branding.logoUrl}
+              showName={false}
+              className="flex items-center"
+            />
             <span className="font-semibold tracking-tight">
               {session.customerName}
             </span>

@@ -10,6 +10,7 @@ import {
   type CustomerSession,
 } from "@/lib/auth/customer-session";
 import { customerOwnedFilter } from "@/lib/portal/visibility";
+import { assertWithinLimit, isPlanLimitError } from "@/lib/plan-limits";
 import {
   generateTemporaryPassword,
   hashPassword,
@@ -65,6 +66,20 @@ async function requireOwner(): Promise<CustomerSession> {
 
 function describe(error: unknown): string {
   if (error instanceof CustomerAuthError) return error.message;
+
+  // The one place a plan-limit message is *not* passed through.
+  //
+  // `PlanLimitError` names the carrier's plan and its numbers, and the
+  // reader here is the carrier's customer. The product is white-label: the
+  // consignor booking through this portal is not supposed to know the
+  // carrier buys it from anyone, let alone on which plan. They also cannot
+  // act on it — no amount of upgrading on their side adds a login. So the
+  // refusal is rewritten as something true and actionable for them, and
+  // the number stays on the carrier's own usage panel where it belongs.
+  if (isPlanLimitError(error)) {
+    return "No more logins can be added to this account. Ask your account manager to raise the limit.";
+  }
+
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Unique constraint")) {
     return "That email address already has a login.";
@@ -93,13 +108,21 @@ export async function inviteSubUser(
     const { visibleBranchIds, ...data } = parsed.data;
     const branchIds = await ownBranchIds(session, visibleBranchIds);
 
+    // The cap belongs to the carrier, not to this customer account: the
+    // carrier bought a plan with room for so many portal logins, and every
+    // one of their customers draws on the same pool. `describe` below
+    // rewrites the refusal before it is shown — see the note there.
+    await assertWithinLimit("portalUsers");
+
     const temporary = generateTemporaryPassword();
 
     const created = await prisma.customerUser.create({
       data: {
         ...data,
         mobile: data.mobile,
-        // From the session, never from the form.
+        // Both from the session, never from the form: the account the owner
+        // is signed in to, and the carrier that account belongs to.
+        orgId: session.orgId,
         ...customerOwnedFilter(session),
         passwordHash: await hashPassword(temporary),
         // The password the owner reads down the phone must not outlive

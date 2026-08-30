@@ -24,17 +24,23 @@ const EMPTY: ComplaintState = {};
  * Laid out as a chat rather than a table: on a 375px screen a two-column
  * "author / message" grid gives the message about forty characters a line,
  * and a complaint thread is prose.
+ *
+ * `carrierName` arrives as a prop rather than being resolved here: this is a
+ * client component, and the tenant is a property of the request host that
+ * only the server has read.
  */
 export function ComplaintThread({
   complaintId,
   messages,
   canReply,
   settled,
+  carrierName,
 }: {
   complaintId: string;
   messages: PortalMessage[];
   canReply: boolean;
   settled: boolean;
+  carrierName: string;
 }) {
   const [state, action, pending] = useActionState(replyToComplaint, EMPTY);
   const boxRef = useRef<HTMLTextAreaElement>(null);
@@ -77,7 +83,7 @@ export function ComplaintThread({
                       ? "You"
                       : message.author === "colleague"
                         ? (message.authorName ?? "Your colleague")
-                        : "City Logistics"}
+                        : carrierName}
                     {" · "}
                     <time dateTime={message.at}>
                       {new Date(message.at).toLocaleString("en-IN", {

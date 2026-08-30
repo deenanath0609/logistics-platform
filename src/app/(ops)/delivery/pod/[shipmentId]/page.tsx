@@ -1,9 +1,13 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
 import { anyBranchScope } from "@/server/repositories/scope";
+import { DocumentLogo } from "@/components/documents/letterhead";
+import {
+  documentDateTime,
+  documentMoney,
+} from "@/components/documents/format";
 import { PrintButton } from "./print-button";
 
 export const metadata: Metadata = { title: "Proof of delivery" };
@@ -50,6 +54,7 @@ export default async function PodPage({
       shipment: {
         select: {
           id: true,
+          orgId: true,
           lrNumber: true,
           mode: true,
           bookedAt: true,
@@ -126,9 +131,27 @@ export default async function PodPage({
 
   if (!scoped) notFound();
 
+  // A POD is stapled to an invoice and read by people outside the company,
+  // so the letterhead has to be the carrier that actually moved the goods —
+  // hence the lookup by the shipment's own org. `Organization` is global and
+  // the tenant extension does not filter it (ADR 001 §4), so a `where`-less
+  // read would brand the proof with whichever tenant came back first.
   const [org, agent] = await Promise.all([
-    prisma.organization.findFirstOrThrow({
-      select: { name: true, legalName: true, gstin: true, phone: true, email: true },
+    prisma.organization.findUniqueOrThrow({
+      where: { id: pod.shipment.orgId },
+      select: {
+        name: true,
+        legalName: true,
+        gstin: true,
+        phone: true,
+        email: true,
+        logoUrl: true,
+        documentFooter: true,
+        supportEmail: true,
+        supportPhone: true,
+        currency: true,
+        timezone: true,
+      },
     }),
     pod.agentId
       ? prisma.user.findUnique({
@@ -142,10 +165,19 @@ export default async function PodPage({
   const assetHref = (assetId: string) =>
     `/delivery/pod/${shipment.id}/asset/${assetId}`;
 
+  // The desk a consignee is meant to ring about this delivery, and nothing
+  // when the carrier has published neither a support line nor a switchboard.
+  const support = [
+    org.supportPhone ?? org.phone,
+    org.supportEmail ?? org.email,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   const facts: Array<[string, string]> = [
     ["Consignment note", shipment.lrNumber],
     ["Service", `${shipment.serviceType.code} · ${shipment.mode}`],
-    ["Booked", format(shipment.bookedAt, "dd MMM yyyy HH:mm")],
+    ["Booked", documentDateTime(shipment.bookedAt, org.timezone)],
     ["Lane", `${shipment.originBranch.code} → ${shipment.destinationBranch.code}`],
     ["Packages", String(shipment.packageCount)],
     ["Weight", `${Number(shipment.chargeableWeight)} kg chargeable`],
@@ -153,7 +185,7 @@ export default async function PodPage({
     [
       "Declared value",
       shipment.declaredValue
-        ? `₹${Number(shipment.declaredValue).toLocaleString("en-IN")}`
+        ? documentMoney(shipment.declaredValue, org.currency)
         : "—",
     ],
   ];
@@ -186,6 +218,7 @@ export default async function PodPage({
         {/* Masthead */}
         <header className="flex items-start justify-between gap-6 border-b-2 border-foreground pb-4">
           <div>
+            <DocumentLogo src={org.logoUrl} name={org.name} />
             <p className="text-lg font-bold tracking-tight">{org.name}</p>
             {org.legalName && (
               <p className="text-xs text-muted-foreground">{org.legalName}</p>
@@ -214,7 +247,7 @@ export default async function PodPage({
               {shipment.lrNumber}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Delivered {format(pod.deliveredAt, "dd MMM yyyy · HH:mm")}
+              Delivered {documentDateTime(pod.deliveredAt, org.timezone)}
             </p>
             {pod.task?.run?.number && (
               <p className="font-mono text-[0.65rem] text-muted-foreground">
@@ -280,10 +313,13 @@ export default async function PodPage({
           </div>
 
           <dl className="mt-3 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
-            <Row label="Delivered at" value={format(pod.deliveredAt, "dd MMM yyyy HH:mm")} />
+            <Row
+              label="Delivered at"
+              value={documentDateTime(pod.deliveredAt, org.timezone)}
+            />
             <Row
               label="Recorded at"
-              value={format(pod.recordedAt, "dd MMM yyyy HH:mm")}
+              value={documentDateTime(pod.recordedAt, org.timezone)}
             />
             <Row label="Agent" value={agent?.name ?? "—"} />
             <Row
@@ -359,17 +395,26 @@ export default async function PodPage({
             <dl className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
               <Row
                 label="Due"
-                value={`₹${Number(shipment.codCollection.amountExpected).toLocaleString("en-IN")}`}
+                value={documentMoney(
+                  shipment.codCollection.amountExpected,
+                  org.currency,
+                )}
               />
               <Row
                 label="Collected"
-                value={`₹${Number(shipment.codCollection.amountCollected).toLocaleString("en-IN")}`}
+                value={documentMoney(
+                  shipment.codCollection.amountCollected,
+                  org.currency,
+                )}
               />
               <Row label="Mode" value={shipment.codCollection.mode.replace("_", " ")} />
               <Row label="Reference" value={shipment.codCollection.reference ?? "—"} />
               <Row
                 label="Collected at"
-                value={format(shipment.codCollection.collectedAt, "dd MMM yyyy HH:mm")}
+                value={documentDateTime(
+                  shipment.codCollection.collectedAt,
+                  org.timezone,
+                )}
               />
               <Row label="State" value={shipment.codCollection.state} />
             </dl>
@@ -395,7 +440,7 @@ export default async function PodPage({
                 <tr key={attempt.id} className="border-b border-border/60">
                   <td className="py-1 pr-2 tabular">{attempt.attemptNumber}</td>
                   <td className="py-1 pr-2 tabular">
-                    {format(attempt.attemptedAt, "dd MMM yyyy HH:mm")}
+                    {documentDateTime(attempt.attemptedAt, org.timezone)}
                   </td>
                   <td className="py-1 pr-2">
                     {attempt.outcome === "COLLECTED" ? "Delivered" : "Not delivered"}
@@ -414,10 +459,19 @@ export default async function PodPage({
           </p>
         </section>
 
-        <footer className="mt-6 border-t pt-3 text-[0.65rem] text-muted-foreground">
-          Generated {format(new Date(), "dd MMM yyyy HH:mm")} · {org.name}
-          {org.phone ? ` · ${org.phone}` : ""}
-          {org.email ? ` · ${org.email}` : ""}
+        {/*
+          The carrier's own footer first — jurisdiction, liability, whatever
+          they print on their paperwork — and the provenance line after it.
+          The generation stamp is not tenant copy and stays: an accounts
+          department stapling this to an invoice needs to know when it was
+          taken off the system.
+        */}
+        <footer className="mt-6 flex flex-col gap-1 border-t pt-3 text-[0.65rem] leading-snug text-muted-foreground">
+          {org.documentFooter && <p>{org.documentFooter}</p>}
+          <p>
+            Generated {documentDateTime(new Date(), org.timezone)} · {org.name}
+            {support ? ` · ${support}` : ""}
+          </p>
         </footer>
       </article>
     </>

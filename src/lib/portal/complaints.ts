@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type {
   ComplaintCategory,
   ComplaintPriority,
@@ -491,12 +491,12 @@ export async function raisePortalComplaint(
   const { respondBy, resolveBy } = deadlinesFrom(raisedAt, input.category, priority);
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction, so an abandoned complaint does
       // not burn a number out of the series.
       const number = await nextNumber(
         { document: "COMPLAINT" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.complaint.create({
@@ -565,6 +565,7 @@ export async function replyToPortalComplaint(
   try {
     await prisma.complaintMessage.create({
       data: {
+        orgId: session.orgId,
         complaintId: complaint.id,
         body: text,
         authorCustomerUserId: session.id,

@@ -38,7 +38,7 @@ export async function signInCustomer(
     return { error: parsed.error.issues[0]?.message ?? "Check your details." };
   }
 
-  const limit = checkRateLimit(
+  const limit = await checkRateLimit(
     clientKey(await headers(), "portal-login"),
     PORTAL_LOGIN_RULE,
   );

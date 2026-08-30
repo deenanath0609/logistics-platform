@@ -4,6 +4,7 @@ import type { PaymentType } from "@/generated/prisma/client";
 import type { CustomerSession } from "@/lib/auth/customer-session";
 import { createBooking, type BookingResult } from "@/lib/shipment/booking";
 import { bookingActorFor, resolveBookingBranches } from "./service-actor";
+import type { ShipmentMode } from "@/generated/prisma/client";
 
 /**
  * Booking from the portal.
@@ -23,7 +24,7 @@ export type PortalBookingInput = {
   /** One of the account's own `CustomerAddress` rows. */
   pickupAddressId: string;
   serviceTypeId: string;
-  mode: "FTL" | "PTL" | "COURIER";
+  mode: ShipmentMode;
 
   consigneeName: string;
   consigneeCompany?: string | null;

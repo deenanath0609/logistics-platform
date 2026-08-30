@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { PickupSlot, PickupStatus } from "@/generated/prisma/client";
 import type { CustomerSession } from "@/lib/auth/customer-session";
 import { nextNumber } from "@/lib/numbering/number-series";
@@ -65,7 +65,9 @@ export async function createPortalPickup(
       where: { id: session.customerId },
       select: { name: true, phone: true, branchId: true, isBlocked: true },
     }),
-    prisma.pincode.findUnique({
+    // Per-tenant geography: the PIN code is unique within the tenant, and
+    // the extension supplies that half of the key.
+    prisma.pincode.findFirst({
       where: { code: address.pincode },
       select: { servingBranchId: true },
     }),
@@ -88,12 +90,12 @@ export async function createPortalPickup(
     };
   }
 
-  const created = await prisma.$transaction(async (tx) => {
+  const created = await tenantTransaction(async (tx) => {
     // Numbered inside the transaction so an abandoned request does not
     // consume a number.
     const number = await nextNumber(
       { document: "PICKUP" },
-      tx as unknown as Parameters<typeof nextNumber>[1],
+      tx,
     );
 
     return tx.pickupRequest.create({

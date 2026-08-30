@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { prisma } from "@/lib/prisma";
+import { createHash } from "node:crypto";
+import { prisma, type DbOrTx } from "@/lib/prisma";
 import { getEnv } from "@/lib/env";
-import type { FileKind, Prisma } from "@/generated/prisma/client";
+import { requireTenantOrgId } from "@/lib/tenant";
+import { buildObjectKey, getObjectStore } from "@/lib/storage";
+import { ACCEPTED_CAPTURE_TYPES, parseDataUrl } from "./data-url";
+import type { FileKind } from "@/generated/prisma/client";
 
 /**
  * Field capture storage.
@@ -12,18 +13,10 @@ import type { FileKind, Prisma } from "@/generated/prisma/client";
  * eighteen months later, so they are written before the delivery is
  * confirmed and never regenerated.
  *
- * TODO(phase-5, storage): this writes bytes to the local filesystem under
- * `/storage` and records the path as the `FileAsset.objectKey`. The S3/MinIO
- * adapter is not built yet — `S3_ENDPOINT` and friends are already in the
- * environment schema waiting for it. When it lands, replace `putObject`
- * below with the real client and backfill existing rows by streaming
- * `/storage/<objectKey>` into the bucket; nothing else in this module or
- * its callers changes, because callers only ever see a `FileAsset.id`.
+ * Where the bytes actually go is `@/lib/storage`'s problem. This module
+ * decides *what* is worth storing and records the pointer; callers below it
+ * only ever see a `FileAsset.id`.
  */
-
-/** Where the local stopgap writes. Sits outside `public/` on purpose:
- *  proof of delivery is not world-readable. */
-const STORAGE_ROOT = path.join(process.cwd(), "storage");
 
 /** A phone photo compressed on-device should be far under this. */
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -59,7 +52,7 @@ export type StoreAssetInput = {
  */
 export async function storeAsset(
   input: StoreAssetInput,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<StoredAsset> {
   if (input.bytes.byteLength === 0) {
     throw new Error("Refusing to store an empty file.");
@@ -70,15 +63,33 @@ export async function storeAsset(
     );
   }
 
-  const extension = extensionFor(input.contentType, input.fileName);
-  const objectKey = `${folderFor(input.kind)}/${input.ownerId}/${randomUUID()}${extension}`;
+  // Resolved before the key rather than after the write, because the key
+  // now begins with it: the tenant is part of where the bytes live, not a
+  // column recorded alongside them.
+  //
+  // This is the one write in the module with no actor and no parent row to
+  // take the tenant from — a caller may hand one in (they all do today), and
+  // the request's own tenant is the honest answer when none arrives.
+  const orgId = input.orgId ?? (await requireTenantOrgId());
+
+  const objectKey = buildObjectKey({
+    orgId,
+    kind: input.kind,
+    ownerId: input.ownerId,
+    fileName: input.fileName,
+    contentType: input.contentType,
+  });
   const checksum = createHash("sha256").update(input.bytes).digest("hex");
 
-  await putObject(objectKey, input.bytes);
+  await getObjectStore().put({
+    key: objectKey,
+    bytes: input.bytes,
+    contentType: input.contentType,
+  });
 
   const asset = await client.fileAsset.create({
     data: {
-      orgId: input.orgId ?? undefined,
+      orgId,
       kind: input.kind,
       bucket: getEnv().S3_BUCKET,
       objectKey,
@@ -111,13 +122,15 @@ export async function storeDataUrl(
   input: Omit<StoreAssetInput, "bytes" | "contentType" | "fileName"> & {
     fileName: string;
   },
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<StoredAsset | null> {
   if (!dataUrl) return null;
 
   const parsed = parseDataUrl(dataUrl);
   if (!parsed) {
-    throw new Error("That capture is not a readable image.");
+    throw new Error(
+      `That capture is not a readable image. Send it as ${[...ACCEPTED_CAPTURE_TYPES].join(", ")}.`,
+    );
   }
 
   return storeAsset(
@@ -131,57 +144,12 @@ export async function storeDataUrl(
   );
 }
 
-const DATA_URL = /^data:([a-z]+\/[a-z0-9.+-]+);base64,(.+)$/i;
+// Which types a capture may be is a policy, not a storage detail, so it
+// lives in its own module and is tested there. Re-exported because callers
+// have always reached it through this one.
+export {
+  parseDataUrl,
+  isAcceptedCaptureType,
+  ACCEPTED_CAPTURE_TYPES,
+} from "./data-url";
 
-export function parseDataUrl(
-  value: string,
-): { contentType: string; bytes: Buffer } | null {
-  const match = DATA_URL.exec(value.trim());
-  if (!match) return null;
-
-  // Only images. A field capture is a photograph or an ink signature;
-  // accepting anything else would make this an upload endpoint.
-  if (!match[1].startsWith("image/")) return null;
-
-  try {
-    return { contentType: match[1], bytes: Buffer.from(match[2], "base64") };
-  } catch {
-    return null;
-  }
-}
-
-/** The local stopgap. Replaced wholesale by the S3 adapter — see the TODO. */
-async function putObject(objectKey: string, bytes: Buffer): Promise<void> {
-  const destination = path.join(STORAGE_ROOT, objectKey);
-  await mkdir(path.dirname(destination), { recursive: true });
-  await writeFile(destination, bytes);
-}
-
-function folderFor(kind: FileKind): string {
-  switch (kind) {
-    case "POD_SIGNATURE":
-    case "POD_PHOTO":
-    case "PACKAGE_PHOTO":
-      return "pod";
-    case "DAMAGE_PHOTO":
-      return "damage";
-    default:
-      return "misc";
-  }
-}
-
-function extensionFor(contentType: string, fileName: string): string {
-  const fromName = path.extname(fileName).toLowerCase();
-  if (fromName) return fromName;
-
-  switch (contentType) {
-    case "image/png":
-      return ".png";
-    case "image/webp":
-      return ".webp";
-    case "image/jpeg":
-      return ".jpg";
-    default:
-      return "";
-  }
-}

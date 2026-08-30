@@ -1,46 +1,55 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import {
-  checkRateLimit,
-  clientKey,
-  resetRateLimit,
-  TRACKING_RULE,
-} from "./rate-limit";
-import { parseTrackingQuery, trackingHref, MAX_LOOKUP } from "./tracking";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+/**
+ * `clientKey` asks the environment how many proxies stand in front of the
+ * app, so the environment is stubbed rather than validated here — the same
+ * arrangement `integrations/secrets.test.ts` uses.
+ */
+const env = vi.hoisted(() => ({
+  current: { TRUSTED_PROXY_HOPS: 0 } as Record<string, unknown>,
+}));
+
+vi.mock("@/lib/env", () => ({ getEnv: () => env.current }));
+
+const { checkRateLimit, clientKey, resetRateLimit, TRACKING_RULE } = await import(
+  "./rate-limit"
+);
+const { parseTrackingQuery, trackingHref, MAX_LOOKUP } = await import("./tracking");
 
 describe("checkRateLimit", () => {
   beforeEach(() => resetRateLimit());
 
-  it("allows exactly the budget and then refuses", () => {
+  it("allows exactly the budget and then refuses", async () => {
     const rule = { limit: 3, windowMs: 1000 };
     const now = 1_000_000;
 
-    expect(checkRateLimit("a", rule, now).ok).toBe(true);
-    expect(checkRateLimit("a", rule, now).ok).toBe(true);
-    expect(checkRateLimit("a", rule, now).ok).toBe(true);
+    expect((await checkRateLimit("a", rule, now)).ok).toBe(true);
+    expect((await checkRateLimit("a", rule, now)).ok).toBe(true);
+    expect((await checkRateLimit("a", rule, now)).ok).toBe(true);
 
-    const refused = checkRateLimit("a", rule, now);
+    const refused = await checkRateLimit("a", rule, now);
     expect(refused.ok).toBe(false);
     expect(refused.remaining).toBe(0);
     expect(refused.retryAfterSeconds).toBeGreaterThan(0);
   });
 
-  it("counts each caller separately", () => {
+  it("counts each caller separately", async () => {
     const rule = { limit: 1, windowMs: 1000 };
     const now = 2_000_000;
 
-    expect(checkRateLimit("ip-a", rule, now).ok).toBe(true);
-    expect(checkRateLimit("ip-a", rule, now).ok).toBe(false);
+    expect((await checkRateLimit("ip-a", rule, now)).ok).toBe(true);
+    expect((await checkRateLimit("ip-a", rule, now)).ok).toBe(false);
     // One noisy caller must not lock everyone else out.
-    expect(checkRateLimit("ip-b", rule, now).ok).toBe(true);
+    expect((await checkRateLimit("ip-b", rule, now)).ok).toBe(true);
   });
 
-  it("opens a fresh window once the old one expires", () => {
+  it("opens a fresh window once the old one expires", async () => {
     const rule = { limit: 1, windowMs: 1000 };
     const now = 3_000_000;
 
-    expect(checkRateLimit("c", rule, now).ok).toBe(true);
-    expect(checkRateLimit("c", rule, now + 500).ok).toBe(false);
-    expect(checkRateLimit("c", rule, now + 1001).ok).toBe(true);
+    expect((await checkRateLimit("c", rule, now)).ok).toBe(true);
+    expect((await checkRateLimit("c", rule, now + 500)).ok).toBe(false);
+    expect((await checkRateLimit("c", rule, now + 1001)).ok).toBe(true);
   });
 
   it("keeps the public tracking budget usable by a person", () => {
@@ -51,17 +60,55 @@ describe("checkRateLimit", () => {
   });
 });
 
+/**
+ * The bug these cover: this function used to return the *leftmost*
+ * `X-Forwarded-For` value, which is the one entry a caller writes. A
+ * caller who rotated it got a fresh bucket per request, which lifted the
+ * public tracking limit, the portal login throttle and the operator
+ * console login throttle all at once. Per-account lockouts survived;
+ * spraying one password across many accounts was not throttled at all.
+ */
 describe("clientKey", () => {
-  it("prefers the first forwarded address", () => {
-    const headers = new Headers({
-      "x-forwarded-for": "203.0.113.7, 10.0.0.1",
-      "x-real-ip": "10.0.0.1",
-    });
-    expect(clientKey(headers, "track")).toBe("track:203.0.113.7");
+  beforeEach(() => {
+    env.current = { TRUSTED_PROXY_HOPS: 1 };
   });
 
-  it("falls back to a constant rather than to no limit at all", () => {
-    expect(clientKey(new Headers(), "track")).toBe("track:unknown");
+  it("does not bucket on the value a caller prepended to the chain", () => {
+    const headers = new Headers({
+      "x-forwarded-for": "10.9.9.9, 203.0.113.7",
+    });
+    expect(clientKey(headers, "track")).not.toContain("10.9.9.9");
+  });
+
+  it("gives a caller who rotates the forged prefix the same bucket", () => {
+    const first = clientKey(
+      new Headers({ "x-forwarded-for": "10.9.9.1, 203.0.113.7" }),
+      "portal-login",
+    );
+    const second = clientKey(
+      new Headers({ "x-forwarded-for": "10.9.9.2, 203.0.113.7" }),
+      "portal-login",
+    );
+    expect(first).toBe(second);
+  });
+
+  it("keeps different callers apart", () => {
+    const a = clientKey(new Headers({ "x-forwarded-for": "203.0.113.7" }), "track");
+    const b = clientKey(new Headers({ "x-forwarded-for": "203.0.113.8" }), "track");
+    expect(a).not.toBe(b);
+  });
+
+  it("falls back to a real bucket rather than to no limit at all", () => {
+    expect(clientKey(new Headers(), "track")).toContain("unknown");
+  });
+
+  it("takes the rightmost hop when no proxy is configured either", () => {
+    // With no proxy the address cannot be trusted at all, but the bucket
+    // must still not be one the caller picks by writing a header.
+    env.current = { TRUSTED_PROXY_HOPS: 0 };
+    expect(
+      clientKey(new Headers({ "x-forwarded-for": "10.9.9.9, 203.0.113.7" }), "track"),
+    ).not.toContain("10.9.9.9");
   });
 });
 

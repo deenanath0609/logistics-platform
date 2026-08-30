@@ -1,4 +1,5 @@
 "use server";
+import { SHIPMENT_MODE_VALUES } from "@/lib/shipment/modes";
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
@@ -29,7 +30,7 @@ const schema = z.object({
   // their own address book, not free text.
   pickupAddressId: z.string().min(1, "Choose where we should collect from"),
 
-  mode: z.enum(["FTL", "PTL", "COURIER"]),
+  mode: z.enum(SHIPMENT_MODE_VALUES),
   serviceTypeId: z.string().min(1, "Choose a service"),
 
   consigneeName: z.string().trim().min(2, "Required").max(120),

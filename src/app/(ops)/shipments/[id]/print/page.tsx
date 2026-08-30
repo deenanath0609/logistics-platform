@@ -1,8 +1,12 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
+import { DocumentLogo } from "@/components/documents/letterhead";
+import {
+  documentDateTime,
+  documentMoney,
+} from "@/components/documents/format";
 import { PrintButton } from "./print-button";
 
 export const metadata: Metadata = { title: "Consignment note" };
@@ -43,13 +47,42 @@ export default async function PrintPage({
 
   if (!shipment || shipment.deletedAt) notFound();
 
-  const org = await prisma.organization.findFirstOrThrow({
-    select: { name: true, legalName: true, gstin: true, phone: true, email: true },
+  // The letterhead belongs to the carrier that owns the consignment, so it
+  // is looked up by that id. `Organization` is one of the two global tables
+  // the tenant extension deliberately does not filter (ADR 001 §4), so a
+  // `where`-less read here would print whichever tenant the planner
+  // returned first — another company's name on this company's LR.
+  const org = await prisma.organization.findUniqueOrThrow({
+    where: { id: shipment.orgId },
+    select: {
+      name: true,
+      legalName: true,
+      gstin: true,
+      phone: true,
+      email: true,
+      logoUrl: true,
+      documentFooter: true,
+      termsText: true,
+      supportEmail: true,
+      supportPhone: true,
+      currency: true,
+      timezone: true,
+    },
   });
+
+  // A support desk the carrier has named, falling back to their switchboard.
+  // Empty when they have set neither: inviting a consignee to call a number
+  // nobody answers is worse than printing no number at all.
+  const support = [
+    org.supportPhone ?? org.phone,
+    org.supportEmail ?? org.email,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const rows: Array<[string, string]> = [
     ["Service", `${shipment.serviceType.code} · ${shipment.mode}`],
-    ["Booked", format(shipment.bookedAt, "dd MMM yyyy HH:mm")],
+    ["Booked", documentDateTime(shipment.bookedAt, org.timezone)],
     ["Packages", String(shipment.packageCount)],
     ["Package type", shipment.packageType?.name ?? "—"],
     ["Actual weight", `${Number(shipment.actualWeight)} kg`],
@@ -57,7 +90,7 @@ export default async function PrintPage({
     [
       "Declared value",
       shipment.declaredValue
-        ? `₹${Number(shipment.declaredValue).toLocaleString("en-IN")}`
+        ? documentMoney(shipment.declaredValue, org.currency)
         : "—",
     ],
     ["E-way bill", shipment.ewayBillNumber ?? "—"],
@@ -93,6 +126,7 @@ export default async function PrintPage({
         {/* Masthead */}
         <header className="flex items-start justify-between gap-6 border-b-2 border-foreground pb-4">
           <div>
+            <DocumentLogo src={org.logoUrl} name={org.name} />
             <p className="text-lg font-bold tracking-tight">{org.name}</p>
             {org.legalName && (
               <p className="text-xs text-muted-foreground">{org.legalName}</p>
@@ -207,20 +241,20 @@ export default async function PrintPage({
                     <tr key={charge.id}>
                       <td className="py-0.5">{charge.chargeType.name}</td>
                       <td className="py-0.5 text-right tabular">
-                        ₹{Number(charge.amount).toFixed(2)}
+                        {documentMoney(charge.amount, org.currency)}
                       </td>
                     </tr>
                   ))}
                   <tr className="border-t">
                     <td className="py-0.5">Tax</td>
                     <td className="py-0.5 text-right tabular">
-                      ₹{Number(shipment.taxAmount).toFixed(2)}
+                      {documentMoney(shipment.taxAmount, org.currency)}
                     </td>
                   </tr>
                   <tr className="border-t font-semibold">
                     <td className="py-1">Total</td>
                     <td className="py-1 text-right tabular">
-                      ₹{Number(shipment.grandTotal).toFixed(2)}
+                      {documentMoney(shipment.grandTotal, org.currency)}
                     </td>
                   </tr>
                 </tbody>
@@ -237,7 +271,7 @@ export default async function PrintPage({
             </p>
             {shipment.paymentType === "COD" && (
               <p className="text-base font-bold">
-                Collect ₹{Number(shipment.codAmount ?? 0).toLocaleString("en-IN")}
+                Collect {documentMoney(shipment.codAmount ?? 0, org.currency)}
               </p>
             )}
             {shipment.isReverseCharge && (
@@ -262,11 +296,27 @@ export default async function PrintPage({
           )}
         </section>
 
-        <p className="mt-6 text-[0.6rem] leading-snug text-muted-foreground">
-          Goods are carried at owner&rsquo;s risk unless insured. Claims must be
-          notified in writing within 7 days of delivery. This consignment note
-          is issued subject to the carrier&rsquo;s standard terms.
-        </p>
+        {/*
+          The conditions of carriage are the carrier's contract with the
+          consignor, and there is no safe default for them: the text that
+          used to sit here asserted a seven-day claim window, which is a
+          term that differs by carrier — the demo tenant's own `termsText`
+          says thirty. Printing an invented window on a legal document is
+          worse than printing none, so a tenant who has not written their
+          terms gets no paragraph, and writing them is an onboarding task.
+        */}
+        {org.termsText && (
+          <p className="mt-6 text-[0.6rem] leading-snug text-muted-foreground">
+            {org.termsText}
+          </p>
+        )}
+
+        {(org.documentFooter || support) && (
+          <footer className="mt-4 border-t pt-3 text-[0.6rem] leading-snug text-muted-foreground">
+            {org.documentFooter && <p>{org.documentFooter}</p>}
+            {support && <p>{support}</p>}
+          </footer>
+        )}
       </article>
 
       {/* Package labels */}
@@ -318,7 +368,9 @@ export default async function PrintPage({
                 )}
                 {shipment.paymentType === "COD" && (
                   <span className="rounded-sm border border-foreground px-1.5 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-wider">
-                    COD ₹{Number(shipment.codAmount ?? 0)}
+                    {/* No paise: a label this size has room for the figure
+                        a driver reads at arm's length, and nothing else. */}
+                    COD {documentMoney(shipment.codAmount ?? 0, org.currency, 0)}
                   </span>
                 )}
               </div>

@@ -39,11 +39,12 @@ const PORTAL_ACTOR_PERMISSIONS = ["shipment.create"] as const;
 /**
  * Finds or creates the portal service principal for an organisation.
  *
- * Idempotent: `mobile` is unique, so concurrent first bookings converge on
- * one row rather than racing.
+ * Idempotent: `(orgId, mobile)` is unique, so concurrent first bookings
+ * converge on one row rather than racing. Every tenant gets its own portal
+ * principal, which is what keeps the reserved number usable for all of them.
  */
 async function portalServiceUser(orgId: string) {
-  const existing = await prisma.user.findUnique({
+  const existing = await prisma.user.findFirst({
     where: { mobile: PORTAL_ACTOR_MOBILE },
     select: { id: true, orgId: true, primaryBranchId: true },
   });
@@ -115,11 +116,14 @@ export async function resolveBookingBranches(input: {
       where: { id: input.customerId },
       select: { branchId: true, isBlocked: true, blockReason: true },
     }),
-    prisma.pincode.findUnique({
+    // Geography is per-tenant master data, so a PIN code is unique only
+    // within the tenant — `findFirst` under the tenant filter, not
+    // `findUnique`.
+    prisma.pincode.findFirst({
       where: { code: input.consignorPincode },
       select: { servingBranchId: true },
     }),
-    prisma.pincode.findUnique({
+    prisma.pincode.findFirst({
       where: { code: input.consigneePincode },
       select: { servingBranchId: true, isServiceable: true },
     }),

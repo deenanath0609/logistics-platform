@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { format } from "date-fns";
 import { ChevronLeft } from "lucide-react";
 import { requireCustomerUser } from "@/lib/auth/customer-session";
+import { requireTenantPage } from "@/lib/tenant/page";
 import { getPortalComplaint } from "@/lib/portal/complaints";
 import { PageHeader } from "@/components/shell/page-header";
 import { ComplaintStatusPill } from "@/components/portal/complaint-pill";
@@ -33,6 +34,9 @@ export default async function PortalComplaintPage({
   params: Promise<{ id: string }>;
 }) {
   const session = await requireCustomerUser();
+  // The thread is a client component and cannot resolve the host itself, so
+  // the name replies are signed with is read here and passed down.
+  const { branding } = await requireTenantPage();
   const { id } = await params;
 
   // Scoped inside the query. Another account's complaint id is a 404 here,
@@ -131,6 +135,7 @@ export default async function PortalComplaintPage({
           messages={complaint.messages}
           canReply={complaint.canReply}
           settled={complaint.tone === "settled"}
+          carrierName={branding.name}
         />
       </div>
     </>

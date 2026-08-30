@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Truck } from "lucide-react";
 import { getCurrentCustomerUser } from "@/lib/auth/customer-session";
+import { TenantMark } from "@/components/brand/tenant-mark";
+import { requireTenantPage } from "@/lib/tenant/page";
 import { PortalLoginForm } from "./login-form";
 
 export const metadata: Metadata = {
@@ -15,23 +16,27 @@ export default async function PortalLoginPage({
 }: {
   searchParams: Promise<{ next?: string }>;
 }) {
+  // Sits outside the `(app)` layout — the forced password change lives here
+  // too — so this page resolves the tenant itself.
+  const { branding } = await requireTenantPage();
+
   const customer = await getCurrentCustomerUser();
   if (customer) redirect("/portal");
 
   const { next } = await searchParams;
   const target = next?.startsWith("/portal") ? next : "/portal";
 
+  // A customer who cannot sign in phones the carrier, never the vendor.
+  const supportLine = branding.supportPhone ?? branding.supportEmail;
+
   return (
     <main className="grid min-h-dvh lg:grid-cols-[1.1fr_1fr]">
       <section className="hidden flex-col justify-between bg-sidebar p-12 lg:flex">
-        <div className="flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Truck className="size-5" />
-          </span>
-          <span className="text-lg font-semibold tracking-tight">
-            City Logistics
-          </span>
-        </div>
+        <TenantMark
+          name={branding.name}
+          logoUrl={branding.logoUrl}
+          className="flex items-center gap-3 text-lg"
+        />
 
         <div className="flex max-w-md flex-col gap-4">
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-primary">
@@ -56,14 +61,12 @@ export default async function PortalLoginPage({
 
       <section className="flex items-center justify-center px-6 py-16">
         <div className="flex w-full max-w-sm flex-col gap-8">
-          <div className="flex flex-col gap-2 lg:hidden">
-            <span className="flex size-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Truck className="size-5" />
-            </span>
-            <span className="text-lg font-semibold tracking-tight">
-              City Logistics
-            </span>
-          </div>
+          {/* The brand panel is hidden here, so the mark stands in for it. */}
+          <TenantMark
+            name={branding.name}
+            logoUrl={branding.logoUrl}
+            className="flex flex-col items-start gap-2 text-lg lg:hidden"
+          />
 
           <div className="flex flex-col gap-1.5">
             <h2 className="text-2xl font-semibold tracking-tight">
@@ -85,7 +88,7 @@ export default async function PortalLoginPage({
             <Link href="/track" className="underline underline-offset-4">
               track it here
             </Link>
-            .
+            .{supportLine ? ` Trouble signing in? ${supportLine}.` : ""}
           </p>
         </div>
       </section>

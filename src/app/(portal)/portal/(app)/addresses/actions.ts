@@ -102,7 +102,7 @@ export async function saveAddress(
       // `customerId` comes from the session, never from the form. There is
       // no way to spell "someone else's account" here.
       const created = await prisma.customerAddress.create({
-        data: { ...data, ...customerOwnedFilter(session) },
+        data: { ...data, orgId: session.orgId, ...customerOwnedFilter(session) },
         select: { id: true },
       });
       savedId = created.id;

@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
 import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
+import { DocumentLogo } from "@/components/documents/letterhead";
+import { documentDate, documentMoney } from "@/components/documents/format";
 import {
   FORWARD_CHARGE_DECLARATION,
   REVERSE_CHARGE_DECLARATION,
@@ -92,7 +93,13 @@ export default async function InvoicePrintPage({
   if (!invoice) notFound();
   if (!coversBranch(user, invoice.branchId)) notFound();
 
-  const org = await prisma.organization.findFirstOrThrow({
+  // The supplier on a tax invoice is the organisation that raised it, so it
+  // is read by that id. `Organization` is global and the tenant extension
+  // does not filter it (ADR 001 §4): a `where`-less read would put an
+  // arbitrary tenant's name, GSTIN and PAN on a document the customer files
+  // with their return.
+  const org = await prisma.organization.findUniqueOrThrow({
+    where: { id: invoice.orgId },
     select: {
       name: true,
       legalName: true,
@@ -106,6 +113,13 @@ export default async function InvoicePrintPage({
       phone: true,
       email: true,
       website: true,
+      logoUrl: true,
+      documentFooter: true,
+      termsText: true,
+      supportEmail: true,
+      supportPhone: true,
+      currency: true,
+      timezone: true,
     },
   });
 
@@ -150,6 +164,14 @@ export default async function InvoicePrintPage({
     invoice.branch.city.state.name,
   ].filter(Boolean);
 
+  const contactLine = [
+    invoice.branch.phone ?? org.phone,
+    invoice.branch.email ?? org.email,
+    org.website,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   const buyerAddress = [
     invoice.customer.billingAddress,
     invoice.customer.billingCity
@@ -189,6 +211,7 @@ export default async function InvoicePrintPage({
         {/* Masthead */}
         <header className="flex items-start justify-between gap-6 border-b-2 border-foreground pb-4">
           <div>
+            <DocumentLogo src={org.logoUrl} name={org.legalName ?? org.name} />
             <p className="text-lg font-bold tracking-tight">
               {org.legalName ?? org.name}
             </p>
@@ -203,11 +226,14 @@ export default async function InvoicePrintPage({
                 {line}
               </p>
             ))}
-            <p className="text-xs text-muted-foreground">
-              {[invoice.branch.phone ?? org.phone, invoice.branch.email ?? org.email]
-                .filter(Boolean)
-                .join(" · ")}
-            </p>
+            {/*
+              The branch that raised the invoice answers for it, so its own
+              contacts win over the head-office ones. The website is the
+              carrier's, never the branch's.
+            */}
+            {contactLine && (
+              <p className="text-xs text-muted-foreground">{contactLine}</p>
+            )}
             <p className="mt-1 font-mono text-xs">
               GSTIN {invoice.branch.gstin ?? org.gstin ?? "—"}
               {org.pan && <span className="ml-3">PAN {org.pan}</span>}
@@ -223,15 +249,15 @@ export default async function InvoicePrintPage({
               {invoice.number}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Dated {format(invoice.invoiceDate, "dd MMM yyyy")}
+              Dated {documentDate(invoice.invoiceDate, org.timezone)}
             </p>
             <p className="text-xs text-muted-foreground">
-              Due {format(invoice.dueDate, "dd MMM yyyy")}
+              Due {documentDate(invoice.dueDate, org.timezone)}
             </p>
             {invoice.periodFrom && invoice.periodTo && (
               <p className="mt-1 text-xs text-muted-foreground">
-                Period {format(invoice.periodFrom, "dd MMM")} –{" "}
-                {format(invoice.periodTo, "dd MMM yyyy")}
+                Period {documentDate(invoice.periodFrom, org.timezone)} –{" "}
+                {documentDate(invoice.periodTo, org.timezone)}
               </p>
             )}
             {invoice.isReverseCharge && (
@@ -338,7 +364,7 @@ export default async function InvoicePrintPage({
                     {line.shipment && (
                       <span className="block font-mono text-[0.6rem] text-muted-foreground">
                         {line.shipment.lrNumber} ·{" "}
-                        {format(line.shipment.bookedAt, "dd MMM yyyy")} ·{" "}
+                        {documentDate(line.shipment.bookedAt, org.timezone)} ·{" "}
                         {line.shipment.packageCount} pkg ·{" "}
                         {Number(line.shipment.chargeableWeight).toFixed(3)} kg
                       </span>
@@ -449,25 +475,59 @@ export default async function InvoicePrintPage({
           </div>
 
           <dl className="keep-together flex flex-col gap-1">
-            <TotalRow label="Taxable value" value={invoice.subtotal.toString()} />
+            <TotalRow
+              label="Taxable value"
+              value={invoice.subtotal.toString()}
+              currency={org.currency}
+            />
             {invoice.isReverseCharge ? (
               <TotalRow
                 label="GST (reverse charge)"
                 value={statedTax.toFixed(2)}
+                currency={org.currency}
                 muted
                 note="not collected"
               />
             ) : (
-              <TotalRow label="GST" value={invoice.taxAmount.toString()} />
+              <TotalRow
+                label="GST"
+                value={invoice.taxAmount.toString()}
+                currency={org.currency}
+              />
             )}
-            <TotalRow label="Round off" value={invoice.roundOff.toString()} muted />
+            <TotalRow
+              label="Round off"
+              value={invoice.roundOff.toString()}
+              currency={org.currency}
+              muted
+            />
             <div className="my-1 border-t border-foreground" />
-            <TotalRow label="Total payable" value={invoice.total.toString()} strong />
+            <TotalRow
+              label="Total payable"
+              value={invoice.total.toString()}
+              currency={org.currency}
+              strong
+            />
             {creditedTotal.greaterThan(0) && (
-              <TotalRow label="Credited" value={creditedTotal.toFixed(2)} muted />
+              <TotalRow
+                label="Credited"
+                value={creditedTotal.toFixed(2)}
+                currency={org.currency}
+                muted
+              />
             )}
-            <TotalRow label="Received" value={invoice.amountPaid.toString()} muted />
-            <TotalRow label="Outstanding" value={invoice.amountDue.toString()} strong />
+            <TotalRow
+              label="Received"
+              value={invoice.amountPaid.toString()}
+              currency={org.currency}
+              muted
+            />
+            <TotalRow
+              label="Outstanding"
+              value={invoice.amountDue.toString()}
+              currency={org.currency}
+              strong
+            />
           </dl>
         </section>
 
@@ -500,6 +560,15 @@ export default async function InvoicePrintPage({
               Cancelled — {invoice.cancelReason}
             </p>
           )}
+          {/*
+            Left global, alongside the two GST declarations above it. It
+            asserts only that the figures on this sheet are the ones
+            actually charged — a statement that is identical for every
+            carrier and that no carrier would want to weaken. `termsText`
+            and `documentFooter` are both already spoken for below, and a
+            tenant-overridable certification would need a field of its own
+            before it were worth having.
+          */}
           <p className="mt-2 text-[0.65rem] text-muted-foreground">
             We certify that the particulars given above are true and correct, and that the
             amount indicated represents the price actually charged.
@@ -508,10 +577,17 @@ export default async function InvoicePrintPage({
 
         {/* Signature */}
         <section className="flex items-end justify-between gap-6 pt-10">
+          {/*
+            The due date is the invoice's own. What follows it used to be
+            our copy — a sentence about rate card versions, which is a
+            claim about how this platform prices rather than a term the
+            carrier is offering their customer. The terms of business are
+            the carrier's to write, so an unset `termsText` prints the due
+            date alone.
+          */}
           <p className="max-w-sm text-[0.6rem] leading-snug text-muted-foreground">
-            Payment is due by {format(invoice.dueDate, "dd MMM yyyy")}. Queries on any line
-            should quote the consignment note number shown against it — every figure traces
-            back to the rate card version it was priced on.
+            Payment is due by {documentDate(invoice.dueDate, org.timezone)}.
+            {org.termsText ? ` ${org.termsText}` : ""}
           </p>
           <div className="flex w-56 flex-col gap-1 text-center">
             <div className="h-12 border-b border-foreground" />
@@ -524,11 +600,18 @@ export default async function InvoicePrintPage({
           </div>
         </section>
 
+        {/*
+          The carrier's footer where they have written one; otherwise the
+          one thing that is true of this sheet whoever issued it. The draft
+          warning is the invoice's own state and is appended either way —
+          tenant copy must never be able to hide that a number is
+          provisional.
+        */}
         <p className="mt-6 text-[0.6rem] leading-snug text-muted-foreground">
-          This is a computer-generated {documentTitle.toLowerCase()}.{" "}
-          {invoice.status === "DRAFT"
-            ? "It is a draft and has not been issued — the number above is provisional until approval."
-            : "Subject to the carrier’s standard terms of carriage."}
+          {org.documentFooter ??
+            `This is a computer-generated ${documentTitle.toLowerCase()}.`}
+          {invoice.status === "DRAFT" &&
+            " It is a draft and has not been issued — the number above is provisional until approval."}
         </p>
       </article>
     </>
@@ -538,12 +621,14 @@ export default async function InvoicePrintPage({
 function TotalRow({
   label,
   value,
+  currency,
   strong = false,
   muted = false,
   note,
 }: {
   label: string;
   value: string;
+  currency: string;
   strong?: boolean;
   muted?: boolean;
   note?: string;
@@ -559,7 +644,7 @@ function TotalRow({
           muted ? "text-muted-foreground" : ""
         }`}
       >
-        ₹{Number(value).toFixed(2)}
+        {documentMoney(value, currency)}
       </dd>
     </div>
   );

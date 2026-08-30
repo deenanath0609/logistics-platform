@@ -1,9 +1,8 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentCustomerUser } from "@/lib/auth/customer-session";
 import { getPortalInvoiceAsset } from "@/lib/portal/billing";
+import { readTenantObject, tenantObjectUrl } from "@/lib/storage";
 
 /**
  * One invoice PDF, for the account it belongs to.
@@ -13,12 +12,13 @@ import { getPortalInvoiceAsset } from "@/lib/portal/billing";
  * in its WHERE clause — so a guessed invoice id gets a 404, and there is
  * no path at all by which one account's login reaches another's document.
  *
- * TODO(storage): becomes a redirect to a short-lived signed URL
- * (`SIGNED_URL_TTL_SECONDS`) once the S3 adapter exists, instead of
- * streaming bytes through the app server.
+ * That was already true of the lookup and remains the load-bearing check.
+ * What is new is the layer under it: the object key itself now begins with
+ * the tenant, and `readTenantObject` refuses a key whose prefix is not this
+ * request's organisation. So a `documentAssetId` that somehow pointed at
+ * another carrier's file — a bad backfill, a hand-written UPDATE — reads as
+ * "not there" instead of as a PDF.
  */
-
-const STORAGE_ROOT = path.join(process.cwd(), "storage");
 
 export async function GET(
   _request: Request,
@@ -40,26 +40,25 @@ export async function GET(
     return new NextResponse("Not found", { status: 404 });
   }
 
-  // The key is generated server-side, but a traversal check costs nothing
-  // and this handler reads from the filesystem.
-  const destination = path.join(STORAGE_ROOT, asset.objectKey);
-  if (!destination.startsWith(STORAGE_ROOT)) {
-    return new NextResponse("Not found", { status: 404 });
-  }
+  // Null with the filesystem backend, and the fallback below is what runs.
+  // When the object store can hand the browser a URL of its own, this
+  // becomes the live path with no other change here.
+  const direct = await tenantObjectUrl(asset.objectKey);
+  if (direct) return NextResponse.redirect(direct, 302);
 
-  try {
-    const bytes = await readFile(destination);
-    return new NextResponse(new Uint8Array(bytes), {
-      headers: {
-        "Content-Type": asset.contentType,
-        "Content-Disposition": `inline; filename="${invoice.number.replace(/[^\w.-]/g, "-")}.pdf"`,
-        // Private: an invoice must not sit in a shared cache.
-        "Cache-Control": "private, max-age=3600",
-      },
-    });
-  } catch {
+  const bytes = await readTenantObject(asset.objectKey);
+  if (!bytes) {
     // The row exists but the bytes do not — a document still queued for
     // rendering.
     return new NextResponse("Not yet available", { status: 404 });
   }
+
+  return new NextResponse(new Uint8Array(bytes), {
+    headers: {
+      "Content-Type": asset.contentType,
+      "Content-Disposition": `inline; filename="${invoice.number.replace(/[^\w.-]/g, "-")}.pdf"`,
+      // Private: an invoice must not sit in a shared cache.
+      "Cache-Control": "private, max-age=3600",
+    },
+  });
 }

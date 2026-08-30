@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
 import { ChevronLeft, ShieldCheck } from "lucide-react";
+import { prisma } from "@/lib/prisma";
 import { requireCustomerUser } from "@/lib/auth/customer-session";
 import { getPortalPod } from "@/lib/portal/queries";
 import { PrintButton } from "@/components/portal/print-button";
+import { DocumentLogo } from "@/components/documents/letterhead";
+import { documentDateTime } from "@/components/documents/format";
 
 export const metadata: Metadata = {
   title: "Proof of delivery",
@@ -38,6 +40,53 @@ export default async function PortalPodPage({
   const pod = await getPortalPod(session, id);
   if (!pod) notFound();
 
+  // This sheet used to say "City Logistics" in the corner, which is our
+  // name on a customer's record of their own delivery. The letterhead is
+  // read from `session.orgId` rather than from the POD: `getPortalPod`
+  // deliberately projects only what a customer may see and does not return
+  // an `orgId`, and nothing under `src/app/(portal)` queries
+  // `prisma.shipment` directly — that rule is what makes the account
+  // scoping provable in one place. The two cannot disagree in any case:
+  // both the session and the POD are resolved through the tenant-isolated
+  // client against the same host, so the account's org *is* the carrier
+  // that moved the goods.
+  //
+  // `Organization` itself is one of the two global tables the extension
+  // does not filter (ADR 001 §4), so the `where` is what keeps another
+  // carrier's GSTIN off this page.
+  const org = await prisma.organization.findUniqueOrThrow({
+    where: { id: session.orgId },
+    select: {
+      name: true,
+      legalName: true,
+      gstin: true,
+      logoUrl: true,
+      address: true,
+      city: true,
+      state: true,
+      pincode: true,
+      documentFooter: true,
+      supportEmail: true,
+      supportPhone: true,
+      phone: true,
+      email: true,
+      timezone: true,
+    },
+  });
+
+  const orgAddress = [
+    org.address,
+    [org.city, org.pincode].filter(Boolean).join(" ") || null,
+    org.state,
+  ].filter((line): line is string => Boolean(line));
+
+  const support = [
+    org.supportPhone ?? org.phone,
+    org.supportEmail ?? org.email,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3 print:hidden">
@@ -61,14 +110,27 @@ export default async function PortalPodPage({
               {pod.lrNumber}
             </h1>
           </div>
-          <div className="text-right">
-            <p className="font-mono text-[0.6rem] uppercase tracking-[0.14em] text-muted-foreground">
-              City Logistics
-            </p>
-            <p className="text-sm">{session.customerName}</p>
-            <p className="font-mono text-xs text-muted-foreground">
-              {session.customerCode}
-            </p>
+          {/*
+            The carrier's letterhead, not ours. This is a record of delivery
+            a customer keeps and forwards, so the name on it has to be the
+            company that actually moved the goods.
+          */}
+          <div className="flex flex-col items-end text-right">
+            <DocumentLogo src={org.logoUrl} name={org.name} />
+            <p className="font-semibold tracking-tight">{org.name}</p>
+            {org.legalName && org.legalName !== org.name && (
+              <p className="text-xs text-muted-foreground">{org.legalName}</p>
+            )}
+            {orgAddress.map((line) => (
+              <p key={line} className="text-xs text-muted-foreground">
+                {line}
+              </p>
+            ))}
+            {org.gstin && (
+              <p className="font-mono text-[0.65rem] text-muted-foreground">
+                GSTIN {org.gstin}
+              </p>
+            )}
           </div>
         </header>
 
@@ -84,6 +146,10 @@ export default async function PortalPodPage({
         </section>
 
         <dl className="grid gap-x-8 gap-y-3 border-y py-4 text-sm sm:grid-cols-2">
+          <Row
+            label="Account"
+            value={`${session.customerName} · ${session.customerCode}`}
+          />
           <Row label="Received by" value={pod.receiverName} />
           <Row
             label="Relationship"
@@ -91,7 +157,7 @@ export default async function PortalPodPage({
           />
           <Row
             label="Delivered at"
-            value={format(pod.deliveredAt, "dd MMM yyyy · HH:mm")}
+            value={documentDateTime(pod.deliveredAt, org.timezone)}
           />
           <Row label="Packages" value={String(pod.packageCount)} />
           <Row label="Chargeable weight" value={`${pod.chargeableWeight} kg`} />
@@ -107,9 +173,17 @@ export default async function PortalPodPage({
 
         <p className="text-xs text-muted-foreground">
           {pod.documentAssetId
-            ? "A signed PDF copy has been generated and will be attached to your invoice."
-            : "The signed PDF copy is still being prepared. Print this page in the meantime — it carries the same record."}
+            ? "A signed copy has been generated and will be attached to your invoice."
+            : "The signed copy is still being prepared. Print this page in the meantime — it carries the same record."}
         </p>
+
+        {/* The carrier's own closing wording, where they have supplied one. */}
+        {(org.documentFooter || support) && (
+          <footer className="border-t pt-3 text-xs text-muted-foreground">
+            {org.documentFooter && <p>{org.documentFooter}</p>}
+            {support && <p className="font-mono text-[0.65rem]">{support}</p>}
+          </footer>
+        )}
       </article>
     </div>
   );

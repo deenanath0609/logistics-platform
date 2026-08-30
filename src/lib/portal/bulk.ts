@@ -329,7 +329,9 @@ async function defaultBranchForAccount(
   });
   if (!address) return null;
 
-  const pincode = await prisma.pincode.findUnique({
+  // PIN codes are per-tenant geography, so the code alone is no longer a
+  // unique key — the tenant filter is the rest of it.
+  const pincode = await prisma.pincode.findFirst({
     where: { code: address.pincode },
     select: { servingBranchId: true },
   });

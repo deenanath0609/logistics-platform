@@ -1,4 +1,5 @@
 "use client";
+import type { ShipmentMode } from "@/generated/prisma/client";
 
 import { useActionState, useMemo, useState } from "react";
 import { Loader2, MapPin } from "lucide-react";
@@ -30,7 +31,7 @@ export type PickupAddressOption = {
 export type PortalServiceOption = {
   id: string;
   name: string;
-  mode: "FTL" | "PTL" | "COURIER";
+  mode: ShipmentMode;
   allowsCod: boolean;
   allowsToPay: boolean;
 };
