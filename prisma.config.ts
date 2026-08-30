@@ -16,5 +16,13 @@ export default defineConfig({
     // Prisma Migrate keeps the owner's connection here. Where RLS is off,
     // the two are the same string and this changes nothing.
     url: process.env["MIGRATE_DATABASE_URL"] || process.env["DATABASE_URL"],
+
+    // A scratch database Prisma may create, replay the migrations into, and
+    // drop. Only `migrate dev` and `migrate diff --from-migrations` need it,
+    // and the second is what proves the migrations and the schema still
+    // agree — the check that would have caught `tenant_plan` existing in the
+    // schema and in nobody's migration. Unset in production, where nothing
+    // should be creating databases.
+    shadowDatabaseUrl: process.env["SHADOW_DATABASE_URL"],
   },
 });

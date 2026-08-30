@@ -11,15 +11,58 @@
 
 -- Guard -------------------------------------------------------------------
 -- The fallbacks below assign parentless rows to "the" organisation. That is
--- true today and only today. Running this against a database that already
--- holds two tenants would silently hand one tenant's masters to the other,
--- so it refuses instead.
+-- true only where there is exactly one. Running this against a database that
+-- already holds two tenants would silently hand one tenant's masters to the
+-- other, so it refuses instead.
+--
+-- Zero organisations is the other honest case, and refusing it was a bug:
+-- a brand new database has no organisation and no rows either, so there is
+-- nothing to backfill and nothing that could be assigned wrongly. Refusing
+-- meant this migration could never be applied to a fresh install — which is
+-- to say the product could not be deployed anywhere it had not already been
+-- running. It surfaced the first time CI built a database from scratch.
+--
+-- So: one organisation backfills, more than one refuses, and none is allowed
+-- through only after checking that every table about to gain an `orgId` is
+-- genuinely empty. A database somebody has half-emptied still refuses, and
+-- names the tables that stopped it.
 DO $guard$
-DECLARE org_count INT;
+DECLARE
+  org_count INT;
+  target TEXT;
+  rows_found BIGINT;
+  populated TEXT[] := '{}';
 BEGIN
   SELECT count(*) INTO org_count FROM "organization";
-  IF org_count <> 1 THEN
+
+  IF org_count = 1 THEN
+    RETURN;
+  END IF;
+
+  IF org_count > 1 THEN
     RAISE EXCEPTION 'Backfill assumes a single organisation, found %. Backfill by hand instead.', org_count;
+  END IF;
+
+  FOREACH target IN ARRAY ARRAY[
+    'charge_type', 'city', 'customer_user', 'delivery_task', 'eta_snapshot',
+    'eway_bill_record', 'geofence', 'gps_ping', 'inbound_receipt',
+    'login_activity', 'notification_log', 'notification_preference',
+    'notification_template', 'otp_token', 'outbox_event', 'package_type',
+    'pincode', 'reason_code', 'report_run', 'route', 'service_type', 'state',
+    'tax_rate', 'tracking_alert', 'vehicle_location', 'vehicle_type',
+    'verification_token', 'zone'
+  ] LOOP
+    EXECUTE format('SELECT count(*) FROM %I', target) INTO rows_found;
+    IF rows_found > 0 THEN
+      populated := populated || target;
+    END IF;
+  END LOOP;
+
+  IF array_length(populated, 1) > 0 THEN
+    RAISE EXCEPTION
+      'No organisation exists, but % still hold(s) rows. There is nobody to '
+      'assign them to. Backfill by hand instead.',
+      array_to_string(populated, ', ');
   END IF;
 END
 $guard$;

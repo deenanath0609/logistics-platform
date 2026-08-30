@@ -14,12 +14,38 @@
 -- an operations screen. Both currently work only because a human remembered
 -- to join the subscription in the `where`.
 
+-- The same guard as the pass before it, and the same correction: no
+-- organisation at all means a fresh database with nothing to backfill, not a
+-- database to refuse. See 20260828010000_p9_multi_tenancy.
 DO $guard$
-DECLARE org_count INT;
+DECLARE
+  org_count INT;
+  target TEXT;
+  rows_found BIGINT;
+  populated TEXT[] := '{}';
 BEGIN
   SELECT count(*) INTO org_count FROM "organization";
-  IF org_count <> 1 THEN
+
+  IF org_count = 1 THEN
+    RETURN;
+  END IF;
+
+  IF org_count > 1 THEN
     RAISE EXCEPTION 'Backfill assumes a single organisation, found %. Backfill by hand instead.', org_count;
+  END IF;
+
+  FOREACH target IN ARRAY ARRAY['scan_record', 'shipment_package', 'webhook_delivery'] LOOP
+    EXECUTE format('SELECT count(*) FROM %I', target) INTO rows_found;
+    IF rows_found > 0 THEN
+      populated := populated || target;
+    END IF;
+  END LOOP;
+
+  IF array_length(populated, 1) > 0 THEN
+    RAISE EXCEPTION
+      'No organisation exists, but % still hold(s) rows. There is nobody to '
+      'assign them to. Backfill by hand instead.',
+      array_to_string(populated, ', ');
   END IF;
 END
 $guard$;
