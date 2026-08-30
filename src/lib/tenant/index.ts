@@ -13,6 +13,7 @@ export {
 
 export {
   RESERVED_SUBDOMAINS,
+  isPlatformHost,
   isValidSubdomain,
   normaliseHost,
   parseTenantHost,
@@ -22,7 +23,16 @@ export {
 export {
   bustTenantCache,
   orgForHost,
+  requireTenantOrgId,
   resolveTenant,
   tenantContextFor,
   type ResolvedOrg,
 } from "@/lib/tenant/resolve";
+
+export {
+  forEachTenant,
+  tenantsForPass,
+  type TenantPassOptions,
+  type TenantPassResult,
+  type TenantSlice,
+} from "@/lib/tenant/for-each-tenant";

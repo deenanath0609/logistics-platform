@@ -4,6 +4,7 @@ import { parseTenantHost } from "@/lib/tenant/host";
 import {
   currentTenant,
   isCrossTenantScope,
+  TenantContextError,
   type TenantContext,
 } from "@/lib/tenant/context";
 import type { TenantStatus } from "@/generated/prisma/client";
@@ -106,6 +107,14 @@ export function tenantContextFor(
  * the session would mean a user of one tenant could operate on another
  * tenant's subdomain, and the host would stop being the boundary. The
  * session is checked *against* the host instead — see `assertUserBelongsToTenant`.
+ *
+ * A platform operator's support session is **not** a third source either,
+ * and the ordering below is the reason. The host names the organisation
+ * first; only then is the support credential consulted, and only to answer
+ * "does a live grant cover *this* organisation?". A grant for a different
+ * carrier changes nothing — it is not honoured, not downgraded, not
+ * partially applied. The credential can weaken a session (into read-only)
+ * and label it; it can never move it.
  */
 export async function resolveTenant(): Promise<TenantContext | null> {
   const explicit = currentTenant();
@@ -125,5 +134,38 @@ export async function resolveTenant(): Promise<TenantContext | null> {
   const org = await orgForHost(host);
   if (!org) return null;
 
+  // Imported lazily for the same reason, and because it reaches the
+  // database: an ordinary request pays a cookie read and stops there.
+  const { impersonationContextForHost } = await import(
+    "@/lib/platform/impersonation-session"
+  );
+  const impersonated = await impersonationContextForHost(org);
+  if (impersonated) return impersonated;
+
   return tenantContextFor(org, "host");
+}
+
+
+/**
+ * The current tenant's id, for code that has to write it.
+ *
+ * Reads never mention the tenant — the extension filters them. Writes are
+ * different: `orgId` is a NOT NULL column, so a `create` has to name it, and
+ * the generated types say so. Passing it is not trusting it: the extension
+ * refuses any write whose `orgId` disagrees with the host-resolved tenant,
+ * so an explicit id is a checked assertion rather than an opportunity to get
+ * it wrong.
+ *
+ * Prefer `actor.orgId` where a signed-in user is already in scope — it is
+ * the same value without a second resolution.
+ */
+export async function requireTenantOrgId(): Promise<string> {
+  const tenant = await resolveTenant();
+  if (!tenant) {
+    throw new TenantContextError(
+      "No tenant context: the request host resolves to no organisation, or " +
+        "this ran outside a request without runWithTenant().",
+    );
+  }
+  return tenant.orgId;
 }

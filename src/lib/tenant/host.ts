@@ -97,3 +97,26 @@ export function tenantOrigin(
   const host = org.customDomain ?? `${org.subdomain}.${rootDomain}`;
   return `${protocol}://${host}${port ? `:${port}` : ""}`;
 }
+
+/**
+ * Hosts the operator console renders on.
+ *
+ * The **bare platform domain is the console** — `localhost:3010` in
+ * development, `platform.com` in production — and every carrier lives on a
+ * subdomain of it. `admin.<domain>` is accepted as well, for anyone who
+ * later wants the console on a separate name.
+ *
+ * The security property this rests on is unchanged: a carrier's own host
+ * can never serve the console, because `parseTenantHost` resolves a tenant
+ * only from a first label, so neither the bare domain nor the reserved
+ * `admin` label can ever be a carrier.
+ */
+export function isPlatformHost(
+  rawHost: string | null | undefined,
+  rootDomain: string,
+): boolean {
+  const host = normaliseHost(rawHost);
+  if (!host) return false;
+  const root = rootDomain.trim().toLowerCase();
+  return host === root || host === `admin.${root}`;
+}

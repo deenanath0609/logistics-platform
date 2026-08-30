@@ -17,6 +17,8 @@ const globalForPrisma = globalThis as unknown as {
   pgPool: pg.Pool | undefined;
 };
 
+let activePool: pg.Pool | undefined;
+
 function createPrismaClient() {
   const pool =
     globalForPrisma.pgPool ??
@@ -29,6 +31,7 @@ function createPrismaClient() {
     });
 
   if (process.env.NODE_ENV !== "production") globalForPrisma.pgPool = pool;
+  activePool = pool;
 
   return new PrismaClient({
     adapter: new PrismaPg(pool),
@@ -58,4 +61,22 @@ export async function withAdvisoryLock<T>(
   // cannot deserialise as a result column.
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
   return fn();
+}
+
+/**
+ * Closes the client *and* the pool underneath it.
+ *
+ * `$disconnect()` alone is not enough here: the pool was created by this
+ * module and handed to the driver adapter, so Prisma does not own it and
+ * leaves it open. In the server that is right — the pool outlives any one
+ * client — but in a script it means the process hangs after its work is
+ * done, which reads exactly like a deadlock.
+ */
+export async function disconnectDb(): Promise<void> {
+  await basePrisma.$disconnect();
+  if (activePool) {
+    await activePool.end();
+    activePool = undefined;
+    globalForPrisma.pgPool = undefined;
+  }
 }

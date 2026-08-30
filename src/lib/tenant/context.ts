@@ -136,3 +136,24 @@ export function assertTenantWritable(): void {
   const tenant = currentTenant();
   if (tenant?.readOnly) throw new TenantReadOnlyError(tenant.orgId);
 }
+
+/**
+ * Whether the caller is already inside a transaction that has set the
+ * PostgreSQL session variable row-level security reads.
+ *
+ * The extension sets `app.org_id` per statement by wrapping each query in
+ * its own transaction. Inside an interactive `$transaction` that is both
+ * wrong and impossible — the statement is already on a connection, in a
+ * transaction, and opening another would deadlock. `tenantTransaction()`
+ * sets the variable once at the top of the transaction and raises this
+ * flag so the extension knows to leave it alone.
+ */
+const transactionScope = new AsyncLocalStorage<true>();
+
+export function runInTenantTransaction<T>(fn: () => T): T {
+  return transactionScope.run(true, fn);
+}
+
+export function isInTenantTransaction(): boolean {
+  return transactionScope.getStore() === true;
+}

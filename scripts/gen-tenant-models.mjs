@@ -28,13 +28,6 @@ const OPERATOR_OWNED = new Set([
   "TenantOnboardingTask",
 ]);
 
-/**
- * Models where `orgId` is nullable by design — a platform-level row and a
- * tenant row share the table. Filtering these needs `OR [{orgId}, {orgId:
- * null}]` rather than a plain equality, so they are listed separately.
- */
-const NULLABLE_ORG = new Set();
-
 export function parseSchema() {
   const scoped = [];
   const nullableOrg = [];

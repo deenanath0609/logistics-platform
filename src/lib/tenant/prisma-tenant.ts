@@ -1,10 +1,22 @@
 import type { PrismaClient } from "@/generated/prisma/client";
-import { isCrossTenantScope, TenantContextError, TenantReadOnlyError } from "@/lib/tenant/context";
+import {
+  isCrossTenantScope,
+  isInTenantTransaction,
+  TenantContextError,
+  TenantReadOnlyError,
+} from "@/lib/tenant/context";
 import { resolveTenant } from "@/lib/tenant/resolve";
 import {
   TENANT_OPTIONAL_MODELS,
   TENANT_SCOPED_MODELS,
 } from "@/lib/tenant/scoped-models.generated";
+import {
+  applyTenant,
+  clientKey,
+  READ_ONLY_EXEMPT_MODELS,
+  WRITE_OPERATIONS,
+  type AnyArgs,
+} from "@/lib/tenant/scope-args";
 
 /**
  * Tenant isolation, applied to every Prisma call in the application.
@@ -27,126 +39,17 @@ import {
  * - **It will not let a caller write another tenant's id**, even explicitly.
  */
 
-const WRITE_OPERATIONS = new Set([
-  "create",
-  "createMany",
-  "createManyAndReturn",
-  "update",
-  "updateMany",
-  "updateManyAndReturn",
-  "upsert",
-  "delete",
-  "deleteMany",
-]);
-
-/** `model Shipment` is reached as `prisma.shipment`. */
-function clientKey(model: string): string {
-  return model.charAt(0).toLowerCase() + model.slice(1);
-}
-
-type AnyArgs = Record<string, unknown> | undefined;
-
 /**
- * Adds the tenant predicate under `AND` rather than spreading it into the
- * top level. Spreading would silently clobber a caller's own `AND`, and a
- * top-level `OR` would escape a spread predicate entirely — the filter has
- * to bind tighter than anything the caller wrote.
+ * Whether PostgreSQL row-level security is switched on for this deployment.
  *
- * The caller's own top-level keys are preserved, which is what lets this
- * work on `findUnique`/`update`/`delete`, where Prisma still needs to see a
- * unique field at the top of `where`.
+ * When it is, every scoped statement carries the tenant into the database
+ * session so the policies in `scripts/apply-rls.mjs` can see it. That costs
+ * a transaction per statement, which is why it is a deployment decision
+ * rather than always-on: it belongs wherever the application connects as a
+ * non-owner role, and is pointless where it connects as the table owner
+ * because RLS does not apply to owners.
  */
-function mergeWhere(
-  where: unknown,
-  filter: Record<string, unknown>,
-): Record<string, unknown> {
-  const current = (where ?? {}) as Record<string, unknown>;
-  const existing = current.AND;
-  const and = existing === undefined ? [] : Array.isArray(existing) ? existing : [existing];
-  return { ...current, AND: [...and, filter] };
-}
-
-/**
- * A null `orgId` on `SystemConfig` is the platform-wide default, which every
- * tenant may read but none may edit — hence the asymmetry: reads match the
- * tenant's own rows *or* the shared default, writes always stamp the tenant.
- */
-function readFilter(orgId: string, optional: boolean): Record<string, unknown> {
-  return optional ? { OR: [{ orgId }, { orgId: null }] } : { orgId };
-}
-
-function assertNoForeignOrg(data: unknown, orgId: string): void {
-  if (!data || typeof data !== "object") return;
-  const given = (data as Record<string, unknown>).orgId;
-  if (given !== undefined && given !== null && given !== orgId) {
-    throw new TenantContextError(
-      `Refusing to write a row for organisation ${String(given)} while acting as ${orgId}.`,
-    );
-  }
-}
-
-function stampCreate(data: unknown, orgId: string): unknown {
-  if (Array.isArray(data)) return data.map((row) => stampCreate(row, orgId));
-  if (!data || typeof data !== "object") return data;
-  assertNoForeignOrg(data, orgId);
-  return { ...(data as Record<string, unknown>), orgId };
-}
-
-function applyTenant(
-  operation: string,
-  rawArgs: AnyArgs,
-  orgId: string,
-  optional: boolean,
-): AnyArgs {
-  const args: Record<string, unknown> = { ...(rawArgs ?? {}) };
-  const filter = readFilter(orgId, optional);
-
-  switch (operation) {
-    case "create":
-      args.data = stampCreate(args.data, orgId);
-      return args;
-
-    case "createMany":
-    case "createManyAndReturn":
-      args.data = stampCreate(args.data, orgId);
-      return args;
-
-    case "upsert":
-      assertNoForeignOrg(args.update, orgId);
-      args.where = mergeWhere(args.where, filter);
-      args.create = stampCreate(args.create, orgId);
-      return args;
-
-    case "update":
-    case "updateMany":
-    case "updateManyAndReturn":
-      assertNoForeignOrg(args.data, orgId);
-      args.where = mergeWhere(args.where, filter);
-      return args;
-
-    case "findUnique":
-    case "findUniqueOrThrow":
-    case "findFirst":
-    case "findFirstOrThrow":
-    case "findMany":
-    case "delete":
-    case "deleteMany":
-    case "count":
-    case "aggregate":
-    case "groupBy":
-      args.where = mergeWhere(args.where, filter);
-      return args;
-
-    default:
-      // An operation this code has not seen. Refusing is the only safe
-      // answer: passing it through unfiltered is exactly the leak the
-      // extension exists to prevent.
-      throw new TenantContextError(
-        `Unrecognised Prisma operation "${operation}" on a tenant-scoped model; ` +
-          "the tenant filter could not be applied.",
-      );
-  }
-}
+const RLS_ENABLED = process.env.TENANT_RLS === "on";
 
 export function withTenantIsolation<T extends PrismaClient>(client: T) {
   return client.$extends({
@@ -175,13 +78,38 @@ export function withTenantIsolation<T extends PrismaClient>(client: T) {
             );
           }
 
-          if (tenant.readOnly && WRITE_OPERATIONS.has(operation)) {
+          if (
+            tenant.readOnly &&
+            WRITE_OPERATIONS.has(operation) &&
+            !READ_ONLY_EXEMPT_MODELS.has(key)
+          ) {
             throw new TenantReadOnlyError(tenant.orgId);
           }
 
-          return query(
-            applyTenant(operation, args as AnyArgs, tenant.orgId, optional),
-          );
+          // Cast because `query` is typed as the union of every operation's
+          // argument shape across every model; the narrowing that would
+          // satisfy it is not expressible for a handler that is deliberately
+          // generic over all of them.
+          const scopedArgs = applyTenant(
+            operation,
+            args as AnyArgs,
+            tenant.orgId,
+            optional,
+          ) as Parameters<typeof query>[0];
+
+          // Inside an interactive transaction the variable was already set
+          // once, at the top — see `tenantTransaction()`. Opening another
+          // transaction around this statement would deadlock on the
+          // connection it is already holding.
+          if (!RLS_ENABLED || isInTenantTransaction()) return query(scopedArgs);
+
+          // TRUE makes the setting local to this transaction, so a pooled
+          // connection cannot carry one tenant's id into the next request.
+          const [, result] = await client.$transaction([
+            client.$executeRaw`SELECT set_config('app.org_id', ${tenant.orgId}, TRUE)`,
+            query(scopedArgs),
+          ]);
+          return result;
         },
       },
     },
