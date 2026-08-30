@@ -1,9 +1,10 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
 import { nextNumber } from "@/lib/numbering/number-series";
+import { coversBranch } from "@/server/repositories/scope";
 import { dec, money, type MoneyIn } from "./ageing";
 
 /**
@@ -18,9 +19,17 @@ import { dec, money, type MoneyIn } from "./ageing";
 export type SettlementDraft = {
   driverId: string;
   driverName: string;
+  /**
+   * The app_user behind this driver, when they have a field login. Carried
+   * so the preparer can be compared against the payee — see
+   * `createSettlement`.
+   */
+  driverUserId: string | null;
   tripId: string | null;
   tripNumber: string | null;
   tripEarning: Decimal;
+  /** True when the figure was typed rather than read off the trip. */
+  tripEarningWasEntered: boolean;
   advancesPaid: Decimal;
   expensesClaimed: Decimal;
   /** Expenses submitted but not yet approved — visible, but not paid. */
@@ -36,9 +45,17 @@ export type SettlementDraft = {
  * Only approved expenses count. An unapproved claim is shown separately
  * rather than folded in — paying it and approving it later is how a
  * settlement stops reconciling.
+ *
+ * Takes the actor because a settlement is a payout, and this read used to
+ * be a bare `findUnique` on a trip id: tenant-scoped, but scoped to
+ * nothing else, so any id reachable by guessing or from another screen
+ * drafted a settlement. Branch scope is what was missing, and it is
+ * checked against both ends of the lane because the settlements queue
+ * lists a trip to its origin and its destination alike.
  */
 export async function draftSettlement(
   options: { tripId: string; deductions?: MoneyIn; tripEarning?: MoneyIn },
+  actor: SessionUser,
 ): Promise<SettlementDraft | null> {
   const trip = await prisma.trip.findUnique({
     where: { id: options.tripId },
@@ -46,9 +63,11 @@ export async function draftSettlement(
       id: true,
       number: true,
       driverId: true,
+      originBranchId: true,
+      destinationBranchId: true,
       freightPayable: true,
       advancePaid: true,
-      driver: { select: { id: true, name: true } },
+      driver: { select: { id: true, name: true, userId: true } },
       expenses: {
         select: {
           id: true,
@@ -62,11 +81,26 @@ export async function draftSettlement(
   });
 
   if (!trip || !trip.driver) return null;
+  if (
+    !coversBranch(actor, trip.originBranchId) &&
+    !coversBranch(actor, trip.destinationBranchId)
+  ) {
+    return null;
+  }
+
+  // The trip's own agreed freight is the earning. A figure passed in is
+  // accepted only where the trip carries none — it used to be *preferred*
+  // over the trip, which meant a number posted on a form silently beat the
+  // record every time, on any trip, for anyone holding `settlement.prepare`.
+  const hasTripFreight =
+    trip.freightPayable !== null && trip.freightPayable !== undefined;
+  const entered =
+    !hasTripFreight &&
+    options.tripEarning !== undefined &&
+    options.tripEarning !== null;
 
   const tripEarning = money(
-    options.tripEarning !== undefined && options.tripEarning !== null
-      ? dec(options.tripEarning)
-      : dec(trip.freightPayable?.toString()),
+    entered ? dec(options.tripEarning) : dec(trip.freightPayable?.toString()),
   );
   const advancesPaid = money(dec(trip.advancePaid?.toString()));
 
@@ -88,9 +122,11 @@ export async function draftSettlement(
   return {
     driverId: trip.driver.id,
     driverName: trip.driver.name,
+    driverUserId: trip.driver.userId,
     tripId: trip.id,
     tripNumber: trip.number,
     tripEarning,
+    tripEarningWasEntered: entered,
     advancesPaid,
     expensesClaimed,
     expensesPending,
@@ -118,13 +154,31 @@ export async function createSettlement(
   },
   actor: SessionUser,
 ): Promise<SettlementResult> {
-  if (!can(actor, "expense.record")) {
+  if (!can(actor, "settlement.prepare")) {
     return { ok: false, error: "You do not have permission to prepare settlements." };
   }
 
-  const draft = await draftSettlement(input);
+  const draft = await draftSettlement(input, actor);
   if (!draft) {
-    return { ok: false, error: "That trip has no driver to settle with." };
+    return {
+      ok: false,
+      error:
+        "That trip cannot be settled here — it has no driver, or it ran " +
+        "between branches you do not cover.",
+    };
+  }
+
+  // Nobody settles their own trip. The same control as the one on approval
+  // a few lines down, applied at the other end: `settlement.prepare` is the
+  // gate here and the DRIVER role holds it, so without this a driver with
+  // a field login could raise the document that pays them.
+  if (draft.driverUserId && draft.driverUserId === actor.id) {
+    return {
+      ok: false,
+      error:
+        "A driver cannot prepare their own settlement. Ask the transport " +
+        "desk to raise it.",
+    };
   }
 
   const deductions = money(dec(input.deductions));
@@ -141,10 +195,10 @@ export async function createSettlement(
   }
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "SETTLEMENT" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.driverSettlement.create({
@@ -176,6 +230,12 @@ export async function createSettlement(
         driver: draft.driverName,
         trip: draft.tripNumber,
         tripEarning: draft.tripEarning.toFixed(2),
+        // Where the earning came from. A trip with no `freightPayable` has
+        // to take a typed figure, and the audit row should say so rather
+        // than let it read like the trip's own number.
+        tripEarningSource: draft.tripEarningWasEntered
+          ? "entered by hand"
+          : "trip freight payable",
         advancesPaid: draft.advancesPaid.toFixed(2),
         expensesClaimed: draft.expensesClaimed.toFixed(2),
         deductions: draft.deductions.toFixed(2),

@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { PaymentMode, RateBasis } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
@@ -262,10 +262,10 @@ export async function createVendorBill(
       : null);
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "VENDOR_BILL", at: input.billDate },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.vendorBill.create({
@@ -291,6 +291,7 @@ export async function createVendorBill(
           lines: {
             createMany: {
               data: input.lines.map((line, index) => ({
+                orgId: actor.orgId,
                 tripId: line.tripId ?? null,
                 description: line.description,
                 amount: money(dec(line.amount)).toFixed(2),
@@ -483,10 +484,10 @@ export async function recordVendorPayment(
   });
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "VENDOR_PAYMENT", at: input.paidOn },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       const payment = await tx.vendorPayment.create({

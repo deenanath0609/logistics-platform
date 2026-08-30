@@ -59,17 +59,29 @@ export function UserFormDialog({
   roles,
   branches,
   user,
+  defaultFieldUser = false,
+  createLabel = "New user",
 }: {
   mode: "create" | "edit";
   action: (prev: ActionState, formData: FormData) => Promise<ActionState>;
   roles: RoleOption[];
   branches: Array<{ id: string; code: string; name: string }>;
   user?: UserRecord;
+  /**
+   * Where a new record starts. The field-staff roster opens this form
+   * already knowing it is adding a delivery or pickup boy, and making the
+   * admin tick a box to say so is how a field user gets created with a
+   * password login and cannot sign in on the phone.
+   */
+  defaultFieldUser?: boolean;
+  createLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<ActionState>(EMPTY);
   const [pending, startTransition] = useTransition();
-  const [isFieldUser, setIsFieldUser] = useState(user?.isFieldUser ?? false);
+  const [isFieldUser, setIsFieldUser] = useState(
+    user?.isFieldUser ?? defaultFieldUser,
+  );
   const formId = useId();
 
   function submit(formData: FormData) {
@@ -102,7 +114,7 @@ export function UserFormDialog({
         }
       >
         {creating ? <Plus /> : <Pencil />}
-        {creating ? "New user" : <span className="sr-only">Edit {user?.name}</span>}
+        {creating ? createLabel : <span className="sr-only">Edit {user?.name}</span>}
       </DialogTrigger>
 
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">

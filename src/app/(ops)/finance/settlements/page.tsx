@@ -187,14 +187,22 @@ export default async function SettlementsPage() {
                             title={`Settle ${trip.number}`}
                             description="Earning less advances, plus approved expenses, less deductions. Unapproved expenses are deliberately left out."
                             fields={[
-                              {
-                                type: "number",
-                                name: "tripEarning",
-                                label: "Trip earning (₹)",
-                                half: true,
-                                step: "0.01",
-                                defaultValue: trip.freightPayable?.toString() ?? "",
-                              },
+                              // Only offered when the trip carries no agreed
+                              // freight of its own. Where it does, that figure
+                              // is the earning and the service ignores anything
+                              // posted here — so showing a box would be a lie.
+                              ...(trip.freightPayable === null
+                                ? [
+                                    {
+                                      type: "number" as const,
+                                      name: "tripEarning",
+                                      label: "Trip earning (₹)",
+                                      half: true,
+                                      step: "0.01",
+                                      help: "This trip has no agreed freight recorded against it.",
+                                    },
+                                  ]
+                                : []),
                               {
                                 type: "number",
                                 name: "deductions",

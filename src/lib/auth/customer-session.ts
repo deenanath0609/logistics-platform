@@ -52,6 +52,10 @@ export const getCurrentCustomerUser = cache(
     const customerUserId = readCustomerSubject(session?.user?.id);
     if (!customerUserId) return null;
 
+    // Tenant-scoped for the same reason as `getCurrentUser`: the id is
+    // globally unique, but the extension pins the lookup to the host's
+    // tenant, so a portal cookie presented on another carrier's subdomain
+    // resolves to nobody rather than to somebody else's customer.
     const user = await prisma.customerUser.findUnique({
       where: { id: customerUserId },
       select: {

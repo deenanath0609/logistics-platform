@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { recordAudit, changedFields } from "@/server/services/audit";
 import {
@@ -167,40 +167,92 @@ const bankSchema = z.object({
   isPrimary: z.union([z.literal("true"), z.literal("false")]).transform((v) => v === "true"),
 });
 
+/**
+ * ── Who may change where a vendor's money goes ───────────────────────────
+ *
+ * This writes the payment instruction every future payout to the vendor
+ * will follow, and it was gated on `vendor.update` — which TRANSPORT_DESK
+ * holds, so that the fleet desk can keep lorry papers and rate contracts
+ * current. A clerk with no finance permission whatsoever could therefore
+ * add an account, mark it primary, and be paid by the next payment run.
+ *
+ * The gate is now `settlement.approve`: the permission that already means
+ * "may authorise money leaving the company to a vendor". ACCOUNTS and Super
+ * Admin hold it and no operational role does, so the desk that answers for
+ * a payout is the desk that decides where it lands. A dedicated
+ * `vendor.manage_bank` code would read better, but a new permission is a
+ * seed row and a role grant before anybody can use it, and this has to hold
+ * on the database as deployed.
+ *
+ * It is still one person acting alone. Two-person control — an account
+ * added as pending and confirmed by a second holder before any payout may
+ * name it — needs columns this table does not have; see the report.
+ * ────────────────────────────────────────────────────────────────────────
+ */
 export async function saveBankAccountAction(
   _prev: FinanceActionState,
   formData: FormData,
 ): Promise<FinanceActionState> {
   try {
-    const actor = await authorize("vendor.update");
+    const actor = await authorize("settlement.approve");
     const parsed = bankSchema.safeParse(Object.fromEntries(formData.entries()));
     if (!parsed.success) {
       return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
     }
 
-    const created = await prisma.$transaction(async (tx) => {
+    const { created, demoted } = await tenantTransaction(async (tx) => {
+      // Read before the demotion, so the trail can say which account was
+      // displaced as well as which one took its place.
+      const previous = parsed.data.isPrimary
+        ? await tx.vendorBankAccount.findFirst({
+            where: { vendorId: parsed.data.vendorId, isPrimary: true },
+            select: { id: true, accountName: true, accountNumber: true },
+          })
+        : null;
+
       if (parsed.data.isPrimary) {
         await tx.vendorBankAccount.updateMany({
           where: { vendorId: parsed.data.vendorId },
           data: { isPrimary: false },
         });
       }
-      return tx.vendorBankAccount.create({
-        data: parsed.data,
+
+      const row = await tx.vendorBankAccount.create({
+        data: { ...parsed.data, orgId: actor.orgId },
         select: { id: true, accountNumber: true },
       });
+
+      return { created: row, demoted: previous };
     });
 
-    // The account number is the payment instruction — the audit trail
-    // records that it changed and who did it, with only the tail visible.
+    // The number is written to the trail in full, deliberately. It was
+    // masked to `••••1234`, which reads like prudence and means that an
+    // investigation into a redirected payout cannot say which account the
+    // money was sent to — the one fact it needs. This is a payee
+    // instruction, not a credential: it is already stored in plaintext on
+    // the row, it is printed on every NEFT advice, and unlike the row —
+    // which a later edit can supersede — the audit trail cannot be changed.
+    // The masked form stays in `entityRef`, which is what the audit list
+    // renders at a glance.
     await recordAudit({
       user: actor,
       action: "CREATE",
       entity: "VendorBankAccount",
       entityId: created.id,
       entityRef: `••••${created.accountNumber.slice(-4)}`,
+      before: demoted
+        ? {
+            previousPrimary: {
+              id: demoted.id,
+              accountName: demoted.accountName,
+              accountNumber: demoted.accountNumber,
+            },
+          }
+        : undefined,
       after: {
+        vendorId: parsed.data.vendorId,
         accountName: parsed.data.accountName,
+        accountNumber: parsed.data.accountNumber,
         ifsc: parsed.data.ifsc,
         bankName: parsed.data.bankName,
         isPrimary: parsed.data.isPrimary,
@@ -236,6 +288,7 @@ export async function createRateContractAction(
 
     const created = await prisma.vendorRateContract.create({
       data: {
+        orgId: actor.orgId,
         vendorId: parsed.data.vendorId,
         code: parsed.data.code,
         name: parsed.data.name,
@@ -285,6 +338,7 @@ export async function saveRateLineAction(
 
     const created = await prisma.vendorRateLine.create({
       data: {
+        orgId: actor.orgId,
         contractId: parsed.data.contractId,
         originBranchId: parsed.data.originBranchId,
         destinationBranchId: parsed.data.destinationBranchId,

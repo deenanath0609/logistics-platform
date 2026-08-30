@@ -5,9 +5,9 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
-import { generateApiKey } from "@/lib/webhooks/api-key";
+import { generateApiKey, grantableScopes } from "@/lib/webhooks/api-key";
 import { generateWebhookSecret, redeliver } from "@/lib/webhooks/dispatch";
-import { ALLOWED_API_SCOPES } from "./scopes";
+import { ALLOWED_API_SCOPES, requestedScopes } from "./scopes";
 import type { ActionState } from "@/server/services/master-crud";
 
 /**
@@ -96,12 +96,25 @@ export async function issueApiKey(
       return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
     }
 
-    const scopes = splitList(formData.get("scopes")).filter((scope) =>
-      ALLOWED_API_SCOPES.has(scope),
+    const { granted, refused } = grantableScopes(
+      requestedScopes(formData),
+      ALLOWED_API_SCOPES,
+      actor.permissions,
     );
-    if (scopes.length === 0) {
+
+    if (refused.length > 0) {
+      // Named rather than silently dropped: a key quietly issued with less
+      // than was asked for fails later, at a partner's integration, where
+      // nobody can see why.
+      return {
+        error: `You cannot grant ${refused.join(", ")} — a key may not carry a permission the person issuing it does not hold.`,
+      };
+    }
+
+    if (granted.length === 0) {
       return { error: "Choose at least one scope. A key with none can do nothing." };
     }
+    const scopes = granted;
 
     const ipAllowlist = splitList(formData.get("ipAllowlist"));
     const bad = ipAllowlist.find(

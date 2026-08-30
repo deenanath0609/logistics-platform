@@ -5,6 +5,7 @@ import { recordAudit } from "@/server/services/audit";
 import { loadValidationContext } from "@/lib/bulk/context";
 import { validateRow } from "@/lib/bulk/validate";
 import { toPartnerShipment, PUBLIC_SHIPMENT_SELECT } from "@/lib/webhooks/public-payload";
+import { partnerFacingError } from "@/lib/api/domain-error";
 import { withApiKey, ok, fail } from "../_lib/guard";
 import { fieldErrors, readJson } from "../_lib/respond";
 
@@ -170,7 +171,7 @@ export async function POST(request: Request): Promise<Response> {
 
     if (idempotencyKey) {
       const existing = await prisma.shipmentEvent.findUnique({
-        where: { idempotencyKey },
+        where: { orgId_idempotencyKey: { orgId: context.actor.orgId, idempotencyKey } },
         select: { shipment: { select: { id: true, lrNumber: true } } },
       });
 
@@ -251,8 +252,16 @@ export async function POST(request: Request): Promise<Response> {
     );
 
     if (!result.ok) {
-      return fail("invalid_request", result.error, context.requestId, {
-        field: result.field,
+      // `createBooking` ends in a catch that returns `error.message`
+      // verbatim, so an unfielded failure here may be a Prisma error naming
+      // a model and a column, or a TenantContextError carrying two
+      // organisation ids. It went straight into this 422 body.
+      const safe = partnerFacingError(result);
+      if (safe.withheld) {
+        console.error(`[api/v1] ${context.requestId} booking failed`, safe.withheld);
+      }
+      return fail("invalid_request", safe.message, context.requestId, {
+        field: safe.field,
       });
     }
 

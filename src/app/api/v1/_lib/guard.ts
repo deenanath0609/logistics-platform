@@ -1,34 +1,63 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { DataScope } from "@/generated/prisma/client";
+import { getEnv } from "@/lib/env";
+import { clientIpFrom, ipBucketKey, type ClientIp } from "@/lib/net/client-ip";
 import type { SessionUser } from "@/lib/auth/session";
 import {
-  clientAddress,
+  effectiveScopes,
   keyPrefixOf,
   parseApiKeyHeader,
   verifyApiKey,
   type ApiKeyRecord,
 } from "@/lib/webhooks/api-key";
-import { consumeApiQuota, DEFAULT_RATE_LIMIT } from "@/lib/webhooks/rate-limit";
-import { startWebhookDispatch } from "@/lib/webhooks/dispatch";
+import {
+  checkAuthFailures,
+  claimAuthFailureReport,
+  consumeApiQuota,
+  DEFAULT_RATE_LIMIT,
+  noteAuthFailure,
+} from "@/lib/webhooks/rate-limit";
+import { requireTenantOrgId } from "@/lib/tenant";
 import { fail, ok, requestIdFrom } from "./respond";
 
 /**
  * The gate every v1 endpoint passes through.
  *
- * Key → verify → rate limit → actor. The actor step is the one worth
- * explaining: a key is not a user, but everything downstream — booking,
- * event append, branch scoping, the audit trail — is written in terms of
- * one. So the key acts *as the staff member who issued it*, with its
- * permissions narrowed to the key's own scopes. A key can therefore never
- * do more than its owner could, and an audited row names a real person
- * rather than an anonymous integration.
+ * Failure brake → key → verify → rate limit → actor → scope. The actor step
+ * is the one worth explaining: a key is not a user, but everything
+ * downstream — booking, event append, branch scoping, the audit trail — is
+ * written in terms of one. So the key acts *as the staff member who issued
+ * it*, with its permissions narrowed to the key's own scopes. A key can
+ * therefore never do more than its owner could, and an audited row names a
+ * real person rather than an anonymous integration.
+ *
+ * The brake at the front is new, and it is deliberately the very first
+ * thing. Every failure used to return before any limit was counted, so a
+ * caller guessing keys paid nothing and was throttled by nothing, while
+ * each guess cost this process a tenant resolution, a key lookup on an
+ * unindexed column, a SHA-256 and a body parse. Only failures spend that
+ * budget, and it is peeked rather than consumed, so a partner holding a
+ * good key is never delayed by whatever else shares its address.
  */
 
 export type ApiContext = {
   requestId: string;
   key: ApiKeyRecord & { customerId: string | null };
+  /**
+   * `actor.orgId` is redundant as a *filter* now — the extension scopes every
+   * read and stamps every create from the host — but it is kept rather than
+   * dropped: `SessionUser` is shared with the signed-in UI path, and handlers
+   * still want the id as a value (stamping a row they build by hand, naming
+   * the tenant in a log line). Redundant with the extension is not the same
+   * as unused, and removing it would only push the same lookup elsewhere.
+   */
   actor: SessionUser;
+  /**
+   * Only ever set when a configured trusted proxy vouched for it. Null
+   * where the deployment cannot establish the caller — which is honest
+   * rather than convenient, because this value reaches the audit trail.
+   */
   address: string | null;
 };
 
@@ -51,6 +80,10 @@ async function actorForKey(
 ): Promise<SessionUser | null> {
   if (!key.createdById) return null;
 
+  // Scoped to the host's tenant by the extension, like every other user
+  // lookup. The key was found in that same tenant a moment ago, so its owner
+  // is necessarily there too — the filter here is a backstop against a key
+  // whose `createdById` points somewhere it should not, not the real check.
   const user = await prisma.user.findUnique({
     where: { id: key.createdById },
     select: {
@@ -90,8 +123,11 @@ async function actorForKey(
     for (const rp of role.permissions) held.add(rp.permission.code);
   }
 
-  // The narrowing that makes a scoped key meaningful.
-  const permissions = new Set(key.scopes.filter((scope) => held.has(scope)));
+  // The narrowing that makes a scoped key meaningful. Computed here and —
+  // until this was fixed — checked nowhere, so `withApiKey` admitted a
+  // request on the strength of the key's own `scopes` column alone and the
+  // narrowed set only ever reached handlers that happened to consult it.
+  const permissions = effectiveScopes(key.scopes, held);
 
   const scope = activeRoles.reduce<DataScope>(
     (widest, role) => (SCOPE_RANK[role.scope] > SCOPE_RANK[widest] ? role.scope : widest),
@@ -130,6 +166,69 @@ async function actorForKey(
 }
 
 /**
+ * Charges a failed authentication to the calling address, and leaves a
+ * trace of it.
+ *
+ * Two records, for two different readers, because the volume of the two is
+ * wildly different:
+ *
+ *  - A log line for every failure. Cheap, unconditional, and the thing an
+ *    engineer greps when a partner says "it stopped working at 14:32". It
+ *    names the key *prefix*, never the presented key: the prefix is a
+ *    lookup handle and not a secret, and writing the whole key into a log
+ *    would create the credential leak the hashing exists to prevent.
+ *  - A `LoginActivity` row once per address per window, written only when
+ *    the budget is actually exhausted. That is the row an operations team
+ *    reads in the tenant's own activity report, and it is the reason
+ *    brute-force volume is no longer invisible. Once per window, not once
+ *    per request, because a row per bogus request would turn a guessing
+ *    attack into a write amplifier — the failure path would cost more than
+ *    the success path.
+ *
+ * Neither may fail the response. A caller must not learn from a 500 that
+ * they broke the recorder.
+ */
+async function recordAuthFailure(input: {
+  requestId: string;
+  code: string;
+  prefix: string | null;
+  ip: ClientIp;
+  failureBucket: string;
+}): Promise<void> {
+  const spent = await noteAuthFailure(input.failureBucket);
+
+  console.warn(
+    "[api/v1] auth failure",
+    JSON.stringify({
+      requestId: input.requestId,
+      reason: input.code,
+      keyPrefix: input.prefix,
+      address: input.ip.value,
+      addressTrusted: input.ip.trusted,
+      remaining: spent.remaining,
+    }),
+  );
+
+  if (spent.ok) return;
+
+  const first = await claimAuthFailureReport(input.failureBucket);
+  if (!first.ok) return;
+
+  try {
+    await prisma.loginActivity.create({
+      data: {
+        orgId: await requireTenantOrgId(),
+        identifier: input.prefix ?? "unknown-api-key",
+        outcome: "BAD_CREDENTIALS",
+        ipAddress: input.ip.trusted ? input.ip.value : null,
+      },
+    });
+  } catch (error) {
+    console.error("[api/v1] could not record the auth-failure burst", error);
+  }
+}
+
+/**
  * Wraps a handler with authentication, scope check and rate limiting.
  *
  * `requiredScope` is a permission code from the catalogue, not a new
@@ -143,23 +242,42 @@ export async function withApiKey(
 ): Promise<NextResponse> {
   const requestId = requestIdFrom(request);
 
-  // Every entry point arms the webhook fan-out and its delivery timer,
-  // because there is no single startup hook all of them pass through yet.
-  // Both are idempotent and the timer is unref'd, so this is cheap.
-  startWebhookDispatch();
+  // This used to arm the webhook fan-out and its delivery timer, because
+  // there was no single startup hook every entry point passed through.
+  // There is one now — `workers/index.ts` — and starting a dispatcher from
+  // inside a request would put a second one on every web instance, racing
+  // the worker for the same deliveries.
+
+  const ip = clientIpFrom(request.headers, getEnv().TRUSTED_PROXY_HOPS);
+  const failureBucket = ipBucketKey("api-auth", ip);
+
+  // Before the tenant is resolved, before the key row is read, before the
+  // digest is computed. A caller who has already spent the failure budget
+  // is answered from a counter and costs nothing else.
+  const brake = await checkAuthFailures(failureBucket);
+  if (!brake.ok) {
+    return fail(
+      "rate_limited",
+      "Too many failed authentications from this address.",
+      requestId,
+      { headers: { "Retry-After": String(brake.retryAfterSeconds) } },
+    );
+  }
 
   const presented = parseApiKeyHeader(
     request.headers.get("authorization"),
     request.headers.get("x-api-key"),
   );
 
-  const address = clientAddress(
-    request.headers.get("x-forwarded-for"),
-    request.headers.get("x-real-ip"),
-  );
-
   const prefix = presented ? keyPrefixOf(presented) : null;
 
+  // Already tenant-scoped, without a line of code here saying so. The
+  // partner API is served on the tenant's own subdomain, so the extension
+  // pins this lookup to that tenant: a key issued by one carrier and
+  // presented against another carrier's host matches nothing and is refused
+  // as an unknown key. Nothing more is needed — an explicit orgId comparison
+  // would only restate the filter that already ran, and `keyPrefix` is not
+  // unique on its own, so `findFirst` remains correct.
   const record = prefix
     ? await prisma.apiKey.findFirst({
         where: { keyPrefix: prefix },
@@ -183,10 +301,12 @@ export async function withApiKey(
     presented,
     record,
     requiredScope,
-    address,
+    address: ip.value,
+    addressTrusted: ip.trusted,
   });
 
   if (!verdict.ok) {
+    await recordAuthFailure({ requestId, code: verdict.code, prefix, ip, failureBucket });
     return fail(
       verdict.status === 403 ? "forbidden" : "unauthorized",
       verdict.message,
@@ -195,14 +315,14 @@ export async function withApiKey(
     );
   }
 
-  const quota = consumeApiQuota(verdict.key.id, DEFAULT_RATE_LIMIT);
+  const quota = await consumeApiQuota(verdict.key.id, DEFAULT_RATE_LIMIT);
   const rateHeaders = {
     "X-RateLimit-Limit": String(quota.limit),
     "X-RateLimit-Remaining": String(quota.remaining),
     "X-RateLimit-Reset": String(Math.ceil(quota.resetAt / 1000)),
   };
 
-  if (!quota.allowed) {
+  if (!quota.ok) {
     return fail("rate_limited", "Too many requests on this key.", requestId, {
       headers: { ...rateHeaders, "Retry-After": String(quota.retryAfterSeconds) },
     });
@@ -222,8 +342,24 @@ export async function withApiKey(
     );
   }
 
+  // The check the doc comment above has always described. `verifyApiKey`
+  // asked whether the key *carries* the scope; this asks whether its owner
+  // still *holds* it. They differ the moment a role is revoked — which is
+  // exactly the moment the answer has to change, and until now did not:
+  // the key went on working with whatever it was minted with.
+  if (!actor.permissions.has(requiredScope)) {
+    return fail(
+      "forbidden",
+      `That API key carries \`${requiredScope}\`, but the account that issued it no longer holds that permission. Reissue the key, or restore the role.`,
+      requestId,
+      { headers: rateHeaders },
+    );
+  }
+
   // Best-effort: a partner's request must not fail because we could not
-  // write a timestamp.
+  // write a timestamp — which now includes a suspended tenant, where the
+  // extension refuses the write outright and the swallowed rejection is the
+  // right answer rather than a 500 on an otherwise readable request.
   void prisma.apiKey
     .update({ where: { id: verdict.key.id }, data: { lastUsedAt: new Date() } })
     .catch(() => undefined);
@@ -233,7 +369,7 @@ export async function withApiKey(
       requestId,
       key: { ...verdict.key, customerId: record?.customerId ?? null },
       actor,
-      address,
+      address: ip.trusted ? ip.value : null,
     });
 
     for (const [header, value] of Object.entries(rateHeaders)) {

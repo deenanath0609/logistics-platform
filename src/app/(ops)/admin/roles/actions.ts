@@ -1,9 +1,13 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
+import {
+  permissionsBeyondActor,
+  escalationMessage,
+} from "@/lib/rbac/grant-guard";
 import type { ActionState } from "@/server/services/master-crud";
 
 export async function updateRolePermissions(
@@ -50,15 +54,30 @@ export async function updateRolePermissions(
       return { ok: true, message: "No changes to save." };
     }
 
-    await prisma.$transaction([
-      prisma.rolePermission.deleteMany({ where: { roleId } }),
-      prisma.rolePermission.createMany({
-        data: permissions.map((p) => ({ roleId, permissionId: p.id })),
-      }),
-    ]);
-
     const granted = after.filter((code) => !before.includes(code));
     const revoked = before.filter((code) => !after.includes(code));
+
+    // The only guard here used to be the Super Admin rule above, so
+    // `role.manage` on its own was `*`: tick `settlement.approve` on the
+    // role you already hold and approve your own payouts on the next
+    // request. Only additions are checked — revoking stays open, because
+    // removing a permission is not an escalation and is the first thing
+    // anyone does to a role that has been abused.
+    const beyond = await permissionsBeyondActor(actor, granted);
+    if (beyond.length > 0) {
+      return { error: escalationMessage(`Saving ${role.name}`, beyond) };
+    }
+
+    await tenantTransaction(async (tx) => {
+      await tx.rolePermission.deleteMany({ where: { roleId } });
+      await tx.rolePermission.createMany({
+        data: permissions.map((p) => ({
+          orgId: actor.orgId,
+          roleId,
+          permissionId: p.id,
+        })),
+      });
+    });
 
     await recordAudit({
       user: actor,

@@ -67,9 +67,16 @@ export function IssueKeyForm({
             </label>
           ))}
         </div>
+        {scopes.length === 0 && (
+          <p className="text-xs text-bad">
+            Your account holds none of the permissions a key may carry, so
+            there is nothing to issue. Ask for the role that grants them.
+          </p>
+        )}
         <p className="text-xs text-muted-foreground">
           A key can never do more than these, and never more than the person
-          issuing it already can.
+          issuing it already can — checked again on every request, so a
+          revoked role disables the keys that person issued.
         </p>
       </fieldset>
 

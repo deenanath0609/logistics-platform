@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@/generated/prisma/client";
+import { prisma, tenantTransaction, type Db, type DbOrTx } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
@@ -167,7 +166,7 @@ type LineDraft = {
 /** One line per charge head per consignment, so every figure has a source. */
 async function draftLines(
   shipmentIds: string[],
-  client: Pick<typeof prisma, "shipment">,
+  client: Pick<Db, "shipment">,
 ): Promise<{ lines: LineDraft[]; anyReverseCharge: boolean; allReverseCharge: boolean }> {
   const shipments = await client.shipment.findMany({
     where: { id: { in: shipmentIds } },
@@ -358,10 +357,10 @@ export async function generateInvoice(
     input.placeOfSupply?.trim() || customer.billingCity?.state.name || null;
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "INVOICE", at: invoiceDate, branchCode: branch.code },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       const invoice = await tx.invoice.create({
@@ -389,6 +388,7 @@ export async function generateInvoice(
           lines: {
             createMany: {
               data: lines.map((line, index) => ({
+                orgId: actor.orgId,
                 shipmentId: line.shipmentId,
                 chargeTypeId: line.chargeTypeId,
                 description: line.description,
@@ -766,10 +766,10 @@ export async function createCreditNote(
   }
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "CREDIT_NOTE" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       const note = await tx.creditNote.create({
@@ -834,7 +834,7 @@ export async function createCreditNote(
  */
 export async function recomputeInvoiceBalance(
   invoiceId: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<void> {
   const invoice = await client.invoice.findUnique({
     where: { id: invoiceId },

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { recordAudit } from "@/server/services/audit";
 import { coversBranch } from "@/server/repositories/scope";
@@ -77,8 +77,12 @@ export async function POST(request: Request): Promise<Response> {
     // The city comes from the PIN master rather than from the request, so
     // a caller cannot pair a Jaipur PIN with a Delhi city and quietly
     // route the collection to the wrong branch.
-    const pincode = await prisma.pincode.findUnique({
-      where: { code: input.pincode },
+    // Serviceability is a fact about a carrier, not about the PIN, so this
+    // has to be the calling key's own master — and `orgId` is written out
+    // for the same reason as in the sibling routes: on a key with no
+    // customer attached it is the only thing bounding the lookup.
+    const pincode = await prisma.pincode.findFirst({
+      where: { orgId: api.key.orgId, code: input.pincode },
       select: { cityId: true, isServiceable: true },
     });
     if (!pincode) {
@@ -94,11 +98,20 @@ export async function POST(request: Request): Promise<Response> {
 
     let shipmentId: string | null = null;
     if (input.lrNumber) {
+      // A partner key with no customer attached is deliberately
+      // organisation-wide, so on that branch the `orgId` filter is the only
+      // thing bounding the lookup and is written out rather than left to the
+      // tenant extension. Matches the shipments and track routes.
+      const owner = api.key.customerId
+        ? { consignorId: api.key.customerId }
+        : {};
+
       const shipment = await prisma.shipment.findFirst({
         where: {
+          orgId: api.key.orgId,
           lrNumber: input.lrNumber.trim(),
           deletedAt: null,
-          ...(api.key.customerId ? { consignorId: api.key.customerId } : {}),
+          ...owner,
         },
         select: { id: true },
       });
@@ -110,12 +123,12 @@ export async function POST(request: Request): Promise<Response> {
       shipmentId = shipment.id;
     }
 
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction, so a request that fails to save
       // does not consume a number.
       const number = await nextNumber(
         { document: "PICKUP" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.pickupRequest.create({

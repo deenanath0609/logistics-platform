@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type Db } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
@@ -70,7 +70,7 @@ export type ShipmentInvoiceLink = {
  */
 export async function liveInvoiceForShipment(
   shipmentId: string,
-  client: Pick<typeof prisma, "invoiceLine"> = prisma,
+  client: Pick<Db, "invoiceLine"> = prisma,
 ): Promise<ShipmentInvoiceLink | null> {
   const line = await client.invoiceLine.findFirst({
     where: {
@@ -246,10 +246,10 @@ export async function createDebitNote(
     `Revised chargeable weight — supplementary charge against ${invoice.number}`;
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "DEBIT_NOTE", at: issuedOn, branchCode: invoice.branch.code },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.invoice.create({
@@ -278,6 +278,9 @@ export async function createDebitNote(
             createMany: {
               data: [
                 {
+                  // The note belongs to the invoice it corrects, not to
+                  // whoever raised it — see the `orgId` on the parent above.
+                  orgId: invoice.orgId,
                   shipmentId: input.shipmentId ?? null,
                   description,
                   quantity: "1.000",

@@ -33,7 +33,15 @@ function stateOf(key: {
 }
 
 export default async function ApiKeysPage() {
-  await requirePermission("apikey.manage");
+  const actor = await requirePermission("apikey.manage");
+
+  // Only what this person could do themselves. A key is issued as its
+  // owner and narrowed to their permissions on every request, so offering
+  // a scope they do not hold would offer a checkbox that mints a key which
+  // is refused the first time it is used.
+  const offeredScopes = API_KEY_SCOPES.filter((scope) =>
+    actor.permissions.has(scope.code),
+  );
 
   const [keys, customers] = await Promise.all([
     prisma.apiKey.findMany({
@@ -86,7 +94,7 @@ export default async function ApiKeysPage() {
             Issue a key
           </h2>
           <IssueKeyForm
-            scopes={API_KEY_SCOPES.map((scope) => ({ ...scope }))}
+            scopes={offeredScopes.map((scope) => ({ ...scope }))}
             customers={customers.map((customer) => ({
               id: customer.id,
               label: `${customer.code} — ${customer.name}`,

@@ -1,8 +1,13 @@
 import { prisma } from "@/lib/prisma";
-import { getEnv } from "@/lib/env";
 import { getGpsProvider } from "@/lib/tracking/providers";
 import { ingestPings } from "@/lib/tracking/ingest";
 import { verifySignature } from "@/lib/tracking/signature";
+import {
+  runCrossTenant,
+  runWithTenant,
+  tenantContextFor,
+  type ResolvedOrg,
+} from "@/lib/tenant";
 
 /**
  * POST /api/tracking/webhook — push-based position delivery.
@@ -30,6 +35,14 @@ import { verifySignature } from "@/lib/tracking/signature";
  * query parameter. That is what lets one endpoint serve several vendors and
  * several organisations without a caller being able to claim an identity it
  * cannot prove.
+ *
+ * **Which tenant.** The same secret answers that too. Testing every active
+ * config is the one genuinely cross-tenant read in the handler — the whole
+ * question being asked is whose config this is — and it is declared as such.
+ * The moment a config matches, its `orgId` is the answer, and everything
+ * afterwards runs inside that tenant: an unsigned request never gets that
+ * far, and a signed one can only ever write to the organisation whose secret
+ * it proved it holds.
  */
 
 export const dynamic = "force-dynamic";
@@ -47,10 +60,23 @@ const SIGNATURE_HEADERS = [
 const MAX_BODY_BYTES = 1_048_576;
 
 type ResolvedProvider = {
-  configId: string | null;
+  configId: string;
   code: string;
   secret: string;
+  /** The tenant that owns the config whose secret verified the body. */
+  org: ResolvedOrg;
 };
+
+/**
+ * `bootstrap` is a body that verifies against `GPS_WEBHOOK_SECRET` and
+ * therefore names no organisation. Kept as its own outcome rather than
+ * folded into `unknown` because the two need opposite answers: one is a
+ * stranger, the other is a configuration gap on our side.
+ */
+type Resolution =
+  | { kind: "provider"; resolved: ResolvedProvider }
+  | { kind: "bootstrap" }
+  | { kind: "unknown" };
 
 export async function POST(request: Request): Promise<Response> {
   const raw = await request.text();
@@ -78,19 +104,70 @@ export async function POST(request: Request): Promise<Response> {
     });
   }
 
-  const resolved = await resolveProvider(raw, signature);
-  if (!resolved) {
+  const resolution = await resolveProvider(raw, signature);
+
+  if (resolution.kind === "unknown") {
     // Deliberately vague. Telling a caller whether the secret was wrong or
     // simply absent tells them something about our configuration.
     return json(401, { error: "invalid_signature", message: "Signature rejected." });
   }
 
-  const config = resolved.configId
-    ? await prisma.trackingProviderConfig.findUnique({
-        where: { id: resolved.configId },
-        select: { baseUrl: true, apiKey: true, webhookSecret: true },
-      })
-    : null;
+  if (resolution.kind === "bootstrap") {
+    // The bootstrap secret proves the caller is trusted; it does not say
+    // whose vehicles these are. Every row an ingest writes — GpsPing,
+    // VehicleLocation, the geofence events and trip events that follow — is
+    // tenant-owned, so accepting this batch would mean inventing a tenant
+    // for it, and the wrong guess puts one carrier's truck on another
+    // carrier's live map. Refused instead.
+    //
+    // 503 rather than 401 because the caller is not the problem: every
+    // vendor worth integrating retries a 503, so the fixes are not lost and
+    // the retry succeeds as soon as the vendor is configured.
+    console.error(
+      "[tracking/webhook] refused a batch signed with GPS_WEBHOOK_SECRET: the " +
+        "bootstrap secret belongs to no organisation, so the pings have no " +
+        "tenant to be stored against. Add the vendor on the tracking provider " +
+        "screen — that row carries the orgId this needs.",
+    );
+    return json(503, {
+      error: "provider_not_configured",
+      message:
+        "This sender is not linked to an organisation. Configure the provider and retry.",
+    });
+  }
+
+  const { resolved } = resolution;
+
+  const tenant = tenantContextFor(resolved.org, "job");
+  if (!tenant || tenant.readOnly) {
+    // CLOSED yields no context at all; SUSPENDED yields a read-only one,
+    // and an ingest is nothing but writes. Saying so plainly beats a 500
+    // from the write that would otherwise be refused three frames down.
+    return json(503, {
+      error: "tenant_inactive",
+      message: "This organisation is not accepting position data.",
+    });
+  }
+
+  return runWithTenant(tenant, () => ingestBatch(raw, signature, resolved));
+}
+
+/**
+ * Everything past identification, inside the sender's own tenant.
+ *
+ * Split out so the `runWithTenant` boundary is a single expression: no
+ * query below this line can reach another organisation's rows, and none of
+ * it has to name an `orgId` to be sure of that.
+ */
+async function ingestBatch(
+  raw: string,
+  signature: string,
+  resolved: ResolvedProvider,
+): Promise<Response> {
+  const config = await prisma.trackingProviderConfig.findUnique({
+    where: { id: resolved.configId },
+    select: { baseUrl: true, apiKey: true, webhookSecret: true },
+  });
 
   let provider;
   try {
@@ -109,9 +186,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const parsed = provider.parseWebhook(raw, signature);
   if (!parsed.ok) {
-    if (resolved.configId) {
-      await noteError(resolved.configId, `${parsed.reason}: ${parsed.detail}`);
-    }
+    await noteError(resolved.configId, `${parsed.reason}: ${parsed.detail}`);
     return parsed.reason === "signature"
       ? json(401, { error: "invalid_signature", message: "Signature rejected." })
       : json(400, { error: "invalid_payload", message: parsed.detail });
@@ -120,12 +195,10 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const summary = await ingestPings(parsed.pings);
 
-    if (resolved.configId) {
-      await prisma.trackingProviderConfig.update({
-        where: { id: resolved.configId },
-        data: { lastPolledAt: new Date(), lastError: null },
-      });
-    }
+    await prisma.trackingProviderConfig.update({
+      where: { id: resolved.configId },
+      data: { lastPolledAt: new Date(), lastError: null },
+    });
 
     return json(202, {
       received: summary.received,
@@ -137,12 +210,10 @@ export async function POST(request: Request): Promise<Response> {
     });
   } catch (error) {
     console.error("[tracking/webhook] ingest failed", error);
-    if (resolved.configId) {
-      await noteError(
-        resolved.configId,
-        error instanceof Error ? error.message : "Ingest failed",
-      );
-    }
+    await noteError(
+      resolved.configId,
+      error instanceof Error ? error.message : "Ingest failed",
+    );
     // A 500 is the honest answer and the useful one: every provider worth
     // integrating retries on it, and the fixes are not lost.
     return json(500, { error: "ingest_failed", message: "Could not store the batch." });
@@ -150,36 +221,72 @@ export async function POST(request: Request): Promise<Response> {
 }
 
 /**
- * Identifies the sender by which configured secret verifies the body.
+ * Identifies the sender — and with it the tenant — by which configured
+ * secret verifies the body.
  *
- * Falls back to `GPS_WEBHOOK_SECRET` from the environment when no provider
- * row exists yet, so an integration can be tested before anybody has filled
- * in the configuration screen. Read from `process.env` directly because it
- * is a bootstrap secret rather than part of the validated application
- * configuration.
+ * Every active config in the platform is tested, which is a cross-tenant
+ * read by necessity: whose config this is, is the question. It is declared
+ * as one rather than left to run without a tenant, so the reason appears in
+ * the audit trail beside every other deliberate cross-tenant read.
+ *
+ * `GPS_WEBHOOK_SECRET` is still recognised, but it is no longer a way in.
+ * It used to stand in for a provider row so an integration could be tested
+ * before anyone filled in the configuration screen; under tenancy it stands
+ * in for nothing, because a ping needs an organisation and that secret
+ * names none. It is reported to the caller instead — see the `bootstrap`
+ * branch in `POST`. Read from `process.env` directly because it is a
+ * bootstrap secret rather than part of the validated configuration.
  */
 async function resolveProvider(
   body: string,
   signature: string,
-): Promise<ResolvedProvider | null> {
-  const configs = await prisma.trackingProviderConfig.findMany({
-    where: { isActive: true, webhookSecret: { not: null } },
-    select: { id: true, code: true, webhookSecret: true },
-  });
+): Promise<Resolution> {
+  const matched = await runCrossTenant(
+    "gps webhook provider resolution",
+    async (): Promise<ResolvedProvider | null> => {
+      const configs = await prisma.trackingProviderConfig.findMany({
+        where: { isActive: true, webhookSecret: { not: null } },
+        select: { id: true, code: true, orgId: true, webhookSecret: true },
+      });
 
-  for (const config of configs) {
-    if (!config.webhookSecret) continue;
-    if (verifySignature({ secret: config.webhookSecret, body, signature }).ok) {
-      return { configId: config.id, code: config.code, secret: config.webhookSecret };
-    }
-  }
+      for (const config of configs) {
+        if (!config.webhookSecret) continue;
+        if (!verifySignature({ secret: config.webhookSecret, body, signature }).ok) {
+          continue;
+        }
+
+        const org = await prisma.organization.findUnique({
+          where: { id: config.orgId },
+          select: {
+            id: true,
+            slug: true,
+            subdomain: true,
+            customDomain: true,
+            status: true,
+          },
+        });
+        if (!org) return null;
+
+        return {
+          configId: config.id,
+          code: config.code,
+          secret: config.webhookSecret,
+          org,
+        };
+      }
+
+      return null;
+    },
+  );
+
+  if (matched) return { kind: "provider", resolved: matched };
 
   const bootstrap = process.env.GPS_WEBHOOK_SECRET;
   if (bootstrap && verifySignature({ secret: bootstrap, body, signature }).ok) {
-    return { configId: null, code: getEnv().GPS_PROVIDER, secret: bootstrap };
+    return { kind: "bootstrap" };
   }
 
-  return null;
+  return { kind: "unknown" };
 }
 
 async function noteError(configId: string, message: string): Promise<void> {

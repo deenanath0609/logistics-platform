@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, type Db } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
 import type { Prisma } from "@/generated/prisma/client";
 import {
   calculateFreight,
@@ -182,7 +183,10 @@ export async function zonesForPincode(
   client: PricingClient = prisma,
 ): Promise<string[]> {
   if (!code) return [];
-  const pincode = await client.pincode.findUnique({
+  // `findFirst`: geography is per-tenant, so a PIN code is unique within an
+  // organisation rather than globally, and the tenant filter is what picks
+  // the right row out of the several carriers that all serve 400001.
+  const pincode = await client.pincode.findFirst({
     where: { code },
     select: { zones: { select: { zoneId: true } } },
   });
@@ -270,7 +274,7 @@ export async function snapshotShipment(
   const [originZoneIds, destinationZoneIds, destination] = await Promise.all([
     zonesForPincode(shipment.consignorPincode, client),
     zonesForPincode(shipment.consigneePincode, client),
-    client.pincode.findUnique({
+    client.pincode.findFirst({
       where: { code: shipment.consigneePincode },
       select: { isOda: true },
     }),
@@ -298,7 +302,17 @@ export async function snapshotShipment(
   };
 }
 
-export type FreightStage = "BOOKING" | "INVOICE";
+/**
+ * `BOOKING_OVERRIDE` is a booking calculation that was *not* what the
+ * consignment was charged: somebody with `shipment.override_rate` typed a
+ * price instead. The row is still written, and written with its full
+ * trace, because the question asked six months later is never "what were
+ * they charged" — that is on the shipment — but "what should they have
+ * been charged, and by how much did a human differ". A stage of `BOOKING`
+ * therefore means the tariff's answer *is* the price; `BOOKING_OVERRIDE`
+ * means it was overruled, and the two must not look alike.
+ */
+export type FreightStage = "BOOKING" | "BOOKING_OVERRIDE" | "INVOICE";
 
 /**
  * Stores the calculation against the shipment.
@@ -315,12 +329,18 @@ export async function storeFreightCalculation(
     stage: FreightStage;
     userId?: string | null;
   },
-  client: Pick<typeof prisma, "freightCalculation"> = prisma,
+  client: Pick<Db, "freightCalculation"> = prisma,
 ): Promise<string> {
   const { result } = input;
 
+  // Neither an actor nor the shipment row is in scope here — this takes a
+  // shipment id and a computed result, and adding a parameter to thread the
+  // tenant through would be the very habit the isolation layer replaces.
+  const orgId = await requireTenantOrgId();
+
   const row = await client.freightCalculation.create({
     data: {
+      orgId,
       shipmentId: input.shipmentId,
       versionId: result.selectedVersionId,
       trace: result.trace as unknown as Prisma.InputJsonValue,

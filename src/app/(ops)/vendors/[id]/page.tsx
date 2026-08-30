@@ -581,10 +581,13 @@ export default async function VendorDetailPage({
         <section>
           <div className="flex items-center justify-between pb-3">
             <h2 className="text-sm font-semibold">Bank accounts</h2>
-            {canEdit && (
+            {/* Not `canEdit`: where a vendor is paid is a payout decision,
+                not a vendor-record edit. The action refuses anything less
+                than `settlement.approve`, and the button follows it. */}
+            {canApprove && (
               <EntityFormDialog
                 title="Add bank account"
-                description="Changing where a vendor is paid is audited with the account tail, never the full number."
+                description="Where this vendor is paid. The change is audited against your name, with the account it replaces."
                 fields={BANK_FIELDS}
                 hidden={{ vendorId: vendor.id }}
                 action={saveBankAccountAction}

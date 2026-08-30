@@ -21,6 +21,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SHIPMENT_MODES, SHIPMENT_MODE_SHORT } from "@/lib/shipment/modes";
 import {
   createVersionAction,
   approveVersionAction,
@@ -123,11 +124,10 @@ function slabFields(options: {
       name: "mode",
       label: "Mode",
       half: true,
-      options: [
-        { value: "FTL", label: "FTL" },
-        { value: "PTL", label: "PTL" },
-        { value: "COURIER", label: "Courier" },
-      ],
+      options: SHIPMENT_MODES.map((mode) => ({
+        value: mode,
+        label: SHIPMENT_MODE_SHORT[mode],
+      })),
     },
     {
       type: "select",

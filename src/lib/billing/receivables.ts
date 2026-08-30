@@ -1,9 +1,9 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { PaymentMode } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
-import { branchScope } from "@/server/repositories/scope";
+import { branchScope, coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
 import { nextNumber } from "@/lib/numbering/number-series";
 import {
@@ -282,6 +282,106 @@ export async function checkCustomerCredit(
 // Payments
 // ────────────────────────────────────────────────────────────
 
+type OpenInvoice = {
+  id: string;
+  number: string;
+  dueDate: Date;
+  amountDue: { toString(): string };
+  branchId: string;
+};
+
+type PlannedAllocation = { invoiceId: string; number: string; amount: Decimal };
+
+/**
+ * The invoices money may be applied to, for one customer.
+ *
+ * Deliberately not branch-scoped, for the reason `checkCustomerCredit`
+ * gives: what a customer owes is an account-level fact. A receipt banked at
+ * Delhi settles the account, and filtering this list by the clerk's
+ * branches would silently leave Jaipur invoices open with the cash parked
+ * on account. Which of these a clerk may *name* by hand is a narrower
+ * question, and `planNamedAllocations` answers it.
+ */
+async function openInvoicesFor(customerId: string): Promise<OpenInvoice[]> {
+  return prisma.invoice.findMany({
+    where: {
+      customerId,
+      status: { in: ["ISSUED", "PARTIALLY_PAID", "CREDITED"] },
+      amountDue: { gt: 0 },
+    },
+    orderBy: { dueDate: "asc" },
+    select: {
+      id: true,
+      number: true,
+      dueDate: true,
+      amountDue: true,
+      branchId: true,
+    },
+  });
+}
+
+/**
+ * ── Every allocation typed by a human passes through here ────────────────
+ *
+ * `recordPayment` had these checks and `allocateOnAccount`, five hundred
+ * lines away, had none of them: it took the invoice id off the form and
+ * wrote an allocation row for it, so customer A's money settled customer
+ * B's invoice, in any branch, for any amount up to whatever was left
+ * unallocated on the receipt. Both paths now call this, which is the only
+ * way the two stay honest — the duplicate that existed before is precisely
+ * what drifted.
+ *
+ * Three things are checked, and each is a real defect that was possible:
+ *
+ * - the invoice is one of *this customer's* open invoices, because `open`
+ *   was fetched for the payer;
+ * - it sits in a branch the actor covers, matching the picker they were
+ *   offered (`customerLedger` is branch-scoped, so anything else was typed
+ *   or replayed);
+ * - the amount does not exceed what is still due on it, which is what stops
+ *   a receipt from over-settling one invoice and leaving the account in
+ *   credit against an invoice that was never that large.
+ *
+ * The refusal never says whose invoice it was: the caller may not be
+ * entitled to know the id they guessed exists.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+function planNamedAllocations(
+  open: OpenInvoice[],
+  allocations: Array<{ invoiceId: string; amount: MoneyIn }>,
+  actor: SessionUser,
+): { ok: true; planned: PlannedAllocation[] } | { ok: false; error: string } {
+  const byId = new Map(open.map((invoice) => [invoice.id, invoice]));
+  const planned: PlannedAllocation[] = [];
+
+  for (const allocation of allocations) {
+    const invoice = byId.get(allocation.invoiceId);
+    if (!invoice) {
+      return {
+        ok: false,
+        error: "One of the invoices selected is not open on this account.",
+      };
+    }
+    if (!coversBranch(actor, invoice.branchId)) {
+      return { ok: false, error: `${invoice.number} is outside your branch scope.` };
+    }
+
+    const value = money(dec(allocation.amount));
+    if (value.lessThanOrEqualTo(0)) continue;
+
+    if (value.greaterThan(dec(invoice.amountDue.toString()))) {
+      return {
+        ok: false,
+        error: `₹${value.toFixed(2)} is more than the ₹${invoice.amountDue.toString()} still open on ${invoice.number}.`,
+      };
+    }
+
+    planned.push({ invoiceId: invoice.id, number: invoice.number, amount: value });
+  }
+
+  return { ok: true, planned };
+}
+
 export type RecordPaymentInput = {
   customerId: string;
   branchId?: string | null;
@@ -328,37 +428,14 @@ export async function recordPayment(
     return { ok: false, error: "TDS cannot be negative." };
   }
 
-  const open = await prisma.invoice.findMany({
-    where: {
-      customerId: input.customerId,
-      status: { in: ["ISSUED", "PARTIALLY_PAID", "CREDITED"] },
-      amountDue: { gt: 0 },
-    },
-    orderBy: { dueDate: "asc" },
-    select: { id: true, number: true, dueDate: true, amountDue: true },
-  });
+  const open = await openInvoicesFor(input.customerId);
 
-  const byId = new Map(open.map((invoice) => [invoice.id, invoice]));
-
-  let planned: Array<{ invoiceId: string; number: string; amount: Decimal }>;
+  let planned: PlannedAllocation[];
 
   if (input.allocations && input.allocations.length > 0) {
-    planned = [];
-    for (const allocation of input.allocations) {
-      const invoice = byId.get(allocation.invoiceId);
-      if (!invoice) {
-        return { ok: false, error: "One of the invoices selected is no longer open." };
-      }
-      const value = money(dec(allocation.amount));
-      if (value.lessThanOrEqualTo(0)) continue;
-      if (value.greaterThan(dec(invoice.amountDue.toString()))) {
-        return {
-          ok: false,
-          error: `₹${value.toFixed(2)} is more than the ₹${invoice.amountDue.toString()} still open on ${invoice.number}.`,
-        };
-      }
-      planned.push({ invoiceId: invoice.id, number: invoice.number, amount: value });
-    }
+    const plan = planNamedAllocations(open, input.allocations, actor);
+    if (!plan.ok) return plan;
+    planned = plan.planned;
 
     const allocated = planned.reduce((sum, a) => sum.plus(a.amount), new Decimal(0));
     if (allocated.greaterThan(amount.plus(tdsAmount))) {
@@ -386,10 +463,10 @@ export async function recordPayment(
   const unallocated = money(amount.plus(tdsAmount).minus(allocated));
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "PAYMENT", at: input.receivedOn },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       const payment = await tx.payment.create({
@@ -413,6 +490,7 @@ export async function recordPayment(
       for (const allocation of planned) {
         await tx.paymentAllocation.create({
           data: {
+            orgId: actor.orgId,
             paymentId: payment.id,
             invoiceId: allocation.invoiceId,
             amount: allocation.amount.toFixed(2),
@@ -466,13 +544,32 @@ export async function allocateOnAccount(
 
   const payment = await prisma.payment.findUnique({
     where: { id: input.paymentId },
-    select: { id: true, number: true, unallocated: true, customerId: true },
+    select: {
+      id: true,
+      number: true,
+      unallocated: true,
+      customerId: true,
+      branchId: true,
+    },
   });
 
   if (!payment) return { ok: false, error: "That payment no longer exists." };
+  if (payment.branchId && !coversBranch(actor, payment.branchId)) {
+    return { ok: false, error: "That receipt is outside your branch scope." };
+  }
+
+  // `payment.customerId` — not anything the form sent — decides whose
+  // invoices are on offer. The old code went straight from "is there enough
+  // left on this receipt" to writing an allocation row for whatever invoice
+  // id was posted, so money received from one customer settled another's
+  // invoice, and nothing capped the write at what that invoice actually
+  // owed.
+  const open = await openInvoicesFor(payment.customerId);
+  const plan = planNamedAllocations(open, input.allocations, actor);
+  if (!plan.ok) return plan;
 
   const requested = money(
-    input.allocations.reduce((sum, a) => sum.plus(dec(a.amount)), new Decimal(0)),
+    plan.planned.reduce((sum, a) => sum.plus(a.amount), new Decimal(0)),
   );
   const available = money(dec(payment.unallocated.toString()));
 
@@ -484,10 +581,11 @@ export async function allocateOnAccount(
   }
 
   try {
-    await prisma.$transaction(async (tx) => {
-      for (const allocation of input.allocations) {
-        const amount = money(dec(allocation.amount));
-        if (amount.lessThanOrEqualTo(0)) continue;
+    await tenantTransaction(async (tx) => {
+      for (const allocation of plan.planned) {
+        // Already validated and rounded — zero and negative lines were
+        // dropped when the plan was built.
+        const amount = allocation.amount;
 
         const existing = await tx.paymentAllocation.findUnique({
           where: {
@@ -509,6 +607,7 @@ export async function allocateOnAccount(
         } else {
           await tx.paymentAllocation.create({
             data: {
+              orgId: actor.orgId,
               paymentId: payment.id,
               invoiceId: allocation.invoiceId,
               amount: amount.toFixed(2),

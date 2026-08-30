@@ -60,7 +60,10 @@ export async function requestOtp(
     return { error: "Enter a 10-digit mobile number." };
   }
 
-  const user = await prisma.user.findUnique({
+  // `findFirst`, not `findUnique`: a mobile number is unique within a tenant,
+  // not across the platform, so the same number can belong to a driver at two
+  // carriers. The tenant filter is what makes this a single row again.
+  const user = await prisma.user.findFirst({
     where: { mobile },
     select: { id: true, status: true, deletedAt: true },
   });
@@ -73,8 +76,15 @@ export async function requestOtp(
 
   const { code } = await issueOtp({ destination: mobile, purpose: "LOGIN" });
 
-  // Phase 5 replaces this with the SMS channel.
-  console.info(`[otp] login code for ${mobile}: ${code}`);
+  // Never logged. A login code printed to stdout is not a second factor —
+  // it is the whole of authentication for this flow, sitting in a log
+  // aggregator next to the mobile number it belongs to. The line below is
+  // the only place the code is returned, and it is already gated on
+  // development.
+  //
+  // No SMS channel is wired for LOGIN yet, so outside development this flow
+  // currently has no delivery path at all. That is a missing feature; a log
+  // line is not an acceptable stand-in for it.
 
   return {
     otpSentTo: mobile,

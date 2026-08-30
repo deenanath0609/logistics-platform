@@ -250,9 +250,41 @@ export async function saveCustomerAddress(
     const id = String(formData.get("id") ?? "");
     const data = parsed.data;
 
+    // The account this address is being saved against gets the same scope
+    // check `updateCustomer` does — editing somebody's addresses is editing
+    // their account, and going through this form was a way around it.
+    const customer = await prisma.customer.findUnique({
+      where: { id: data.customerId },
+      select: { id: true, branchId: true },
+    });
+    if (!customer) return { error: "That customer no longer exists." };
+    if (customer.branchId && !coversBranch(actor, customer.branchId)) {
+      return { error: "That customer is outside your scope." };
+    }
+
+    if (id) {
+      // `id` and `customerId` both come from the form and were never
+      // compared, so an address could be updated by id alone — and its
+      // `customerId` rewritten in the same call. That moved another
+      // customer's pickup address onto this account and, with `isDefault`,
+      // straight into what the booking screen pre-fills. An address belongs
+      // to the account it was created under; correcting the wrong one means
+      // deleting it and adding it again where it belongs.
+      const existing = await prisma.customerAddress.findUnique({
+        where: { id },
+        select: { customerId: true },
+      });
+      if (!existing) return { error: "That address no longer exists." };
+      if (existing.customerId !== data.customerId) {
+        return { error: "That address belongs to a different customer." };
+      }
+    }
+
     const saved = id
       ? await prisma.customerAddress.update({ where: { id }, data })
-      : await prisma.customerAddress.create({ data });
+      : await prisma.customerAddress.create({
+          data: { ...data, orgId: actor.orgId },
+        });
 
     // Only one default per kind, or the booking screen has to guess.
     if (data.isDefault) {

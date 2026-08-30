@@ -3,13 +3,31 @@
 import { revalidatePath } from "next/cache";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
-import { authorize, PermissionError } from "@/lib/auth/session";
+import { prisma, tenantTransaction } from "@/lib/prisma";
+import { authorize, PermissionError, type SessionUser } from "@/lib/auth/session";
+import { assertWithinLimit, isPlanLimitError } from "@/lib/plan-limits";
 import { coversBranch } from "@/server/repositories/scope";
 import { recordAudit, changedFields } from "@/server/services/audit";
+import { rolesBeyondActor, escalationMessage } from "@/lib/rbac/grant-guard";
+import {
+  deactivateFieldUser,
+  reactivateFieldUser,
+} from "@/lib/fleet/field-staff-service";
 import type { ActionState } from "@/server/services/master-crud";
 
 const PATH = "/admin/users";
+
+/**
+ * The field-staff roster is a second view of these same rows, so every
+ * mutation here has to refresh it too — otherwise a delivery boy edited on
+ * one screen still reads with his old branch on the other.
+ */
+const FIELD_STAFF_PATH = "/fleet/field-staff";
+
+function revalidateUserViews(): void {
+  revalidatePath(PATH);
+  revalidatePath(FIELD_STAFF_PATH);
+}
 
 const base = {
   name: z.string().trim().min(2, "Required").max(120),
@@ -64,6 +82,8 @@ function describe(error: unknown): string {
   if (error instanceof PermissionError) {
     return "You do not have permission to manage users.";
   }
+  // Already written for a carrier, naming their plan and the number.
+  if (isPlanLimitError(error)) return error.message;
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Unique constraint")) {
     return message.includes("email")
@@ -72,6 +92,35 @@ function describe(error: unknown): string {
   }
   console.error("[users]", error);
   return "Something went wrong. The change was not applied.";
+}
+
+/**
+ * Refuses role assignments that would hand out more than the actor holds.
+ *
+ * `roleIds` come straight off the form and used to be written verbatim, so
+ * `user.manage` on its own was equivalent to `*`: the Super Admin role id
+ * is rendered on the page, and posting it against your own account gave you
+ * every permission on your next request. Only roles being *added* are
+ * checked — removing a role you could not grant is de-escalation and has to
+ * stay possible.
+ *
+ * Returns the refusal to hand back, or `null` when the assignment is within
+ * what the actor may pass on.
+ */
+async function ungrantableRoles(
+  actor: SessionUser,
+  roleIds: string[],
+  alreadyHeld: string[] = [],
+): Promise<ActionState | null> {
+  const added = roleIds.filter((id) => !alreadyHeld.includes(id));
+  const beyond = await rolesBeyondActor(actor, added);
+  if (beyond.length === 0) return null;
+
+  const worst = beyond[0];
+  return {
+    error: escalationMessage(`The role "${worst.name}"`, worst.codes),
+    fieldErrors: { roleIds: "Beyond your own permissions" },
+  };
 }
 
 export async function createUser(
@@ -107,18 +156,35 @@ export async function createUser(
       };
     }
 
-    const org = await prisma.organization.findFirstOrThrow({
-      select: { id: true },
-    });
+    const refusal = await ungrantableRoles(actor, roleIds);
+    if (refusal) return refusal;
 
+    // The seat is checked here, after the form has been found valid and
+    // before anything is written: the eleventh user on a ten-user plan is
+    // refused at creation, told which plan and which number, rather than
+    // created now and reconciled on an invoice a month later.
+    await assertWithinLimit("users");
+
+    // The new user joins the organisation of whoever created them.
+    // `Organization` is global (ADR 001 §4), so the extension does not
+    // filter it and a `where`-less read of it was picking an arbitrary
+    // tenant to plant staff accounts in. Naming the actor's org also lets
+    // the extension refuse the write outright if the signed-in user and
+    // the host's tenant ever disagree.
     const created = await prisma.user.create({
       data: {
         ...data,
-        orgId: org.id,
+        orgId: actor.orgId,
         createdById: actor.id,
         passwordHash: password ? await bcrypt.hash(password, 10) : null,
         mustChangePassword: Boolean(password),
-        roles: { create: roleIds.map((roleId) => ({ roleId, assignedBy: actor.id })) },
+        roles: {
+          create: roleIds.map((roleId) => ({
+            orgId: actor.orgId,
+            roleId,
+            assignedBy: actor.id,
+          })),
+        },
       },
     });
 
@@ -132,7 +198,7 @@ export async function createUser(
       after: { ...created, roleIds },
     });
 
-    revalidatePath(PATH);
+    revalidateUserViews();
     return {
       ok: true,
       message: parsed.data.isFieldUser
@@ -185,6 +251,13 @@ export async function updateUser(
       };
     }
 
+    const refusal = await ungrantableRoles(
+      actor,
+      roleIds,
+      before.roles.map((r) => r.roleId),
+    );
+    if (refusal) return refusal;
+
     const after = await prisma.user.update({
       where: { id },
       data: parsed.data,
@@ -195,12 +268,17 @@ export async function updateUser(
       JSON.stringify(beforeRoles) !== JSON.stringify([...roleIds].sort());
 
     if (rolesChanged) {
-      await prisma.$transaction([
-        prisma.userRole.deleteMany({ where: { userId: id } }),
-        prisma.userRole.createMany({
-          data: roleIds.map((roleId) => ({ userId: id, roleId, assignedBy: actor.id })),
-        }),
-      ]);
+      await tenantTransaction(async (tx) => {
+        await tx.userRole.deleteMany({ where: { userId: id } });
+        await tx.userRole.createMany({
+          data: roleIds.map((roleId) => ({
+            orgId: actor.orgId,
+            userId: id,
+            roleId,
+            assignedBy: actor.id,
+          })),
+        });
+      });
 
       // Role changes get their own audit row: a permission grant is a
       // different kind of event from a phone-number correction.
@@ -232,7 +310,7 @@ export async function updateUser(
       });
     }
 
-    revalidatePath(PATH);
+    revalidateUserViews();
     return { ok: true, message: `${after.name} updated.` };
   } catch (error) {
     return { error: describe(error) };
@@ -293,10 +371,112 @@ export async function resetPassword(
       after: { passwordChangedAt: new Date().toISOString() },
     });
 
-    revalidatePath(PATH);
+    revalidateUserViews();
     return {
       ok: true,
       message: `Password reset for ${target.name}. They must change it at next sign-in.`,
+    };
+  } catch (error) {
+    return { error: describe(error) };
+  }
+}
+
+/**
+ * ── "Delete" means deactivate plus soft delete. Never a row deletion. ────
+ *
+ * This is a settled product decision, written here because the obvious
+ * "simplification" — a real `prisma.user.delete()` — destroys evidence.
+ *
+ * A delivery boy's `User` row is pointed at by records that are proof, not
+ * convenience: `DeliveryRun.agentId`, `DeliveryAttempt.agentId`,
+ * `Pod.agentId`, `ScanRecord.userId`, `CodCollection.agentId`,
+ * `PickupAssignment.assignedToId`, and every `AuditLog` row the person
+ * ever caused. Those are read months later — in a consignee dispute, in a
+ * COD shortfall investigation, in a proof of delivery that has to stand up
+ * outside this company. Remove the row and a six-month-old delivery can no
+ * longer say who carried the goods.
+ *
+ * The foreign keys would not even let it happen quietly: the delete either
+ * fails on every person who has ever worked a day, or cascades and takes
+ * the delivery history with it. Neither is a behaviour anyone asked for.
+ *
+ * So removal is `status = INACTIVE` plus `deletedAt`. The person leaves
+ * every picker, every roster and every assignment screen; the history
+ * keeps their name. `reactivateUser` is the other half — seasonal staff
+ * come back, and re-creating them would fork one person into two.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+export async function deactivateUser(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    const actor = await authorize("user.manage");
+
+    const id = String(formData.get("id") ?? "");
+    if (!id) return { error: "Nothing selected." };
+
+    // The refusal rules and the writes both live in the service; this stays
+    // a permission gate and a form parse.
+    const result = await deactivateFieldUser(id, actor);
+    if (!result.ok) return { error: result.error };
+
+    await recordAudit({
+      user: actor,
+      action: "STATUS_CHANGE",
+      entity: "User",
+      entityId: id,
+      entityRef: result.name,
+      reason: "Deactivated by administrator",
+      before: { status: "ACTIVE", deletedAt: null },
+      after: { status: "INACTIVE", deletedAt: new Date().toISOString() },
+    });
+
+    revalidateUserViews();
+    return {
+      ok: true,
+      message: `${result.name} deactivated. Their next request is refused — they are already signed out.`,
+    };
+  } catch (error) {
+    return { error: describe(error) };
+  }
+}
+
+/** Undoes the above. Seasonal staff come back to the same record. */
+export async function reactivateUser(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    const actor = await authorize("user.manage");
+
+    const id = String(formData.get("id") ?? "");
+    if (!id) return { error: "Nothing selected." };
+
+    // Bringing somebody back takes a seat, so it is a creation as far as
+    // the plan is concerned. Without this, a carrier sitting at their cap
+    // could stand one person down, hire a replacement, and then reactivate
+    // the first to end up one over.
+    await assertWithinLimit("users");
+
+    const result = await reactivateFieldUser(id, actor);
+    if (!result.ok) return { error: result.error };
+
+    await recordAudit({
+      user: actor,
+      action: "STATUS_CHANGE",
+      entity: "User",
+      entityId: id,
+      entityRef: result.name,
+      reason: "Reactivated by administrator",
+      before: { status: "INACTIVE" },
+      after: { status: "ACTIVE", deletedAt: null },
+    });
+
+    revalidateUserViews();
+    return {
+      ok: true,
+      message: `${result.name} is active again and can sign in.`,
     };
   } catch (error) {
     return { error: describe(error) };

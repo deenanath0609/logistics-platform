@@ -135,6 +135,12 @@ export const PERMISSIONS: PermissionDef[] = [
   p("finance", "expense", "record", "Record a trip expense"),
   p("finance", "expense", "approve", "Approve trip expenses", true),
   p("finance", "settlement", "read", "View driver and vendor settlements"),
+  // Preparing a payout and authorising it are two jobs, and the whole point
+  // of the preparer-is-not-approver rule is that they land on two people.
+  // This used to be gated on `expense.record`, which DRIVER holds so a
+  // driver can log fuel — which meant a driver could draft their own payout
+  // at a figure they typed in.
+  p("finance", "settlement", "prepare", "Draft a settlement for approval", true),
   p("finance", "settlement", "approve", "Approve a settlement for payout", true),
 
   // ── Reporting ─────────────────────────────────────────────
@@ -293,7 +299,7 @@ export const SYSTEM_ROLES: RoleDef[] = [
       "vendor.read", "vendor.update",
       "trip.read", "tracking.read", "tracking.replay",
       "exception.read", "exception.assign", "exception.resolve",
-      "expense.record",
+      "expense.record", "settlement.prepare",
       "master.read", "branch.read",
       "report.operations",
     ],
@@ -336,7 +342,7 @@ export const SYSTEM_ROLES: RoleDef[] = [
       "invoice.create", "invoice.approve", "invoice.cancel",
       "payment.record",
       "customer.manage_credit",
-      "expense.approve", "settlement.approve",
+      "expense.approve", "settlement.prepare", "settlement.approve",
       "cod.reconcile",
       "report.financial", "report.export",
     ],

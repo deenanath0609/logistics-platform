@@ -125,7 +125,7 @@ vi.mock("@/lib/prisma", () => {
       ],
     },
     fuelSurchargeRule: { findMany: async () => [] },
-    pincode: { findUnique: async () => ({ isOda: false, zones: [] }) },
+    pincode: { findFirst: async () => ({ isOda: false, zones: [] }) },
 
     rateCard: {
       findMany: async () => [
@@ -166,13 +166,23 @@ vi.mock("@/lib/prisma", () => {
         },
       ],
     },
-
-    $transaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> =>
-      callback(client),
   };
 
-  return { prisma: client };
+  return {
+    prisma: client,
+    // The real one resolves the tenant and sets it on the session before
+    // running the callback; here the callback is all there is to run.
+    tenantTransaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> =>
+      callback(client),
+  };
 });
+
+// `storeFreightCalculation` stamps the row's `orgId` from the ambient
+// tenant. Mocked rather than established with `runWithTenant` so this stays
+// a unit test: the real module reaches the database to resolve a host.
+vi.mock("@/lib/tenant", () => ({
+  requireTenantOrgId: async () => "org-1",
+}));
 
 const { rerateShipment, reweighTolerancePercent, DEFAULT_REWEIGH_TOLERANCE_PERCENT } =
   await import("./rerate");

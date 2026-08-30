@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type Db } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
@@ -32,7 +32,7 @@ const TOLERANCE_KEY = "billing.reweighTolerancePercent";
 /** The org's tolerance, or the default when nothing is configured. */
 export async function reweighTolerancePercent(
   orgId: string,
-  client: Pick<typeof prisma, "systemConfig"> = prisma,
+  client: Pick<Db, "systemConfig"> = prisma,
 ): Promise<Decimal> {
   const row = await client.systemConfig.findFirst({
     where: { orgId, key: TOLERANCE_KEY },
@@ -136,10 +136,10 @@ export async function rerateShipment(
 
   const stage: FreightStage = input.stage ?? "INVOICE";
 
-  const calculationId = await prisma.$transaction(async (tx) => {
+  const calculationId = await tenantTransaction(async (tx) => {
     const id = await storeFreightCalculation(
       { shipmentId: shipment.id, result, stage, userId: actor.id },
-      tx as unknown as Pick<typeof prisma, "freightCalculation">,
+      tx,
     );
 
     if (input.applyToShipment !== false) {
@@ -167,6 +167,7 @@ export async function rerateShipment(
           data: result.lines
             .filter((line) => !line.chargeTypeId.startsWith("synthetic:"))
             .map((line, index) => ({
+              orgId: shipment.orgId,
               shipmentId: shipment.id,
               chargeTypeId: line.chargeTypeId,
               basis: line.basis as Prisma.ShipmentChargeCreateManyInput["basis"],

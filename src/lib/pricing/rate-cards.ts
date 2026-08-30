@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type Db } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma/client";
 import type { RateBasis, ChargeBasis, ShipmentMode } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
@@ -28,7 +28,7 @@ const FROZEN =
 /** Throws nothing; returns the guard message when the version is frozen. */
 export async function assertDraft(
   versionId: string,
-  client: Pick<typeof prisma, "rateCardVersion"> = prisma,
+  client: Pick<Db, "rateCardVersion"> = prisma,
 ): Promise<string | null> {
   const version = await client.rateCardVersion.findUnique({
     where: { id: versionId },
@@ -60,7 +60,7 @@ export async function createRateCard(
   }
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const card = await tx.rateCard.create({
         data: {
           orgId: actor.orgId,
@@ -79,6 +79,7 @@ export async function createRateCard(
       // step nobody ever remembers.
       const version = await tx.rateCardVersion.create({
         data: {
+          orgId: actor.orgId,
           rateCardId: card.id,
           version: 1,
           effectiveFrom: input.effectiveFrom,
@@ -193,9 +194,10 @@ export async function createVersion(
   const copyFrom = input.copyFromVersionId ?? card.versions[0]?.id ?? null;
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       const version = await tx.rateCardVersion.create({
         data: {
+          orgId: actor.orgId,
           rateCardId: card.id,
           version: nextVersionNumber,
           effectiveFrom: input.effectiveFrom,
@@ -218,6 +220,7 @@ export async function createVersion(
           if (source.slabs.length > 0) {
             await tx.rateSlab.createMany({
               data: source.slabs.map((slab) => ({
+                orgId: actor.orgId,
                 versionId: version.id,
                 serviceTypeId: slab.serviceTypeId,
                 mode: slab.mode,
@@ -242,6 +245,7 @@ export async function createVersion(
           if (source.rules.length > 0) {
             await tx.chargeRule.createMany({
               data: source.rules.map((rule) => ({
+                orgId: actor.orgId,
                 versionId: version.id,
                 chargeTypeId: rule.chargeTypeId,
                 basis: rule.basis,
@@ -483,7 +487,13 @@ export async function saveSlab(
           data,
           select: { id: true },
         })
-      : await prisma.rateSlab.create({ data, select: { id: true } });
+      : await prisma.rateSlab.create({
+          // Added only on the create branch: `data` is shared with the
+          // update above, and an update has no business restating the
+          // tenant key of a row that already carries it.
+          data: { ...data, orgId: actor.orgId },
+          select: { id: true },
+        });
 
     await recordAudit({
       user: actor,
@@ -574,7 +584,10 @@ export async function saveChargeRule(
           data,
           select: { id: true },
         })
-      : await prisma.chargeRule.create({ data, select: { id: true } });
+      : await prisma.chargeRule.create({
+          data: { ...data, orgId: actor.orgId },
+          select: { id: true },
+        });
 
     await recordAudit({
       user: actor,

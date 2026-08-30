@@ -3,6 +3,7 @@ import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
 import { verifyOtp } from "@/lib/auth/otp";
 import { authenticateCustomer } from "@/lib/auth/customer-credentials";
 
@@ -31,13 +32,22 @@ type LoginOutcome =
   | "INACTIVE"
   | "OTP_FAILED";
 
+/**
+ * Every attempt is recorded against the tenant that owns the host it was
+ * made on — including the ones whose identifier matches no user at all.
+ * There is no actor to take the tenant from: that is the whole point of a
+ * failed login, and the host is the only thing an unauthenticated attempt
+ * carries. A failed login for an unknown mobile therefore still lands in
+ * the right tenant's activity report instead of nowhere, and those are
+ * exactly the rows an operations team wants to see.
+ */
 async function recordAttempt(
   identifier: string,
   outcome: LoginOutcome,
   userId?: string,
 ) {
   await prisma.loginActivity.create({
-    data: { identifier, outcome, userId },
+    data: { orgId: await requireTenantOrgId(), identifier, outcome, userId },
   });
 }
 
@@ -55,7 +65,15 @@ async function authenticate(
   }) => Promise<boolean>,
   failureOutcome: LoginOutcome,
 ) {
-  const user = await prisma.user.findUnique({
+  // `findFirst`, not `findUnique`: a mobile is unique within a tenant now
+  // rather than across the product, so there is no single-field unique left
+  // to look up by. The extension supplies the `orgId` of the host this
+  // request arrived on, and that is what makes sign-in host-scoped — a user
+  // of another tenant presenting entirely correct credentials here matches
+  // no row and is refused with the same answer as a wrong password. Passing
+  // an orgId by hand, or widening this with runCrossTenant(), would let
+  // anyone sign in on anyone's subdomain.
+  const user = await prisma.user.findFirst({
     where: { mobile },
     select: {
       id: true,
@@ -89,6 +107,10 @@ async function authenticate(
 
   if (!valid) {
     const failed = user.failedLoginCount + 1;
+    // The counter and the lockout live on the tenant's own user row, so the
+    // same person holding a login at two carriers is locked out of one and
+    // still gets in at the other. That is the intended reading: a lockout
+    // protects an account, and those are two accounts.
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -150,6 +172,18 @@ export const authConfig: NextAuthConfig = {
       // Auth.js debug output is extremely noisy; opt in deliberately.
     },
   },
+  /*
+    All three flows below are scoped to the tenant that owns the host the
+    sign-in request arrived on. Nothing here says so, and nothing here needs
+    to: `authorize` runs inside a route handler, so the tenant extension
+    resolves the host and filters every lookup underneath.
+
+    The consequence is the decision. Signing in on the wrong subdomain fails
+    as "no such account" rather than "wrong tenant", because an account on
+    the other side of the boundary must be indistinguishable from one that
+    does not exist — otherwise the login form answers "does this person work
+    for that carrier?" for anyone who asks.
+  */
   providers: [
     Credentials({
       id: "password",

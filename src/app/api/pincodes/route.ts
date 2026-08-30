@@ -33,7 +33,11 @@ export async function GET(request: Request) {
       return NextResponse.json({ status: "INCOMPLETE" });
     }
 
-    const pincode = await prisma.pincode.findUnique({
+    // A PIN is unique per tenant, not globally — geography is per-tenant
+    // master data (ADR 001 §4), so two carriers each hold their own 110001
+    // with their own serviceability. `findFirst` plus the tenant filter picks
+    // the caller's.
+    const pincode = await prisma.pincode.findFirst({
       where: { code },
       select: {
         code: true,

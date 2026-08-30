@@ -25,7 +25,7 @@ export async function prepareSettlementAction(
   formData: FormData,
 ): Promise<FinanceActionState> {
   try {
-    const actor = await authorize("expense.record");
+    const actor = await authorize("settlement.prepare");
     const tripId = String(formData.get("tripId") ?? "");
     if (!tripId) return { error: "Pick a trip." };
 
@@ -37,6 +37,10 @@ export async function prepareSettlementAction(
         tripId,
         deductions: Number.isFinite(deductions) ? deductions : 0,
         deductionNote: (formData.get("deductionNote") as string) ?? null,
+        // Still passed, and no longer trusted over the trip: the service
+        // uses it only where the trip carries no `freightPayable` of its
+        // own, and records in the audit row that it was typed. It used to
+        // win outright, on any trip, for anyone holding `settlement.prepare`.
         tripEarning: formData.get("tripEarning")
           ? Number(formData.get("tripEarning"))
           : undefined,

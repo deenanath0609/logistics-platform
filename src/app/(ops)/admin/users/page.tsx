@@ -7,6 +7,7 @@ import { branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState, Pagination } from "@/components/data/data-shell";
 import { SearchInput } from "@/components/data/search-input";
+import { PlanUsagePanel } from "@/components/plan/plan-usage";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -103,6 +104,13 @@ export default async function UsersPage({
           </div>
         }
       />
+
+      {/*
+        Only for someone who can actually act on it. A branch-scoped
+        supervisor reading the roster of their two branches has no use for
+        a company-wide plan figure and no way to change it.
+      */}
+      {writable && <PlanUsagePanel />}
 
       <TableFrame>
         {rows.length === 0 ? (

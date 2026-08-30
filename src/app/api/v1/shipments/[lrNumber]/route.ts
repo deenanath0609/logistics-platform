@@ -14,9 +14,14 @@ const lrSchema = z.string().trim().min(4).max(40).regex(/^[A-Za-z0-9/-]+$/);
 /**
  * GET /api/v1/shipments/:lrNumber — status for the partner who booked it.
  *
- * A key tied to a customer sees only that customer's consignments, and an
- * LR belonging to somebody else answers 404 rather than 403: telling a
- * caller that a number exists but is not theirs is itself a disclosure.
+ * Two kinds of key reach this endpoint and they see different things. A key
+ * issued against a customer is that customer's integration and sees only
+ * consignments they sent. A key issued without one belongs to the carrier's
+ * own systems — their ERP or middleware — and sees the whole organisation.
+ * Neither sees past the organisation that issued the key.
+ *
+ * An LR outside that scope answers 404 rather than 403: telling a caller
+ * that a number exists but is not theirs is itself a disclosure.
  */
 export async function GET(
   request: Request,
@@ -32,11 +37,21 @@ export async function GET(
       });
     }
 
+    // An unattached key is deliberately organisation-wide, so the `orgId`
+    // filter is the only thing bounding it and is written out rather than
+    // left to the tenant extension: this is the one branch where losing
+    // tenant context would otherwise mean no ownership filter at all. An
+    // LR number is unique per carrier, never globally.
+    const owner = api.key.customerId
+      ? { consignorId: api.key.customerId }
+      : {};
+
     const shipment = await prisma.shipment.findFirst({
       where: {
+        orgId: api.key.orgId,
         lrNumber: parsed.data,
         deletedAt: null,
-        ...(api.key.customerId ? { consignorId: api.key.customerId } : {}),
+        ...owner,
       },
       select: {
         ...PUBLIC_SHIPMENT_SELECT,

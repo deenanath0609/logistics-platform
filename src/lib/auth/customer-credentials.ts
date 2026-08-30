@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
 import { customerSubject } from "@/lib/auth/subject";
 
 /**
@@ -27,6 +28,8 @@ type PortalOutcome = "SUCCESS" | "BAD_CREDENTIALS" | "LOCKED" | "INACTIVE";
 async function recordPortalAttempt(email: string, outcome: PortalOutcome) {
   await prisma.loginActivity.create({
     data: {
+      // Pre-authentication, so the host is the only tenant signal there is.
+      orgId: await requireTenantOrgId(),
       identifier: `${PORTAL_IDENTIFIER_PREFIX}${email}`,
       outcome,
       // Never set: this column points at staff, and a customer is not one.
@@ -55,7 +58,13 @@ export async function authenticateCustomer(
 ): Promise<CustomerCredentialResult | null> {
   const normalised = email.trim().toLowerCase();
 
-  const user = await prisma.customerUser.findUnique({
+  // `findFirst`, not `findUnique`: a portal email is unique within a tenant
+  // now, so a consignee who ships with two carriers on the platform holds an
+  // account at each and the address alone no longer identifies one. The
+  // extension picks the tenant from the host, which is exactly right here —
+  // the customer resolves to the carrier whose portal they are looking at,
+  // and their account at the other carrier is invisible from this form.
+  const user = await prisma.customerUser.findFirst({
     where: { email: normalised },
     select: {
       id: true,

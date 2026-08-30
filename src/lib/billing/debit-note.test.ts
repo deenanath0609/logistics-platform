@@ -75,11 +75,15 @@ vi.mock("@/lib/prisma", () => {
         return { id: `dn-${store.created.length}`, number: args.data.number };
       },
     },
-    $transaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> =>
-      callback(client),
   };
 
-  return { prisma: client };
+  return {
+    prisma: client,
+    // The real one resolves the tenant and sets it on the session before
+    // running the callback; here the callback is all there is to run.
+    tenantTransaction: async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> =>
+      callback(client),
+  };
 });
 
 const { createDebitNote, raiseReweighDebitNote, isDebitNoteNumber } =

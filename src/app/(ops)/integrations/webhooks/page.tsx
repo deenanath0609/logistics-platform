@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import { ChevronLeft } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
-import { startWebhookDispatch, PAUSE_AFTER_FAILURES } from "@/lib/webhooks/dispatch";
+import { PAUSE_AFTER_FAILURES } from "@/lib/webhooks/dispatch";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import {
@@ -40,10 +40,11 @@ const SUGGESTED_EVENTS = [
 export default async function WebhooksPage() {
   await requirePermission("apikey.manage");
 
-  // Arming the fan-out and the delivery timer here means an operator who
-  // opens this screen has a live dispatcher, without waiting for a request
-  // to /api/v1. Both calls are idempotent.
-  startWebhookDispatch();
+  // No dispatcher is started here any more. Arming one from a page render
+  // gave every web instance its own delivery timer the moment an operator
+  // opened this screen — a second dispatcher racing the worker for the same
+  // queued deliveries. The queue below is what the worker is working
+  // through; if it never moves, the worker is not running.
 
   const [subscriptions, customers, queued] = await Promise.all([
     prisma.webhookSubscription.findMany({

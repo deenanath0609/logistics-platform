@@ -16,6 +16,7 @@ import {
 } from "@/lib/pricing/rate-cards";
 import type { ChargeCondition } from "@/lib/pricing/engine";
 import type { FinanceActionState } from "../action-state";
+import type { ShipmentMode } from "@/generated/prisma/client";
 
 const PATH = "/finance/rate-cards";
 
@@ -233,7 +234,7 @@ export async function saveSlabAction(
     const result = await saveSlab(
       {
         ...parsed.data,
-        mode: (parsed.data.mode as "FTL" | "PTL" | "COURIER" | null) ?? null,
+        mode: (parsed.data.mode as ShipmentMode | null) ?? null,
         transitHours: parsed.data.transitHours ?? null,
       },
       actor,
