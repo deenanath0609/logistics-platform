@@ -1,7 +1,6 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@/generated/prisma/client";
+import { prisma, tenantTransaction, type DbOrTx } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch, assignmentScope, branchScope } from "@/server/repositories/scope";
@@ -91,10 +90,10 @@ export async function createDeliveryRun(
   }
 
   try {
-    const run = await prisma.$transaction(async (tx) => {
+    const run = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "DELIVERY_RUN", branchId: input.branchId, branchCode: branch.code },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.deliveryRun.create({
@@ -224,7 +223,7 @@ export async function addShipmentsToRun(
     const stopNumber = sequence;
 
     try {
-      await prisma.$transaction(async (tx) => {
+      await tenantTransaction(async (tx) => {
         // A reattempt task raised by a previous failure is reused rather
         // than duplicated, so the attempt history stays one row per visit.
         const pending = await tx.deliveryTask.findFirst({
@@ -248,6 +247,9 @@ export async function addShipmentsToRun(
         } else {
           await tx.deliveryTask.create({
             data: {
+              // The dispatcher building the run; the run and the shipment
+              // were already read under the same tenant.
+              orgId: actor.orgId,
               runId,
               shipmentId: shipment.id,
               branchId: run.branchId,
@@ -364,14 +366,17 @@ export async function resequenceRun(
   const known = new Set(run.tasks.map((task) => task.id));
   const ordered = orderedTaskIds.filter((id) => known.has(id));
 
-  await prisma.$transaction(
-    ordered.map((id, index) =>
-      prisma.deliveryTask.update({
+  // Sequenced one at a time in the given order. The array form could not
+  // carry the tenant into the session, and every update is independent —
+  // the ordering here is the caller's, not a dependency between statements.
+  await tenantTransaction(async (tx) => {
+    for (const [index, id] of ordered.entries()) {
+      await tx.deliveryTask.update({
         where: { id },
         data: { sequence: index + 1 },
-      }),
-    ),
-  );
+      });
+    }
+  });
 
   return { ok: true };
 }
@@ -419,7 +424,7 @@ export async function startRun(
   let started = 0;
 
   for (const task of run.tasks) {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await tenantTransaction(async (tx) => {
       const event = await appendShipmentEvent(
         {
           shipmentId: task.shipmentId,
@@ -463,7 +468,7 @@ export async function startRun(
  */
 export async function recalculateRunTotals(
   runId: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<void> {
   const tasks = await client.deliveryTask.findMany({
     where: { runId },

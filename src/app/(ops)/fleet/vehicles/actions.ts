@@ -375,7 +375,7 @@ export async function saveVehicleDocument(
     }
 
     const created = await prisma.vehicleDocument.create({
-      data: { ...data, vehicleId },
+      data: { ...data, orgId: actor.orgId, vehicleId },
     });
 
     await recordAudit({

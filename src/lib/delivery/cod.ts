@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { CodMode } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
@@ -220,9 +220,12 @@ export async function createCodDeposit(
   // Declared minus collected: negative means the agent is holding cash back.
   const shortfall = collected.minus(declared);
 
-  const deposit = await prisma.$transaction(async (tx) => {
+  const deposit = await tenantTransaction(async (tx) => {
     const created = await tx.codDeposit.create({
       data: {
+        // The clerk taking the handover. The collections being covered were
+        // read under the same tenant a moment ago.
+        orgId: actor.orgId,
         branchId: input.branchId,
         agentId: input.agentId,
         depositDate,
@@ -300,7 +303,7 @@ export async function verifyCodDeposit(
   const shortfall = new Decimal(deposit.amountDeclared.toString()).minus(verified);
   const disputed = !shortfall.isZero();
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     await tx.codDeposit.update({
       where: { id: depositId },
       data: {

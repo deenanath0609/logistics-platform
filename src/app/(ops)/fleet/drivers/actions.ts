@@ -346,7 +346,7 @@ export async function saveDriverDocument(
     }
 
     const created = await prisma.driverDocument.create({
-      data: { ...data, driverId },
+      data: { ...data, orgId: actor.orgId, driverId },
     });
 
     await recordAudit({

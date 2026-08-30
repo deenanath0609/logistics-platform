@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type Tx } from "@/lib/prisma";
 import type { CodMode, Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
@@ -309,7 +309,7 @@ export async function recordDelivery(
   }
 
   try {
-    const podId = await prisma.$transaction(async (tx) => {
+    const podId = await tenantTransaction(async (tx) => {
       await ensureOutForDelivery(task, actor, input, tx);
 
       const delivered = await appendShipmentEvent(
@@ -342,6 +342,10 @@ export async function recordDelivery(
       // first-attempt success rate has a numerator and no denominator.
       await tx.deliveryAttempt.create({
         data: {
+          // The agent standing at the door. Every row this transaction
+          // writes belongs to their tenant, and the task they are working
+          // was already read under it.
+          orgId: actor.orgId,
           taskId: task.id,
           shipmentId: shipment.id,
           attemptNumber: task.attemptNumber,
@@ -362,6 +366,7 @@ export async function recordDelivery(
 
       const pod = await tx.pod.create({
         data: {
+          orgId: actor.orgId,
           taskId: task.id,
           shipmentId: shipment.id,
           receiverName: input.receiverName.trim(),
@@ -386,6 +391,7 @@ export async function recordDelivery(
       if (assets.length > 0) {
         await tx.podAsset.createMany({
           data: assets.map((asset) => ({
+            orgId: actor.orgId,
             podId: pod.id,
             kind: asset.kind,
             fileAssetId: asset.fileAssetId,
@@ -398,6 +404,7 @@ export async function recordDelivery(
       if (isCod && input.cod) {
         await tx.codCollection.create({
           data: {
+            orgId: actor.orgId,
             shipmentId: shipment.id,
             taskId: task.id,
             branchId: task.branchId,
@@ -535,7 +542,10 @@ export async function recordFailedAttempt(
   if (!loaded.ok) return loaded;
   const { task } = loaded;
 
-  const duplicate = await prisma.deliveryAttempt.findUnique({
+  // `findFirst`, not `findUnique`: the key is client-generated, so it is
+  // only unique within a tenant now and two carriers' offline queues may
+  // legitimately mint the same one. The extension supplies the org.
+  const duplicate = await prisma.deliveryAttempt.findFirst({
     where: { idempotencyKey: input.idempotencyKey },
     select: { id: true, shipment: { select: { attemptCount: true } } },
   });
@@ -618,7 +628,7 @@ export async function recordFailedAttempt(
   });
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await tenantTransaction(async (tx) => {
       await ensureOutForDelivery(task, actor, input, tx);
 
       const event = await appendShipmentEvent(
@@ -649,6 +659,7 @@ export async function recordFailedAttempt(
 
       const attempt = await tx.deliveryAttempt.create({
         data: {
+          orgId: actor.orgId,
           taskId: task.id,
           shipmentId: shipment.id,
           attemptNumber: task.attemptNumber,
@@ -691,6 +702,9 @@ export async function recordFailedAttempt(
       if (decision.action === "REATTEMPT") {
         await tx.deliveryTask.create({
           data: {
+            // The agent recording the failure — the reattempt belongs to the
+            // same tenant as the task they were working.
+            orgId: actor.orgId,
             shipmentId: shipment.id,
             branchId: task.branchId,
             status: "PENDING",
@@ -789,7 +803,7 @@ async function ensureOutForDelivery(
   task: TaskForExecution,
   actor: SessionUser,
   input: FieldContext,
-  tx: Prisma.TransactionClient,
+  tx: Tx,
 ): Promise<void> {
   if (task.shipment.currentStatus !== "ASSIGNED_FOR_DELIVERY") return;
 

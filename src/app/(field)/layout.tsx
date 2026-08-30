@@ -1,8 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { Truck } from "lucide-react";
 import { requireUser } from "@/lib/auth/session";
+import { requireModuleForPath } from "@/lib/modules/guard";
 import { Toaster } from "@/components/ui/sonner";
+import { TenantMark } from "@/components/brand/tenant-mark";
+import { requireTenantPage } from "@/lib/tenant/page";
 import { OfflineProvider } from "@/components/delivery/offline-provider";
+import { ImpersonationNotice } from "@/components/platform/impersonation-notice";
+import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Field" };
 
@@ -32,15 +36,50 @@ export default async function FieldLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const { branding, tenant } = await requireTenantPage();
   const user = await requireUser();
 
+  // The rider's screens live at `/delivery`, which the last mile owns, so
+  // the same URL refusal the ops shell applies has to apply here — this
+  // layout is a second front door onto a gated module, not a mobile skin
+  // over the first one.
+  await requireModuleForPath();
+
+  const impersonating = tenant.source === "impersonation";
+
   return (
-    <div className="flex min-h-dvh flex-col bg-background">
-      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
+    <div
+      className={cn(
+        "flex flex-col bg-background",
+        impersonating ? "min-h-[calc(100dvh-2.75rem)]" : "min-h-dvh",
+      )}
+    >
+      {/*
+        The field app is the surface an operator is most likely to enter and
+        least likely to be recognised on — one thumb, one screen, no chrome.
+        The bar has to be here too, or an impersonated session looks exactly
+        like an agent's own.
+      */}
+      <ImpersonationNotice />
+
+      <header
+        className={cn(
+          "sticky z-30 border-b bg-background/95 backdrop-blur",
+          impersonating ? "top-11" : "top-0",
+        )}
+      >
         <div className="flex h-14 items-center gap-2.5 px-4">
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Truck className="size-4" />
-          </span>
+          {/*
+            Mark only, no carrier name: the two lines beside it tell the agent
+            which run they are on, which is what they open this for. The
+            hostname and the tab title already say whose app this is.
+          */}
+          <TenantMark
+            name={branding.name}
+            logoUrl={branding.logoUrl}
+            showName={false}
+            className="flex shrink-0 items-center"
+          />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold leading-tight">
               {user.name}

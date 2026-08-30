@@ -12,8 +12,10 @@
  *
  *  - **A client-generated UUID as `idempotencyKey`.** The same action may
  *    reach the server several times. `appendShipmentEvent` and the unique
- *    index on `DeliveryAttempt.idempotencyKey` make the second arrival a
- *    no-op rather than a second delivery.
+ *    index on `DeliveryAttempt(orgId, idempotencyKey)` make the second
+ *    arrival a no-op rather than a second delivery. The key is unique per
+ *    tenant rather than globally, because two carriers' queues generating
+ *    the same key is a collision, not a duplicate.
  *  - **`occurredAt` from the device clock.** The timeline sorts on when the
  *    act happened, not when the server heard about it. The server records
  *    the drift between the two and flags anything implausible.
