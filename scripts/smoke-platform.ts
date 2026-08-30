@@ -58,7 +58,9 @@ const PAGES: Array<[path: string, expect: string]> = [
   ["/platform/tenants/new", "New tenant"],
   ["/platform/plans", "Plans"],
   ["/platform/audit", "Audit"],
-  ["/platform/impersonation", "Impersonation"],
+  // The route is still `/impersonation`; the screen calls itself "Support
+  // sessions", which is what an operator opening one is actually doing.
+  ["/platform/impersonation", "Support sessions"],
 ];
 
 async function main() {

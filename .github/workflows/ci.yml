@@ -136,6 +136,16 @@ jobs:
 
       # Each of these exits non-zero on its own failures and prints PASS/FAIL
       # per check, so the step that fails names the probe that failed.
+
+      # First, because it books a consignment and leaves it behind. A freshly
+      # seeded carrier has none, and a database with no consignments cannot
+      # demonstrate that row-level security lets a tenant read its own rows —
+      # "the policy admits nobody" and "the table is empty" both count zero.
+      # The isolation suite says so rather than failing, but a skip is a hole
+      # in the evidence, and this step is what fills it.
+      - name: A consignment from booking to close
+        run: npm run verify:spine
+
       - name: Tenant isolation
         run: npm run tenant:verify
 
@@ -156,9 +166,6 @@ jobs:
 
       - name: The delivery cycle, as a field agent
         run: npm run verify:field
-
-      - name: A consignment from booking to close
-        run: npm run verify:spine
 
       - name: The outbox drains outside the web server
         run: npm run verify:worker

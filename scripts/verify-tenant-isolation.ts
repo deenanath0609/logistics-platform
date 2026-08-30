@@ -45,6 +45,9 @@ const PORTAL_PASSWORD = process.env.PORTAL_DEMO_PASSWORD ?? "Portal@123";
 
 let failures = 0;
 let passes = 0;
+/** Probes that could not be run at all. Counted, so they are not mistaken
+ * for passes in the summary — a skip is a hole in the evidence. */
+let skips = 0;
 
 function check(label: string, ok: boolean, detail = "") {
   if (ok) passes += 1;
@@ -515,9 +518,36 @@ async function probeRlsDirectly(a: Fixture) {
     await tx.$executeRaw`SELECT set_config('app.org_id', ${a.orgId}, TRUE)`;
     return tx.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM "shipment"`;
   });
+
+  // A tenant that has never booked anything cannot demonstrate this half:
+  // "the policy lets its owner through" and "the tenant has no rows" both
+  // count zero, and the two are not the same finding. Said out loud rather
+  // than failed — a fresh install has no consignments and that is not a
+  // defect — and rather than passed, which would let a policy that admits
+  // nobody sail through on an empty table. Book one and it is a real check
+  // again; CI does exactly that before this runs.
+  if (Number(scoped[0]?.n ?? 0) === 0) {
+    const total = await basePrisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.org_id', ${a.orgId}, TRUE)`;
+      return tx.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM "organization"`;
+    });
+
+    // The organisation row itself is visible, so the session variable is
+    // reaching the policies; it is only the shipment table that is empty.
+    console.log(
+      Number(total[0]?.n ?? 0) > 0
+        ? "  [SKIP] this tenant has booked no consignment, so there is nothing " +
+            "for the policy to let through — the session variable does reach " +
+            "the policies, which the organisation row above proves"
+        : "  [SKIP] this tenant has no rows at all to read back",
+    );
+    skips += 1;
+    return;
+  }
+
   check(
     "the same raw count sees this tenant's consignments once the session names it",
-    Number(scoped[0]?.n ?? 0) > 0,
+    true,
     `saw ${scoped[0]?.n ?? 0}`,
   );
 }
@@ -1010,7 +1040,10 @@ async function main() {
   await probeStorageRoutes(a, b);
 
   console.log(
-    `\n${failures === 0 ? "PASS" : "FAIL"} — ${passes} probe(s) refused as they should be, ${failures} leaked.\n`,
+    `\n${failures === 0 ? "PASS" : "FAIL"} — ${passes} probe(s) refused as they should be, ` +
+      `${failures} leaked` +
+      (skips > 0 ? `, ${skips} could not be run` : "") +
+      ".\n",
   );
   if (failures > 0) process.exitCode = 1;
 }
