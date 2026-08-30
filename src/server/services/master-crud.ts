@@ -1,7 +1,12 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { authorize, PermissionError } from "@/lib/auth/session";
+import { authorize, PermissionError, type SessionUser } from "@/lib/auth/session";
+import {
+  assertWithinLimit,
+  isPlanLimitError,
+  type LimitKey,
+} from "@/lib/plan-limits";
 import { recordAudit, changedFields } from "./audit";
 
 export type ActionState = {
@@ -106,9 +111,38 @@ export type MasterCrudOptions<S extends z.ZodObject<z.ZodRawShape>> = {
   schema: S;
   /** Path to revalidate after a successful write. */
   path: string;
-  /** Extra data merged into every create, e.g. { orgId }. */
-  createDefaults?: () => Promise<Record<string, unknown>>;
+  /**
+   * Extra data merged into every create. Receives the authorised actor so a
+   * default can be derived from who is writing rather than looked up — see
+   * `orgDefaults`.
+   */
+  createDefaults?: (user: SessionUser) => Promise<Record<string, unknown>>;
+  /**
+   * The plan cap this master counts against, for the few that are priced.
+   *
+   * Branches are the only one today. Most masters — charge heads, reason
+   * codes, package types — are configuration rather than something sold by
+   * the unit, so the option is absent and no plan is consulted at all.
+   */
+  planLimit?: LimitKey;
 };
+
+/**
+ * The organisation a master row belongs to.
+ *
+ * `Organization` is one of the two globally-visible tables (ADR 001 §4), so
+ * the tenant extension does not filter it and a `where`-less read of it
+ * returns whichever tenant the planner reached first. The actor's own id is
+ * the only defensible answer, and stating it explicitly rather than letting
+ * the extension stamp it silently makes the extension's foreign-org check
+ * assert that the signed-in user and the host's tenant are the same
+ * organisation.
+ */
+export async function orgDefaults(
+  user: SessionUser,
+): Promise<Record<string, unknown>> {
+  return { orgId: user.orgId };
+}
 
 /**
  * Builds the three server actions every master screen needs.
@@ -136,7 +170,11 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
         return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
       }
 
-      const defaults = (await options.createDefaults?.()) ?? {};
+      // After validation, so a carrier at their cap is not told about it
+      // while the form still has a blank required field to point at.
+      if (options.planLimit) await assertWithinLimit(options.planLimit);
+
+      const defaults = (await options.createDefaults?.(user)) ?? {};
       const created = await table().create({
         data: { ...defaults, ...parsed.data },
       });
@@ -217,6 +255,14 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
       const before = await table().findUnique({ where: { id } });
       if (!before) return { error: `That ${options.label.toLowerCase()} no longer exists.` };
 
+      // Reactivating puts the row back into the count, so it is a creation
+      // as far as a plan cap is concerned. Without this, a carrier at ten
+      // branches could deactivate one, create a new one, and reactivate the
+      // old one to sit at eleven.
+      if (options.planLimit && isActive && before.isActive !== true) {
+        await assertWithinLimit(options.planLimit);
+      }
+
       const after = await table().update({ where: { id }, data: { isActive } });
 
       await recordAudit({
@@ -246,6 +292,10 @@ function describe(error: unknown, label: string): string {
   if (error instanceof PermissionError) {
     return "You do not have permission to change this.";
   }
+
+  // Already a sentence written for a carrier, naming their plan and the
+  // number — passing it through is the whole point of the typed error.
+  if (isPlanLimitError(error)) return error.message;
 
   const message = error instanceof Error ? error.message : String(error);
 

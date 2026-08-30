@@ -16,7 +16,11 @@ import type { ParsedRow } from "./parse";
  * four times to find four mistakes.
  */
 
-export type ShipmentMode = "FTL" | "PTL" | "COURIER";
+// Re-exported from the generated enum so a new mode reaches the bulk
+// importer without anyone remembering to widen a second union.
+import type { ShipmentMode } from "@/generated/prisma/client";
+
+export type { ShipmentMode };
 export type PaymentType = "PAID" | "TO_PAY" | "TBB" | "COD";
 
 /** Field key → one short message, sized to fit in a grid cell. */

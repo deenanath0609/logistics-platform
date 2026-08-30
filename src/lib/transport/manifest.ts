@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@/generated/prisma/client";
+import { prisma, tenantTransaction, type DbOrTx } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
@@ -62,12 +61,12 @@ export async function createManifest(
   }
 
   try {
-    const manifest = await prisma.$transaction(async (tx) => {
+    const manifest = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction: an abandoned manifest must not
       // burn M000146 and leave a hole in the sequence.
       const number = await nextNumber(
         { document: "MANIFEST" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.manifest.create({
@@ -109,7 +108,7 @@ export async function createManifest(
 /** Re-sums the lines. Called after every add and remove. */
 export async function recomputeTotals(
   manifestId: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<{ totalShipments: number; totalPackages: number; totalWeight: string }> {
   const lines = await client.manifestLine.findMany({
     where: { manifestId },
@@ -200,7 +199,7 @@ export async function addShipmentsToManifest(
     if (!found.has(id)) rejected.push({ lrNumber: id, reason: "Not found" });
   }
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     for (const shipment of shipments) {
       if (shipment.mode === "FTL") {
         rejected.push({
@@ -256,6 +255,7 @@ export async function addShipmentsToManifest(
 
       await tx.manifestLine.create({
         data: {
+          orgId: actor.orgId,
           manifestId: manifest.id,
           shipmentId: shipment.id,
           packageCount: shipment.packageCount,
@@ -320,7 +320,7 @@ export async function removeShipmentFromManifest(
     return { ok: false, error: "That manifest belongs to another branch." };
   }
 
-  const event = await prisma.$transaction(async (tx) => {
+  const event = await tenantTransaction(async (tx) => {
     const result = await appendShipmentEvent(
       {
         shipmentId: line.shipment.id,

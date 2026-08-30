@@ -44,6 +44,7 @@ export function ManualEventDialog({
   trip,
   branches,
   hasDevice,
+  canRecordMovement,
 }: {
   vehicleId: string;
   registrationNumber: string;
@@ -55,9 +56,18 @@ export function ManualEventDialog({
   } | null;
   branches: BranchOption[];
   hasDevice: boolean;
+  /**
+   * Arrivals and departures move every consignment on the trip, so they
+   * need `trip.dispatch`. A position report only moves the map and needs
+   * the tracking read — which is why the two are separate props rather
+   * than one "may record by hand".
+   */
+  canRecordMovement: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<Mode>(trip ? "ARRIVAL" : "POSITION");
+  const [mode, setMode] = useState<Mode>(
+    trip && canRecordMovement ? "ARRIVAL" : "POSITION",
+  );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -86,7 +96,9 @@ export function ManualEventDialog({
               ["DEPARTURE", "Departed a branch", "What a geofence exit would have written"],
               ["POSITION", "Position report", "Driver rang in — updates the map only"],
             ] as Array<[Mode, string, string]>
-          ).map(([value, label, hint]) => (
+          )
+            .filter(([value]) => value === "POSITION" || canRecordMovement)
+            .map(([value, label, hint]) => (
             <button
               key={value}
               type="button"

@@ -40,6 +40,7 @@ import {
   AlertTriangle,
   Hash,
   Users,
+  UsersRound,
   ShieldCheck,
   ScrollText,
   Map,
@@ -181,6 +182,12 @@ export const NAV: NavGroup[] = [
         href: "/fleet/drivers",
         icon: IdCard,
         permission: "driver.read",
+      },
+      {
+        label: "Field staff",
+        href: "/fleet/field-staff",
+        icon: UsersRound,
+        permission: "user.read",
       },
       {
         label: "Vehicle types",

@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
@@ -83,12 +83,12 @@ export async function createPickupRequest(
       return { error: "That branch is outside your scope." };
     }
 
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction, so an abandoned request does not
       // consume a number.
       const number = await nextNumber(
         { document: "PICKUP" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.pickupRequest.create({
@@ -150,7 +150,25 @@ export async function assignPickup(
     const reassignable = canReassign(request.status);
     if (!reassignable.ok) return { error: reassignable.reason };
 
-    await prisma.$transaction(async (tx) => {
+    // The picker only offers active field users, but the picker is not the
+    // boundary: a form left open while somebody was deactivated would
+    // otherwise hand a live pickup to an account that can no longer sign
+    // in, and the request would sit at ASSIGNED with nobody coming.
+    // `createDeliveryRun` makes the same check for delivery agents.
+    const assignee = await prisma.user.findUnique({
+      where: { id: assignedToId },
+      select: { name: true, isFieldUser: true, status: true, deletedAt: true },
+    });
+    if (
+      !assignee ||
+      assignee.deletedAt ||
+      assignee.status !== "ACTIVE" ||
+      !assignee.isFieldUser
+    ) {
+      return { error: "That executive is no longer available." };
+    }
+
+    await tenantTransaction(async (tx) => {
       // Supersede rather than overwrite: who held this task and when has
       // to survive a reassignment.
       await tx.pickupAssignment.updateMany({
@@ -160,6 +178,7 @@ export async function assignPickup(
 
       await tx.pickupAssignment.create({
         data: {
+          orgId: actor.orgId,
           pickupRequestId,
           assignedToId,
           sequence,
@@ -191,11 +210,6 @@ export async function assignPickup(
       }
     }
 
-    const assignee = await prisma.user.findUnique({
-      where: { id: assignedToId },
-      select: { name: true },
-    });
-
     await recordAudit({
       user: actor,
       action: "UPDATE",
@@ -210,7 +224,7 @@ export async function assignPickup(
     revalidatePath(PATH);
     return {
       ok: true,
-      message: `${request.number} assigned to ${assignee?.name ?? "executive"}.`,
+      message: `${request.number} assigned to ${assignee.name}.`,
     };
   } catch (error) {
     return { error: describe(error) };

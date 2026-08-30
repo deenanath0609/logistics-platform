@@ -1,4 +1,5 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
+import { forEachTenant } from "@/lib/tenant/for-each-tenant";
 import { onOutbox, enqueueOutbox } from "@/server/services/outbox";
 import { raiseException } from "@/lib/exceptions/service";
 import { KIND_DEFS, LIVE_STATUSES } from "@/lib/exceptions/kinds";
@@ -258,10 +259,15 @@ const SELECT = {
 } as const;
 
 /**
- * One scanning pass.
+ * One scanning pass, over one tenant.
  *
  * Pages by primary key rather than by offset: the population shifts under
  * the scan as shipments settle, and an offset walk would skip rows.
+ *
+ * `maxShipments` is therefore a per-tenant ceiling. That is the point of
+ * it: a shared ceiling would let one carrier's fifty-thousand-consignment
+ * backlog use up the whole tick and leave every other carrier's breaches
+ * undetected, and nobody would see why.
  */
 export async function runSlaScan(options: ScanOptions = {}): Promise<ScanResult> {
   const startedAtMs = Date.now();
@@ -400,6 +406,7 @@ async function writeNotApplicable(
   await prisma.shipmentSla.upsert({
     where: { shipmentId: row.id },
     create: {
+      orgId: row.orgId,
       shipmentId: row.id,
       state: "NOT_APPLICABLE",
       startedAt: clockStart,
@@ -442,6 +449,7 @@ async function applyPlan(
   await prisma.shipmentSla.upsert({
     where: { shipmentId: row.id },
     create: {
+      orgId: row.orgId,
       shipmentId: row.id,
       policyId: plan.policyId,
       state,
@@ -760,7 +768,7 @@ export async function runEscalation(now: Date): Promise<number> {
 
     const following = ladder.find((r) => r.level === nextLevel + 1);
 
-    await prisma.$transaction(async (tx) => {
+    await tenantTransaction(async (tx) => {
       await tx.exception.update({
         where: { id: exception.id },
         data: {
@@ -775,6 +783,7 @@ export async function runEscalation(now: Date): Promise<number> {
 
       await tx.exceptionAction.create({
         data: {
+          orgId: exception.orgId,
           exceptionId: exception.id,
           action: "ESCALATED",
           note: `Escalated to level ${nextLevel}${rule.notifyRoleCode ? ` — ${rule.notifyRoleCode}` : ""}. Nobody had acted after ${formatDuration(rule.afterMinutes)}.`,
@@ -850,6 +859,9 @@ export function registerSlaScanner(): void {
   onOutbox("shipment.*", async (event) => {
     if (!RECOMPUTE_ON.has(event.eventType)) return;
 
+    // No tenant handling here on purpose: the drain establishes one before
+    // it dispatches, so this recompute is already confined to the
+    // organisation whose shipment raised the event.
     try {
       await runSlaScan({ shipmentId: event.aggregateId });
     } catch (error) {
@@ -863,27 +875,25 @@ export function registerSlaScanner(): void {
   });
 }
 
-const SCAN_INTERVAL_MS = 180_000;
+export const SCAN_INTERVAL_MS = 180_000;
 
 /**
- * Starts the in-process sweep. Safe to call repeatedly.
+ * One sweep across every tenant.
  *
- * Like the outbox drain this becomes a BullMQ job once Redis exists on
- * the server: same `runSlaScan`, different trigger.
+ * The unit of work the worker schedules, and the one a BullMQ job would
+ * invoke instead — `runSlaScan` underneath it does not change. Never throws.
  */
-export function startSlaScanner(): void {
-  registerSlaScanner();
-  if (globalForScanner.slaScannerTimer) return;
+export async function slaPass(): Promise<void> {
+  // A slow pass must not overlap the next one: two scans racing on the
+  // same shipment is safe, but it doubles the load exactly when the
+  // network is busiest, which is the worst possible moment for it.
+  if (globalForScanner.slaScanInFlight) return;
+  globalForScanner.slaScanInFlight = true;
 
-  const tick = async () => {
-    // A slow pass must not overlap the next one: two scans racing on the
-    // same shipment is safe, but it doubles the load exactly when the
-    // network is busiest, which is the worst possible moment for it.
-    if (globalForScanner.slaScanInFlight) return;
-    globalForScanner.slaScanInFlight = true;
+  try {
+    const pass = await forEachTenant({ job: "sla" }, () => runSlaScan());
 
-    try {
-      const result = await runSlaScan();
+    for (const { slug, value: result } of pass.results) {
       const detected =
         result.detectors.hubDwell +
         result.detectors.pendingPod +
@@ -891,18 +901,32 @@ export function startSlaScanner(): void {
 
       if (result.exceptionsOpened > 0 || result.escalated > 0 || detected > 0) {
         console.info(
-          `[sla] ${result.scanned} scanned · ${result.exceptionsOpened} SLA exception(s) · ` +
+          `[sla] ${slug}: ${result.scanned} scanned · ${result.exceptionsOpened} SLA exception(s) · ` +
             `${detected} detector exception(s) · ${result.escalated} escalated`,
         );
       }
-    } catch (error) {
-      console.error("[sla] scan failed", error);
-    } finally {
-      globalForScanner.slaScanInFlight = false;
     }
-  };
+  } catch (error) {
+    // Per-tenant failures are caught and logged inside the pass; this is
+    // the sweep itself being unable to start.
+    console.error("[sla] scan failed", error);
+  } finally {
+    globalForScanner.slaScanInFlight = false;
+  }
+}
 
-  globalForScanner.slaScannerTimer = setInterval(tick, SCAN_INTERVAL_MS);
+/**
+ * Starts the sweep inside whatever process calls it. Safe to call repeatedly.
+ *
+ * Only reached when `RUN_JOBS_IN_WEB=true`; the worker schedules `slaPass`
+ * itself so a shutdown can wait for the escalation ladder to finish the
+ * exception it is halfway through.
+ */
+export function startSlaScanner(): void {
+  registerSlaScanner();
+  if (globalForScanner.slaScannerTimer) return;
+
+  globalForScanner.slaScannerTimer = setInterval(() => void slaPass(), SCAN_INTERVAL_MS);
   globalForScanner.slaScannerTimer.unref?.();
 }
 

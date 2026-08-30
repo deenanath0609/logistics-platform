@@ -87,6 +87,7 @@ export default async function TrackingPage() {
           fleet={fleet}
           canReplay={can(user, "tracking.replay")}
           canRecordManual={can(user, "tracking.read")}
+          canRecordMovement={can(user, "trip.dispatch")}
         />
       )}
 

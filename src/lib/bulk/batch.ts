@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { storeAsset } from "@/lib/delivery/assets";
@@ -92,7 +92,7 @@ export async function createBulkBatch(
   const context = await loadValidationContext(parsed.rows, actor);
   const summary = validateRows(parsed.rows, context);
 
-  const batch = await prisma.$transaction(async (tx) => {
+  const batch = await tenantTransaction(async (tx) => {
     const created = await tx.bulkUploadBatch.create({
       data: {
         orgId: actor.orgId,
@@ -109,6 +109,7 @@ export async function createBulkBatch(
 
     await tx.bulkUploadRow.createMany({
       data: summary.rows.map((row) => ({
+        orgId: actor.orgId,
         batchId: created.id,
         rowNumber: row.rowNumber,
         raw: row.raw as Prisma.InputJsonValue,
@@ -246,7 +247,7 @@ export async function revalidateBatch(
   const summary = validateRows(parsedRows, context);
   const byRowNumber = new Map(summary.rows.map((row) => [row.rowNumber, row]));
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     for (const row of pending) {
       const validated = byRowNumber.get(row.rowNumber);
       if (!validated) continue;

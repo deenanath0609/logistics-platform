@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ShipmentStatus } from "@/generated/prisma/client";
+import { PERMISSIONS } from "@/lib/rbac/permissions";
 import {
   evaluateTransition,
   isTerminal,
@@ -215,5 +216,42 @@ describe("the rule table itself", () => {
   it("exposes rules by event name", () => {
     expect(ruleFor("DELIVERED")?.permission).toBe("delivery.execute");
     expect(ruleFor("NOPE" as never)).toBeUndefined();
+  });
+
+  /**
+   * Every rule here authorises a *write* to the chain of custody. A read
+   * permission can therefore never be the right gate, and the ones that
+   * matter are worse than merely wrong: `allReads` hands every plain
+   * `*.read` code to MANAGEMENT and CUSTOMER_SUPPORT, both of which are
+   * documented as unable to move anything.
+   *
+   * GEOFENCE_ENTER, GEOFENCE_EXIT and IN_TRANSIT_PING were gated on
+   * `tracking.read` — so a read-only account could type an arrival against
+   * a trip and advance every consignment on it.
+   */
+  it("gates no transition on a permission the read-only roles hold", () => {
+    const reads = new Set(
+      PERMISSIONS.filter((p) => p.action === "read" && !p.sensitive).map(
+        (p) => p.code,
+      ),
+    );
+
+    for (const rule of TRANSITIONS) {
+      expect(
+        reads.has(rule.permission),
+        `${rule.event} is gated on the read permission ${rule.permission}`,
+      ).toBe(false);
+    }
+  });
+
+  it("asks a movement typed by hand for what the gate scan asks", () => {
+    // The manual tracking path posts these three; GATE_IN and GATE_OUT are
+    // the same physical facts recorded at a dock.
+    const gate = ruleFor("GATE_IN")?.permission;
+    expect(gate).toBe("trip.dispatch");
+
+    for (const event of ["GEOFENCE_ENTER", "GEOFENCE_EXIT", "IN_TRANSIT_PING"] as const) {
+      expect(ruleFor(event)?.permission, event).toBe(gate);
+    }
   });
 });

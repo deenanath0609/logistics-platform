@@ -1,4 +1,5 @@
 "use server";
+import { SHIPMENT_MODE_VALUES } from "@/lib/shipment/modes";
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
@@ -25,7 +26,7 @@ const pincode = (label: string) =>
   z.string().trim().regex(/^\d{6}$/, `${label} must be 6 digits`);
 
 const schema = z.object({
-  mode: z.enum(["FTL", "PTL", "COURIER"]),
+  mode: z.enum(SHIPMENT_MODE_VALUES),
   serviceTypeId: z.string().min(1, "Choose a service"),
   originBranchId: z.string().min(1, "Choose an origin"),
   destinationBranchId: z.string().min(1, "Choose a destination"),

@@ -1,9 +1,9 @@
 "use server";
 
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
 import {
   createMasterCrud,
+  orgDefaults,
   zBool,
   zCode,
   zOptionalDecimal,
@@ -45,13 +45,6 @@ const schema = z.object({
   isActive: zBool,
 });
 
-async function orgDefaults() {
-  const org = await prisma.organization.findFirstOrThrow({
-    select: { id: true },
-  });
-  return { orgId: org.id };
-}
-
 const crud = createMasterCrud({
   model: "branch",
   entity: "Branch",
@@ -62,6 +55,7 @@ const crud = createMasterCrud({
   schema,
   path: "/masters/branches",
   createDefaults: orgDefaults,
+  planLimit: "branches",
 });
 
 export const createBranch = crud.create;

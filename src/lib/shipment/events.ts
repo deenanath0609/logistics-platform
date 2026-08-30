@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { prisma } from "@/lib/prisma";
+import { prisma, type Db } from "@/lib/prisma";
 import type {
   EventSource,
   Prisma,
@@ -73,12 +73,21 @@ export type AppendEventResult =
 export async function appendShipmentEvent(
   input: AppendEventInput,
   actor: SessionUser | null,
-  /** Pass a transaction client to number and event a shipment atomically. */
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  /**
+   * Pass a transaction client to number and event a shipment atomically.
+   *
+   * Narrower than `DbOrTx`, and `outboxEvent` is in the list even though
+   * nothing here touches it directly: the emit at the end hands this same
+   * client to `enqueueOutbox`.
+   */
+  client: Pick<Db, "shipment" | "shipmentEvent" | "outboxEvent"> = prisma,
 ): Promise<AppendEventResult> {
   const idempotencyKey = input.idempotencyKey ?? randomUUID();
 
-  const existing = await client.shipmentEvent.findUnique({
+  // `findFirst`, not `findUnique`: the key is now unique per carrier
+  // rather than globally, and naming the compound key here would mean
+  // writing the tenant into a `where` the extension already scopes.
+  const existing = await client.shipmentEvent.findFirst({
     where: { idempotencyKey },
     select: { id: true, shipment: { select: { currentStatus: true } } },
   });
@@ -100,6 +109,11 @@ export async function appendShipmentEvent(
     where: { id: input.shipmentId },
     select: {
       id: true,
+      // The event inherits the consignment's carrier rather than the
+      // ambient one. They cannot disagree — this read was already
+      // tenant-scoped — but stamping it from the parent is what makes the
+      // event log's own isolation independent of the caller.
+      orgId: true,
       lrNumber: true,
       currentStatus: true,
       originBranchId: true,
@@ -166,6 +180,7 @@ export async function appendShipmentEvent(
 
   const event = await client.shipmentEvent.create({
     data: {
+      orgId: shipment.orgId,
       shipmentId: shipment.id,
       packageId: input.packageId ?? undefined,
       eventType: input.eventType,

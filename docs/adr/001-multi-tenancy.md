@@ -142,3 +142,54 @@ path: the UI, a server action, the partner API, a report export, a webhook
 payload, and public tracking. Written as an adversarial suite that fails
 loudly, in the spirit of the existing tracking-privacy test — which was
 verified to genuinely fail when the projection was widened.
+
+
+---
+
+## Amendment, 28 August 2026 — child rows carry the tenant key after all
+
+**Superseded above:** §1's rule that a child row reachable only through a
+scoped parent inherits isolation through its foreign key and needs no
+`orgId`. It does need one. Every tenant-owned table now carries the column.
+
+**What went wrong.** The Prisma extension rewrites the **top-level** `where`
+of an operation. It does not rewrite a nested relation filter, because a
+relation filter is an argument to the parent model's query planner rather
+than a predicate on the model being read. So this reached across tenants:
+
+```ts
+prisma.shipmentEvent.findMany({ where: { shipment: { id } } })
+```
+
+The adversarial suite caught it on the event log — the chain of custody,
+the table every other projection in the product is derived from. The rule
+was not wrong in theory: a child *is* isolated when reached through its
+parent. It was wrong because "reached through its parent" is a property of
+every present and future call site, not of the schema, and there is no way
+to enforce it.
+
+Two other faults of the same shape were found at the same time, both worse
+than a read:
+
+- `ShipmentPackage.barcode` was globally unique, and the dock resolves a
+  package **by barcode alone**. A scan in carrier A resolved and then
+  updated carrier B's package row, and wrote a `ScanRecord` pointing at B's
+  consignment, before the event append downstream correctly refused.
+- `ScanRecord.idempotencyKey` was globally unique, so two carriers' offline
+  queues could collide.
+
+**The second reason, which settles it.** Row-level security can only carry a
+policy on a table that holds the tenant key. Every table left inheriting
+isolation through a foreign key was a hole in the backstop in exactly the
+place the application layer also had one — the two mechanisms failed
+together rather than independently, which defeats the point of having two.
+
+**Cost, stated plainly.** Roughly forty more columns and their backfills, an
+`orgId` on writes that previously did not name one, and a wider index
+footprint on some large tables. That is the price of isolation being a
+property of the schema rather than of everybody's discipline.
+
+**What stays global:** `Organization`, `Permission`, the platform-operator
+tables (`PlatformAdmin`, `PlatformAuditLog`, `TenantPlan`), `JobRun`, and
+`Session` — the last because it is resolved from a token before any tenant
+is known.

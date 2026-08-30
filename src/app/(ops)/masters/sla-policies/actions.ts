@@ -8,6 +8,7 @@ import { recordAudit } from "@/server/services/audit";
 import { runSlaScan } from "@/lib/sla/scanner";
 import {
   createMasterCrud,
+  orgDefaults,
   zBool,
   zCode,
   zOptionalText,
@@ -65,13 +66,6 @@ const schema = z.object({
   ),
   isActive: zBool,
 });
-
-async function orgDefaults() {
-  const org = await prisma.organization.findFirstOrThrow({
-    select: { id: true },
-  });
-  return { orgId: org.id };
-}
 
 const crud = createMasterCrud({
   model: "slaPolicy",

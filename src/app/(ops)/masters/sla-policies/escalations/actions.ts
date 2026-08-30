@@ -1,9 +1,9 @@
 "use server";
 
 import { z } from "zod";
-import { prisma } from "@/lib/prisma";
 import {
   createMasterCrud,
+  orgDefaults,
   zBool,
   zOptionalText,
 } from "@/server/services/master-crud";
@@ -45,13 +45,6 @@ const schema = z.object({
   notifyUserId: zOptionalText(40),
   isActive: zBool,
 });
-
-async function orgDefaults() {
-  const org = await prisma.organization.findFirstOrThrow({
-    select: { id: true },
-  });
-  return { orgId: org.id };
-}
 
 const crud = createMasterCrud({
   model: "escalationRule",

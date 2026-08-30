@@ -1,7 +1,7 @@
 /**
  * Does a hub weighing actually move the money?
  *
- *   npx tsx scripts/verify-reweigh.ts
+ *   npx tsx scripts/verify-reweigh.ts [tenant-subdomain]
  *
  * `captureRevisedWeight` was written with nothing calling it, which is the
  * same as not existing: a consignment declared at 5 kg and weighing 45 kg
@@ -15,7 +15,12 @@
  * process, so a script that drains its own outbox proves nothing.
  */
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma";
+import { basePrisma, prisma } from "../src/lib/prisma";
+import {
+  runWithTenant,
+  tenantContextFor,
+  type TenantContext,
+} from "../src/lib/tenant";
 import type { SessionUser } from "../src/lib/auth/session";
 import { createBooking } from "../src/lib/shipment/booking";
 import { captureRevisedWeight } from "../src/lib/hub/weight";
@@ -44,10 +49,42 @@ async function waitForOutboxIdle(seconds = 25): Promise<boolean> {
   return false;
 }
 
-async function main() {
-  console.log("\nHub weighment → re-rate → debit note → notification\n");
+/**
+ * The organisation this run acts as.
+ *
+ * There is no request here and so no `Host` header, which means every
+ * tenant-scoped query would be refused until one is named. Naming it on the
+ * command line rather than reading an environment variable keeps the choice
+ * in the shell history of whoever ran the script, next to the results.
+ *
+ * `findFirstOrThrow` on `basePrisma`: `Organization` is the tenant list
+ * itself, one of the two tables ADR 001 keeps global.
+ */
+async function actingTenant(): Promise<TenantContext> {
+  const subdomain = process.argv[2] ?? "city-logistics";
 
-  const user = await prisma.user.findUniqueOrThrow({
+  const org = await basePrisma.organization.findFirstOrThrow({
+    where: { subdomain },
+    select: {
+      id: true,
+      slug: true,
+      subdomain: true,
+      customDomain: true,
+      status: true,
+    },
+  });
+
+  const tenant = tenantContextFor(org, "job");
+  if (!tenant) {
+    throw new Error(`Organisation "${subdomain}" is closed; refusing to run against it.`);
+  }
+  return tenant;
+}
+
+async function run() {
+  // Unique per tenant, not per platform — the tenant filter supplies the
+  // other half of the key.
+  const user = await prisma.user.findFirstOrThrow({
     where: { mobile: "9999999999" },
     include: {
       primaryBranch: { select: { id: true, code: true, name: true } },
@@ -393,6 +430,15 @@ async function main() {
   );
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function main() {
+  const tenant = await actingTenant();
+  console.log(
+    "\nHub weighment → re-rate → debit note → notification · " +
+      `acting as ${tenant.slug} (${tenant.subdomain})\n`,
+  );
+  await runWithTenant(tenant, run);
 }
 
 main().catch(async (error) => {

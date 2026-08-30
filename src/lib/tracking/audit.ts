@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
 import type { AuditAction, Prisma } from "@/generated/prisma/client";
 
 /**
@@ -30,9 +31,14 @@ export async function recordSystemAudit(input: {
   deviceId?: string | null;
 }): Promise<void> {
   try {
+    // Callers that already know the tenant of the row they touched pass it;
+    // the rest run inside a per-tenant pass, so the pass's own tenant is the
+    // honest answer. There is no actor here by construction.
+    const orgId = input.orgId ?? (await requireTenantOrgId());
+
     await prisma.auditLog.create({
       data: {
-        orgId: input.orgId ?? undefined,
+        orgId,
         userId: undefined,
         action: input.action,
         entity: input.entity,

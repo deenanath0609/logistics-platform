@@ -1,4 +1,5 @@
 "use server";
+import { SHIPMENT_MODE_VALUES } from "@/lib/shipment/modes";
 
 import { z } from "zod";
 import {
@@ -12,7 +13,7 @@ import {
 const schema = z.object({
   code: zCode(),
   name: z.string().trim().min(2, "Required").max(80),
-  mode: z.enum(["FTL", "PTL", "COURIER"], { message: "Choose a mode" }),
+  mode: z.enum(SHIPMENT_MODE_VALUES, { message: "Choose a mode" }),
   description: zOptionalText(),
   volumetricDivisor: z.coerce
     .number()

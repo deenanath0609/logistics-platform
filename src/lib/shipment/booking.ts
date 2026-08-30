@@ -1,10 +1,15 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type Tx } from "@/lib/prisma";
 import type { Prisma, PaymentType, ShipmentMode } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { nextNumber } from "@/lib/numbering/number-series";
+import {
+  assertWithinLimit,
+  isPlanLimitError,
+  noteShipmentBooked,
+} from "@/lib/plan-limits";
 import { chargeableWeight } from "./weight";
 import { appendShipmentEvent } from "./events";
 import {
@@ -12,8 +17,11 @@ import {
   snapshotShipment,
   priceShipment,
   storeFreightCalculation,
+  type FreightStage,
 } from "@/lib/pricing/resolve";
 import type { FreightResult } from "@/lib/pricing/engine";
+import { checkCustomerCredit } from "@/lib/billing/receivables";
+import { recordAudit } from "@/server/services/audit";
 
 /**
  * Prices a freshly-created shipment inside the booking transaction.
@@ -26,7 +34,8 @@ import type { FreightResult } from "@/lib/pricing/engine";
 async function priceShipmentForBooking(
   shipmentId: string,
   orgId: string,
-  tx: Prisma.TransactionClient,
+  tx: Tx,
+  stage: FreightStage,
 ): Promise<FreightResult | null> {
   try {
     const stored = await tx.shipment.findUniqueOrThrow({
@@ -48,7 +57,7 @@ async function priceShipmentForBooking(
     // is what was considered" is exactly what the coverage-gap report
     // needs to be actionable.
     await storeFreightCalculation(
-      { shipmentId, result, stage: "BOOKING" },
+      { shipmentId, result, stage },
       tx,
     );
 
@@ -69,8 +78,10 @@ async function priceShipmentForBooking(
  * happen in one transaction. If any part fails, no LR number is burned
  * and no half-booked consignment is left behind.
  *
- * Freight is entered manually in this phase; the rate-card engine
- * replaces the `charges` input in Phase 6 without changing this shape.
+ * Freight comes from the rate card. `charges` is the override channel and
+ * nothing else — it is refused outright without `shipment.override_rate`,
+ * and where it is used the tariff is still run and still recorded, so the
+ * two figures sit side by side in the record for good.
  */
 
 export type BookingPackageInput = {
@@ -166,6 +177,28 @@ export async function createBooking(
     return { ok: false, error: "You do not have permission to book shipments." };
   }
 
+  // A charge line supplied by the caller is a price a person typed, and it
+  // stands in place of the tariff's answer for this consignment. That is
+  // what `shipment.override_rate` exists to gate, and until this check the
+  // permission was declared and never read.
+  //
+  // What it let through: pricing was skipped entirely whenever `charges`
+  // was non-empty, and the booking form posts one `charge:<chargeTypeId>`
+  // field per charge head at whatever amount is in the box. So a single
+  // line of ₹1 suppressed the rate card for the whole consignment, and the
+  // only permission needed was `shipment.create` — which every booking
+  // clerk holds by definition.
+  const charges = input.charges ?? [];
+  if (charges.length > 0 && !can(actor, "shipment.override_rate")) {
+    return {
+      ok: false,
+      error:
+        "Freight is priced from the rate card. Entering charges by hand is a " +
+        "rate override, which needs a permission this account does not have.",
+      field: "charges",
+    };
+  }
+
   // ── Pre-flight checks, outside the transaction ────────────
   const serviceType = await prisma.serviceType.findUnique({
     where: { id: input.serviceTypeId },
@@ -203,7 +236,11 @@ export async function createBooking(
 
   // Serviceability. Blocked destinations need an explicit override, which
   // is a separate permission precisely so it shows up in the audit trail.
-  const destination = await prisma.pincode.findUnique({
+  //
+  // `findFirst`, not `findUnique`: the geography master is per-tenant, so a
+  // PIN code is only unique within an organisation and the tenant filter is
+  // what makes this row the right one.
+  const destination = await prisma.pincode.findFirst({
     where: { code: input.consigneePincode },
     select: { isServiceable: true, isOda: true },
   });
@@ -230,6 +267,67 @@ export async function createBooking(
     return { ok: false, error: "Enter the weight.", field: "actualWeight" };
   }
 
+  // ── Money ─────────────────────────────────────────────────
+  // Totalled here rather than beside the insert, because credit has to be
+  // judged against what the account is about to be billed and an override
+  // is the only figure that exists this early.
+  const freight = charges
+    .filter((c) => c.basis !== undefined)
+    .reduce((sum, c) => sum.plus(c.amount), new Decimal(0));
+  const tax = charges.reduce(
+    (sum, c) => sum.plus(new Decimal(c.amount).times(c.taxPercent ?? 0).dividedBy(100)),
+    new Decimal(0),
+  );
+
+  // ── Credit control ────────────────────────────────────────
+  // `checkCustomerCredit` has always documented itself as "booking calls
+  // this before it writes anything". It did not: its only caller was the
+  // receivables screen, and the sole thing standing between a blocked
+  // account and a fresh consignment was the `isBlocked: false` filter on
+  // the booking form's customer picker. A filter on a dropdown is not a
+  // control — every entry point here takes `consignorId` as data, so
+  // posting the id of a blocked or over-limit account billed it anyway.
+  //
+  // Enforced in the service so the counter form, the bulk importer, the
+  // portal and the partner API are all covered by the one check.
+  if (input.consignorId) {
+    const credit = await checkCustomerCredit({
+      customerId: input.consignorId,
+      // Zero when the rate card is doing the pricing — the consignment does
+      // not exist yet, so there is no figure to weigh. The verdicts that
+      // stop a booking outright do not depend on one: an account is blocked,
+      // or past its agreed terms, or already beyond its limit on the
+      // outstanding ledger alone.
+      bookingAmount: freight.plus(tax),
+    });
+
+    if (!credit.allowed) {
+      return {
+        ok: false,
+        error: credit.reason ?? `${credit.customerName} cannot be billed for this booking.`,
+        field: "consignorId",
+      };
+    }
+  }
+
+  // The monthly cap, checked last of the pre-flight tests and outside the
+  // transaction.
+  //
+  // Last because it is the only check here that costs a count: a booking
+  // already destined to be refused for an unserviceable PIN should not pay
+  // for one. Outside the transaction because a refusal writes nothing, and
+  // holding a connection open to say no would be the wrong shape.
+  //
+  // This is the only `shipment.create` in the product, so guarding it
+  // covers all four ways in — the counter form, bulk upload, the customer
+  // portal and the partner API — without any of them knowing about plans.
+  try {
+    await assertWithinLimit("shipmentsThisMonth");
+  } catch (error) {
+    if (isPlanLimitError(error)) return { ok: false, error: error.message };
+    throw error;
+  }
+
   // ── Weight ────────────────────────────────────────────────
   const packages: BookingPackageInput[] =
     input.packages && input.packages.length > 0
@@ -242,27 +340,17 @@ export async function createBooking(
     volumetricDivisor: serviceType.volumetricDivisor,
   });
 
-  // ── Money ─────────────────────────────────────────────────
-  const charges = input.charges ?? [];
-  const freight = charges
-    .filter((c) => c.basis !== undefined)
-    .reduce((sum, c) => sum.plus(c.amount), new Decimal(0));
-  const tax = charges.reduce(
-    (sum, c) => sum.plus(new Decimal(c.amount).times(c.taxPercent ?? 0).dividedBy(100)),
-    new Decimal(0),
-  );
-
   const expectedDeliveryAt = serviceType.defaultTransitHours
     ? new Date(Date.now() + serviceType.defaultTransitHours * 3_600_000)
     : null;
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await tenantTransaction(async (tx) => {
       // The number is issued inside the transaction, so an abandoned
       // booking does not consume an LR number.
       const lrNumber = await nextNumber(
         { document: "LR" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       const shipment = await tx.shipment.create({
@@ -325,7 +413,7 @@ export async function createBooking(
           pickupRequired: input.pickupRequired ?? true,
           expectedDeliveryAt: expectedDeliveryAt ?? undefined,
         },
-        select: { id: true, lrNumber: true },
+        select: { id: true, lrNumber: true, orgId: true },
       });
 
       // ── Packages, each with its own barcode ────────────────
@@ -337,6 +425,9 @@ export async function createBooking(
 
       await tx.shipmentPackage.createMany({
         data: packages.map((pkg, index) => ({
+          // From the parent rather than the actor: a box belongs to whoever
+          // owns the consignment it is part of, and nothing else.
+          orgId: shipment.orgId,
           shipmentId: shipment.id,
           sequence: index + 1,
           barcode: barcodes[index],
@@ -352,6 +443,7 @@ export async function createBooking(
       if (charges.length > 0) {
         await tx.shipmentCharge.createMany({
           data: charges.map((charge, index) => ({
+            orgId: shipment.orgId,
             shipmentId: shipment.id,
             chargeTypeId: charge.chargeTypeId,
             basis: charge.basis,
@@ -372,20 +464,28 @@ export async function createBooking(
       }
 
       // ── Rating ────────────────────────────────────────────
-      // Charges supplied by the caller win: the bulk importer and the
-      // partner API carry agreed prices, and a rate card must not
-      // silently overwrite them. Everything else is priced here.
-      if (charges.length === 0) {
-        const priced = await priceShipmentForBooking(
-          shipment.id,
-          actor.orgId,
-          tx,
-        );
+      // The rate card is consulted for every booking, including an
+      // overridden one. It used to be skipped whenever the caller sent
+      // charges, which left an overridden consignment with a typed price
+      // and nothing to compare it against — the two were indistinguishable
+      // from a rated one afterwards.
+      //
+      // Now the calculation is always stored: as the price when nobody
+      // overrode it, and as `BOOKING_OVERRIDE` — the tariff's answer,
+      // recorded but not charged — when somebody did.
+      const priced = await priceShipmentForBooking(
+        shipment.id,
+        actor.orgId,
+        tx,
+        charges.length > 0 ? "BOOKING_OVERRIDE" : "BOOKING",
+      );
 
+      if (charges.length === 0) {
         if (priced) {
           if (priced.lines.length > 0) {
             await tx.shipmentCharge.createMany({
               data: priced.lines.map((line, index) => ({
+                orgId: shipment.orgId,
                 shipmentId: shipment.id,
                 chargeTypeId: line.chargeTypeId,
                 basis: line.basis as BookingChargeInput["basis"],
@@ -417,6 +517,11 @@ export async function createBooking(
         }
       }
 
+      // What the consignment is actually being billed: the typed figure
+      // when it was overridden, the engine's when it priced.
+      const billed =
+        charges.length === 0 && priced ? priced.total : freight.plus(tax);
+
       const event = await appendShipmentEvent(
         {
           shipmentId: shipment.id,
@@ -432,7 +537,7 @@ export async function createBooking(
             chargeableWeight: weights.chargeable.toString(),
             weightBasis: weights.basis,
             paymentType: input.paymentType,
-            grandTotal: freight.plus(tax).toFixed(2),
+            grandTotal: billed.toFixed(2),
             isOda: destination.isOda,
           },
         },
@@ -446,10 +551,39 @@ export async function createBooking(
         throw new Error(event.error);
       }
 
-      return { shipmentId: shipment.id, lrNumber: shipment.lrNumber, barcodes };
+      return {
+        shipmentId: shipment.id,
+        lrNumber: shipment.lrNumber,
+        barcodes,
+        ratedTotal: priced ? priced.total.toFixed(2) : null,
+      };
     });
 
-    return { ok: true, ...result };
+    // Only once the consignment really exists. A bulk import books hundreds
+    // inside one request, and this is what lets the five-hundredth row be
+    // judged against the count including the four hundred and ninety-nine
+    // before it without re-counting the month five hundred times.
+    noteShipmentBooked();
+
+    // A rate override is a sensitive act and is audited as one, with both
+    // figures on the row. The `FreightCalculation` written above says what
+    // the tariff would have charged; this says who decided otherwise.
+    if (charges.length > 0) {
+      await recordAudit({
+        user: actor,
+        action: "OVERRIDE",
+        entity: "Shipment",
+        entityId: result.shipmentId,
+        entityRef: result.lrNumber,
+        branchId: input.bookingBranchId,
+        before: { grandTotal: result.ratedTotal, source: "rate card" },
+        after: { grandTotal: freight.plus(tax).toFixed(2), source: "entered by hand" },
+        reason: "Freight entered by hand at booking, overriding the rate card.",
+      });
+    }
+
+    const { ratedTotal: _ratedTotal, ...booked } = result;
+    return { ok: true, ...booked };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
@@ -460,7 +594,13 @@ export async function createBooking(
       };
     }
 
+    // The message goes to the log, not to the caller. An exception here is
+    // usually Prisma's, and its text names models, columns and constraints;
+    // a `TenantContextError` names two organisation ids outright. This is
+    // the same envelope the partner API keeps everywhere else, and booking
+    // was the one hole in it — the counter form and the API share this
+    // return value.
     console.error("[booking] failed", error);
-    return { ok: false, error: message || "Booking failed. Nothing was saved." };
+    return { ok: false, error: "Booking failed. Nothing was saved." };
   }
 }

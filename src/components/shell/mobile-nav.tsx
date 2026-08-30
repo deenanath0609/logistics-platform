@@ -10,9 +10,18 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import type { ModuleKey } from "@/lib/modules/registry";
 import { SidebarNav } from "./sidebar-nav";
 
-export function MobileNav({ permissions }: { permissions: string[] }) {
+export function MobileNav({
+  permissions,
+  modules,
+  brandName,
+}: {
+  permissions: string[];
+  modules: ModuleKey[];
+  brandName: string;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -30,13 +39,14 @@ export function MobileNav({ permissions }: { permissions: string[] }) {
             <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
               <Truck className="size-4" />
             </span>
-            City Logistics
+            {brandName}
           </SheetTitle>
         </SheetHeader>
 
         <div className="px-2 py-4">
           <SidebarNav
             permissions={permissions}
+            modules={modules}
             onNavigate={() => setOpen(false)}
           />
         </div>

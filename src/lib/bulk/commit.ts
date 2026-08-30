@@ -109,7 +109,9 @@ export async function commitBatch(
     }
 
     // ── Guard 2: has this row already booked? ─────────────
-    const existing = await prisma.shipmentEvent.findUnique({
+    // Unique per carrier now, not globally — so this is a scoped
+    // `findFirst` rather than a lookup by compound key.
+    const existing = await prisma.shipmentEvent.findFirst({
       where: { idempotencyKey },
       select: { shipment: { select: { id: true, lrNumber: true } } },
     });

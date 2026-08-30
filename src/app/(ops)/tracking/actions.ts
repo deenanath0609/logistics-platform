@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import {
+  MANUAL_MOVEMENT_PERMISSION,
   MANUAL_TRACKING_PERMISSION,
   recordManualArrival,
   recordManualDeparture,
@@ -15,11 +16,14 @@ import { pollOnce } from "@/lib/tracking/runtime";
 /**
  * The manual half of the tracking phase.
  *
- * Every automatic event has an equivalent here, guarded by the same
- * permission the automatic path runs under, audited the same way, and
+ * Every automatic event has an equivalent here, audited the same way and
  * recorded through the same `appendShipmentEvent` — differing only in
  * `source`, which is what lets a report separate a geofence arrival from a
  * typed one (docs/BRD.html §A.9).
+ *
+ * Movements need `trip.dispatch`; a position report and an alert closure
+ * need only the tracking read. See the two constants in
+ * `@/lib/tracking/manual` for why they differ.
  */
 
 export type TrackingState = {
@@ -62,7 +66,7 @@ async function movement(
   direction: "ARRIVAL" | "DEPARTURE",
 ): Promise<TrackingState> {
   try {
-    const actor = await authorize(MANUAL_TRACKING_PERMISSION);
+    const actor = await authorize(MANUAL_MOVEMENT_PERMISSION);
 
     const parsed = movementSchema.safeParse(Object.fromEntries(formData.entries()));
     if (!parsed.success) {

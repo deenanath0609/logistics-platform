@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { requirePermission } from "@/lib/auth/session";
+import { can, requirePermission } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { BookingForm } from "./booking-form";
@@ -116,6 +116,7 @@ export default async function NewBookingPage() {
         }))}
         customers={customers}
         defaultBranchId={user.primaryBranch?.id ?? null}
+        canOverrideRate={can(user, "shipment.override_rate")}
       />
     </>
   );

@@ -71,6 +71,10 @@ export async function beginReportRun(input: {
 }): Promise<string> {
   const run = await prisma.reportRun.create({
     data: {
+      // From the exporting user rather than a fresh tenant resolution: it is
+      // the same value, and the extension rejects the write outright if it
+      // ever stops being.
+      orgId: input.user.orgId,
       reportKey: input.report.key,
       filters: filtersToParams(input.filters),
       format: input.format,

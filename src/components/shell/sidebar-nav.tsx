@@ -3,21 +3,44 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { moduleGateFor } from "@/lib/modules/refusal";
+import type { ModuleKey } from "@/lib/modules/registry";
 import { NAV } from "./nav";
 
 export function SidebarNav({
   permissions,
+  modules,
   onNavigate,
 }: {
   permissions: string[];
+  modules: ModuleKey[];
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
   const granted = new Set(permissions);
+  const grantedModules = new Set(modules);
 
+  /**
+   * Two filters, because neither one covers the other.
+   *
+   * Narrowing the session already removes most unbought entries — the
+   * permissions this nav checks are largely module-owned, so `Manifests`
+   * and `Invoices` vanish without anything here changing. Two entries
+   * survive that, and they are the reason this second filter exists:
+   * `COD` is guarded by `delivery.read`, which the last mile owns rather
+   * than COD, and `SLA policies` by `master.read`, which core owns. Both
+   * would keep drawing a link into a module the carrier never bought.
+   *
+   * Hiding is still only presentation; `requireModuleForPath()` in the ops
+   * layout is what actually refuses the URL.
+   */
   const groups = NAV.map((group) => ({
     ...group,
-    items: group.items.filter((item) => granted.has(item.permission)),
+    items: group.items.filter(
+      (item) =>
+        granted.has(item.permission) &&
+        moduleGateFor(item.href, grantedModules).allowed,
+    ),
   })).filter((group) => group.items.length > 0);
 
   return (

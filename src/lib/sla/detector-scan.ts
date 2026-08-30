@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
+import { currentOrgId } from "@/lib/tenant/context";
 import { raiseException } from "@/lib/exceptions/service";
 import type { ShipmentEventType, ShipmentStatus } from "@/generated/prisma/client";
 import {
@@ -129,13 +130,19 @@ export type DetectorResult = {
 
 export type DetectorScanOptions = {
   now?: Date;
-  /** Restrict to one org. Omitted, every org with open work is swept. */
+  /**
+   * The organisation to sweep. Defaults to the tenant this is running as,
+   * which is what the caller normally wants — the scan used to enumerate
+   * organisations itself, and that loop now lives one level up in
+   * `forEachTenant` so every job in the system enumerates tenants the same
+   * way and each pass is genuinely confined to one.
+   */
   orgId?: string;
   batchSize?: number;
 };
 
 /**
- * One pass of all three detectors, for every organisation.
+ * One pass of all three detectors, for one organisation.
  *
  * Idempotent by construction: each detector's dedupe key names the
  * problem rather than the moment, so a second pass finds every key taken
@@ -146,28 +153,15 @@ export async function runDetectorScan(
 ): Promise<DetectorResult> {
   const now = options.now ?? new Date();
   const batchSize = options.batchSize ?? DETECTOR_BATCH;
+  const orgId = options.orgId ?? currentOrgId();
 
-  const orgIds = options.orgId
-    ? [options.orgId]
-    : (
-        await prisma.organization.findMany({ select: { id: true } })
-      ).map((org) => org.id);
+  const config = await loadDetectorConfig(orgId);
 
-  const result: DetectorResult = {
-    hubDwell: 0,
-    pendingPod: 0,
-    codShortfall: 0,
+  return {
+    hubDwell: await detectHubDwell(orgId, config, now, batchSize),
+    pendingPod: await detectPendingPod(orgId, config, now, batchSize),
+    codShortfall: await detectCodShortfall(orgId, config, now),
   };
-
-  for (const orgId of orgIds) {
-    const config = await loadDetectorConfig(orgId);
-
-    result.hubDwell += await detectHubDwell(orgId, config, now, batchSize);
-    result.pendingPod += await detectPendingPod(orgId, config, now, batchSize);
-    result.codShortfall += await detectCodShortfall(orgId, config, now);
-  }
-
-  return result;
 }
 
 /** Opens the exception a decision describes. Null decisions cost nothing. */

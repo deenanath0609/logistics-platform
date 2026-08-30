@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
@@ -75,9 +75,10 @@ export async function openLoadingSheet(
 
   if (existing) return { ok: true, loadingSheetId: existing.id, resumed: true };
 
-  const sheet = await prisma.$transaction(async (tx) => {
+  const sheet = await tenantTransaction(async (tx) => {
     const created = await tx.loadingSheet.create({
       data: {
+        orgId: actor.orgId,
         tripId: trip.id,
         manifestId: input.manifestId ?? trip.manifests[0]?.id ?? undefined,
         branchId: trip.originBranchId,
@@ -246,6 +247,9 @@ export async function scanToLoad(
         },
       },
       create: {
+        // The operator holding the gun. `recordScan` above already refused
+        // anything belonging to another tenant, so the package is theirs.
+        orgId: actor.orgId,
         loadingSheetId: sheet.id,
         packageId: outcome.packageId,
         barcode: outcome.barcode,

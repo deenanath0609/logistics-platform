@@ -8,10 +8,11 @@
  * FreightCalculation was written and whether a rate card matched.
  */
 import "dotenv/config";
-import pg from "pg";
+import { announceScope, operatorClient } from "./operator-db.mjs";
 
-const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+const client = operatorClient();
 await client.connect();
+  announceScope("Booking pricing");
 
 const { rows: cards } = await client.query(
   `SELECT count(*)::int AS n FROM rate_card`,

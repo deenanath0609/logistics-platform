@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@/generated/prisma/client";
+import { prisma, tenantTransaction, type DbOrTx } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
@@ -137,10 +136,10 @@ export async function createTrip(
   }
 
   try {
-    const trip = await prisma.$transaction(async (tx) => {
+    const trip = await tenantTransaction(async (tx) => {
       const number = await nextNumber(
         { document: "TRIP" },
-        tx as unknown as Parameters<typeof nextNumber>[1],
+        tx,
       );
 
       return tx.trip.create({
@@ -188,7 +187,7 @@ export async function createTrip(
 /** Every shipment a trip is carrying — manifest lines, or the FTL binding. */
 async function shipmentsOnTrip(
   tripId: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<Array<{ id: string; lrNumber: string; manifestId: string | null }>> {
   const trip = await client.trip.findUnique({
     where: { id: tripId },
@@ -305,7 +304,7 @@ export async function gateOut(
   const refused: Array<{ lrNumber: string; reason: string }> = [];
   let moved = 0;
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     for (const shipment of carrying) {
       const event = await appendShipmentEvent(
         {
@@ -350,6 +349,9 @@ export async function gateOut(
 
     await tx.tripEvent.create({
       data: {
+        // The gate clerk. Trip, vehicle and manifests were all read under
+        // this tenant, so the whole gate-out belongs to it.
+        orgId: actor.orgId,
         tripId: trip.id,
         eventType: "GATE_OUT",
         occurredAt,
@@ -375,6 +377,7 @@ export async function gateOut(
 
     await tx.vehicleStatusLog.create({
       data: {
+        orgId: actor.orgId,
         vehicleId: trip.vehicleId,
         toStatus: "DISPATCHED",
         tripId: trip.id,
@@ -459,7 +462,7 @@ export async function gateIn(
       ? new Decimal(input.odometerKm - trip.startOdometerKm).toFixed(2)
       : undefined;
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     for (const shipment of carrying) {
       const event = await appendShipmentEvent(
         {
@@ -495,6 +498,7 @@ export async function gateIn(
 
     await tx.tripEvent.create({
       data: {
+        orgId: actor.orgId,
         tripId: trip.id,
         eventType: "GATE_IN",
         occurredAt,
@@ -517,6 +521,7 @@ export async function gateIn(
 
     await tx.vehicleStatusLog.create({
       data: {
+        orgId: actor.orgId,
         vehicleId: trip.vehicleId,
         toStatus: "AT_HUB",
         tripId: trip.id,
@@ -583,7 +588,7 @@ export async function closeTrip(
     };
   }
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     await tx.trip.update({
       where: { id: trip.id },
       data: {
@@ -595,6 +600,7 @@ export async function closeTrip(
 
     await tx.tripEvent.create({
       data: {
+        orgId: actor.orgId,
         tripId: trip.id,
         eventType: "CLOSED",
         branchId: trip.destinationBranchId,
@@ -610,6 +616,7 @@ export async function closeTrip(
 
     await tx.vehicleStatusLog.create({
       data: {
+        orgId: actor.orgId,
         vehicleId: trip.vehicleId,
         toStatus: "AVAILABLE",
         tripId: trip.id,
@@ -657,13 +664,14 @@ export async function markVehicleReported(
     return { ok: false, error: "That trip departs from another branch." };
   }
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     await tx.trip.update({
       where: { id: trip.id },
       data: { status: "VEHICLE_REPORTED" },
     });
     await tx.tripEvent.create({
       data: {
+        orgId: actor.orgId,
         tripId: trip.id,
         eventType: "VEHICLE_REPORTED",
         branchId: trip.originBranchId,

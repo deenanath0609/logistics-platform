@@ -16,6 +16,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  SHIPMENT_MODE_OPTIONS,
+  SHIPMENT_MODE_TONE,
+} from "@/lib/shipment/modes";
+import {
   createServiceType,
   updateServiceType,
   setServiceTypeActive,
@@ -40,11 +44,7 @@ const FIELDS: FieldDef[] = [
     label: "Mode",
     required: true,
     half: true,
-    options: [
-      { value: "FTL", label: "FTL — Full truck load" },
-      { value: "PTL", label: "PTL — Part load" },
-      { value: "COURIER", label: "Courier / parcel" },
-    ],
+    options: SHIPMENT_MODE_OPTIONS,
   },
   { type: "text", name: "name", label: "Name", required: true, placeholder: "Part Load — Express" },
   { type: "textarea", name: "description", label: "Description" },
@@ -76,11 +76,7 @@ const FIELDS: FieldDef[] = [
   { type: "switch", name: "isActive", label: "Active", help: "Inactive types cannot be booked." },
 ];
 
-const MODE_TONE: Record<string, string> = {
-  FTL: "bg-info-muted text-info",
-  PTL: "bg-accent text-accent-foreground",
-  COURIER: "bg-warn-muted text-warn",
-};
+const MODE_TONE = SHIPMENT_MODE_TONE;
 
 export default async function ServiceTypesPage() {
   const user = await requirePermission("master.read");

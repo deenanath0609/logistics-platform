@@ -1,4 +1,5 @@
 "use client";
+import type { ShipmentMode } from "@/generated/prisma/client";
 
 import { useMemo, useState, useTransition, useId } from "react";
 import { Loader2, Truck, AlertTriangle, XCircle } from "lucide-react";
@@ -39,7 +40,7 @@ export type ServiceOption = {
   id: string;
   code: string;
   name: string;
-  mode: "FTL" | "PTL" | "COURIER";
+  mode: ShipmentMode;
   volumetricDivisor: number;
   allowsCod: boolean;
   allowsToPay: boolean;
@@ -122,6 +123,7 @@ export function BookingForm({
   chargeTypes,
   customers,
   defaultBranchId,
+  canOverrideRate,
 }: {
   services: ServiceOption[];
   branches: Option[];
@@ -130,6 +132,13 @@ export function BookingForm({
   chargeTypes: ChargeOption[];
   customers: CustomerOption[];
   defaultBranchId: string | null;
+  /**
+   * Whether this clerk may price by hand. The boxes are hidden without it
+   * because the service refuses a hand-typed charge from anyone lacking
+   * `shipment.override_rate` — showing fields whose contents would bounce
+   * the whole booking is how a form teaches people to distrust it.
+   */
+  canOverrideRate: boolean;
 }) {
   const [state, setState] = useState<BookingFormState>(EMPTY);
   const [pending, startTransition] = useTransition();
@@ -556,8 +565,19 @@ export function BookingForm({
       <div className="grid gap-6 lg:grid-cols-2">
         <Section
           title="Charges"
-          description="Entered by hand in this phase. Rate cards price these automatically from Phase 6."
+          description={
+            canOverrideRate
+              ? "Leave these empty to price from the rate card. Anything typed here overrides it, and is recorded as an override."
+              : "Priced from the rate card in force for this customer and lane when you save."
+          }
         >
+          {!canOverrideRate ? (
+            <p className="text-sm text-muted-foreground">
+              The tariff decides the freight, the fuel surcharge and the tax.
+              You will see the figures on the consignment once it is booked.
+            </p>
+          ) : (
+          <>
           <div className="flex flex-col gap-2">
             {chargeTypes.map((charge) => (
               <div key={charge.id} className="flex items-center gap-3">
@@ -600,6 +620,8 @@ export function BookingForm({
               <dd className="tabular">₹{(chargeTotal + taxTotal).toFixed(2)}</dd>
             </div>
           </dl>
+          </>
+          )}
         </Section>
 
         <Section title="Payment and references">
@@ -709,10 +731,16 @@ export function BookingForm({
             <p className="text-sm">
               <span className="font-semibold tabular">{weights.chargeable.toFixed(2)} kg</span>{" "}
               chargeable ·{" "}
-              <span className="font-semibold tabular">
-                ₹{(chargeTotal + taxTotal).toFixed(2)}
-              </span>{" "}
-              total
+              {canOverrideRate ? (
+                <>
+                  <span className="font-semibold tabular">
+                    ₹{(chargeTotal + taxTotal).toFixed(2)}
+                  </span>{" "}
+                  total
+                </>
+              ) : (
+                <span className="font-semibold">priced on save</span>
+              )}
             </p>
             <p className="text-xs text-muted-foreground">
               {customer ? `Booking for ${customer.name}` : "Walk-in booking"}

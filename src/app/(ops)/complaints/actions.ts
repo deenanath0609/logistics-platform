@@ -97,7 +97,9 @@ export async function createComplaintAction(
     let shipmentId: string | null = null;
     if (parsed.data.lrNumber) {
       const { prisma } = await import("@/lib/prisma");
-      const shipment = await prisma.shipment.findUnique({
+      // An LR number is unique per carrier rather than globally, so this is
+      // a scoped lookup — the extension supplies the org.
+      const shipment = await prisma.shipment.findFirst({
         where: { lrNumber: parsed.data.lrNumber.trim() },
         select: { id: true },
       });

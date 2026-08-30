@@ -1,9 +1,5 @@
-import { prisma } from "@/lib/prisma";
-import type {
-  Prisma,
-  ScanType,
-  ShipmentEventType,
-} from "@/generated/prisma/client";
+import { prisma, tenantTransaction, type DbOrTx } from "@/lib/prisma";
+import type { ScanType, ShipmentEventType } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
@@ -174,12 +170,17 @@ export type ResolvedBarcode =
  */
 export async function resolveBarcode(
   barcode: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<ResolvedBarcode> {
   const code = normaliseBarcode(barcode);
   if (code === "") return { kind: "UNKNOWN" };
 
-  const pkg = await client.shipmentPackage.findUnique({
+  // `findFirst`, not `findUnique`: a package barcode is only unique within a
+  // tenant now, and a bare `findUnique({ barcode })` resolved — and then let
+  // the caller update — whichever carrier's row happened to hold the code.
+  // Going through the scoped form is what stops a gun in one carrier's hub
+  // reaching into another's packages.
+  const pkg = await client.shipmentPackage.findFirst({
     where: { barcode: code },
     select: {
       id: true,
@@ -211,7 +212,9 @@ export async function resolveBarcode(
     };
   }
 
-  const shipment = await client.shipment.findUnique({
+  // An LR number is only unique within a tenant now, so this is a scoped
+  // lookup rather than a global one — the extension supplies the org.
+  const shipment = await client.shipment.findFirst({
     where: { lrNumber: code },
     select: {
       id: true,
@@ -268,7 +271,9 @@ export async function recordScan(
   // ── Idempotency ───────────────────────────────────────────
   // Checked before anything is written so a retried offline batch replays
   // as a series of no-ops rather than a series of duplicate boxes.
-  const existing = await prisma.scanRecord.findUnique({
+  // Scoped by the extension: the key is client-generated, so two tenants
+  // can legitimately mint the same one and neither may see the other's scan.
+  const existing = await prisma.scanRecord.findFirst({
     where: { idempotencyKey: input.idempotencyKey },
     select: {
       id: true,
@@ -314,9 +319,12 @@ export async function recordScan(
 
   const scannedAt = input.scannedAt ?? new Date();
 
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await tenantTransaction(async (tx) => {
     const record = await tx.scanRecord.create({
       data: {
+        // The operator's own tenant, which the extension then checks the
+        // scan against — a scan is a fact about who was holding the gun.
+        orgId: actor.orgId,
         scanType: input.scanType,
         barcode,
         packageId: resolved.kind === "PACKAGE" ? resolved.packageId : undefined,
@@ -359,6 +367,10 @@ export async function recordScan(
         await tx.packageLocation.upsert({
           where: { packageId: resolved.packageId },
           create: {
+            // Same tenant as the ScanRecord above: the bin, the package and
+            // the operator are all one carrier's, and `resolveBarcode` was
+            // already scoped to them.
+            orgId: actor.orgId,
             packageId: resolved.packageId,
             branchId: input.branchId,
             binId: input.binId ?? undefined,

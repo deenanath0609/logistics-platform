@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { recordAudit } from "@/server/services/audit";
 import type { SessionUser } from "@/lib/auth/session";
@@ -108,7 +108,7 @@ export async function createComplaint(
   );
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction so an abandoned complaint does not
       // burn a number out of the series.
       const number = await nextNumber({ document: "COMPLAINT" }, tx);
@@ -184,7 +184,7 @@ export async function addMessage(
   const isInternal = input.isInternal ?? true;
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await tenantTransaction(async (tx) => {
       const complaint = await tx.complaint.findUnique({
         where: { id: input.complaintId },
         select: { id: true, number: true, branchId: true, firstResponseAt: true },
@@ -193,6 +193,7 @@ export async function addMessage(
 
       const message = await tx.complaintMessage.create({
         data: {
+          orgId: actor.orgId,
           complaintId: complaint.id,
           body: input.body,
           authorUserId: actor.id,
@@ -307,7 +308,7 @@ export async function transitionComplaint(
   }
 
   try {
-    await prisma.$transaction(async (tx) => {
+    await tenantTransaction(async (tx) => {
       await tx.complaint.update({ where: { id: complaint.id }, data });
 
       if (note.length > 0) {
@@ -315,6 +316,7 @@ export async function transitionComplaint(
         // separate reply box is where internal asides go.
         await tx.complaintMessage.create({
           data: {
+            orgId: actor.orgId,
             complaintId: complaint.id,
             body: note,
             authorUserId: actor.id,

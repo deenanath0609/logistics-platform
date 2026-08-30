@@ -1,16 +1,23 @@
 /**
  * Books one shipment and then leaves the outbox alone, so the RUNNING
- * SERVER's drain is what processes it.
+ * WORKER's drain is what processes it.
  *
- *   npx tsx scripts/verify-notifications.ts
+ *   npm run worker            # in another terminal, and leave it running
+ *   npx tsx scripts/verify-notifications.ts [tenant-subdomain]
  *
  * This matters: a script that drains its own outbox proves nothing about
- * production, because the handlers are registered in the server process,
+ * production, because the handlers are registered in the worker process,
  * not in the script. The only honest test is to write the event and watch
- * the server pick it up.
+ * the worker pick it up. If nothing moves, the worker is not running —
+ * `node scripts/check-pipeline.mjs` says so in as many words.
  */
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma";
+import { basePrisma, prisma } from "../src/lib/prisma";
+import {
+  runWithTenant,
+  tenantContextFor,
+  type TenantContext,
+} from "../src/lib/tenant";
 import type { SessionUser } from "../src/lib/auth/session";
 import { createBooking } from "../src/lib/shipment/booking";
 
@@ -46,14 +53,46 @@ async function waitForOutboxIdle(seconds = 20): Promise<boolean> {
   return false;
 }
 
-async function main() {
-  console.log("\nNotification pipeline\n");
+/**
+ * The organisation this run acts as.
+ *
+ * There is no request here and so no `Host` header, which means every
+ * tenant-scoped query would be refused until one is named. Naming it on the
+ * command line rather than reading an environment variable keeps the choice
+ * in the shell history of whoever ran the script, next to the results.
+ *
+ * `findFirstOrThrow` on `basePrisma`: `Organization` is the tenant list
+ * itself, one of the two tables ADR 001 keeps global.
+ */
+async function actingTenant(): Promise<TenantContext> {
+  const subdomain = process.argv[2] ?? "city-logistics";
 
+  const org = await basePrisma.organization.findFirstOrThrow({
+    where: { subdomain },
+    select: {
+      id: true,
+      slug: true,
+      subdomain: true,
+      customDomain: true,
+      status: true,
+    },
+  });
+
+  const tenant = tenantContextFor(org, "job");
+  if (!tenant) {
+    throw new Error(`Organisation "${subdomain}" is closed; refusing to run against it.`);
+  }
+  return tenant;
+}
+
+async function run() {
   const templates = await prisma.notificationTemplate.count();
   const active = await prisma.notificationTemplate.count({ where: { isActive: true } });
   check("templates are seeded", templates > 0, `${templates} total, ${active} active`);
 
-  const user = await prisma.user.findUniqueOrThrow({
+  // Unique per tenant, not per platform — the tenant filter supplies the
+  // other half of the key.
+  const user = await prisma.user.findFirstOrThrow({
     where: { mobile: "9999999999" },
     include: {
       primaryBranch: { select: { id: true, code: true, name: true } },
@@ -190,6 +229,17 @@ async function main() {
   console.log(failures === 0 ? "\nPipeline works.\n" : `\n${failures} failed.\n`);
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function main() {
+  const tenant = await actingTenant();
+  console.log(
+    `\nNotification pipeline · acting as ${tenant.slug} (${tenant.subdomain})\n`,
+  );
+  // The server's drain works through every tenant; the counts in here see
+  // only this one, which is what makes "the queue is idle" a statement about
+  // the run rather than about whoever else is booking at the same time.
+  await runWithTenant(tenant, run);
 }
 
 main().catch(async (error) => {

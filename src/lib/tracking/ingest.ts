@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import type { Prisma, ShipmentEventType } from "@/generated/prisma/client";
 import { haversineMetres, type LatLng } from "./geo";
@@ -241,6 +242,10 @@ async function ingestForVehicle(
   await prisma.vehicleLocation.upsert({
     where: { vehicleId: vehicle.id },
     create: {
+      // The vehicle already resolved above owns this position; taking the
+      // tenant from anywhere else would let a device fitted to one carrier's
+      // truck move a row belonging to another's.
+      orgId: vehicle.orgId,
       vehicleId: vehicle.id,
       deviceId: latest.deviceId,
       latitude: latest.lat,
@@ -333,6 +338,10 @@ async function persistPing(
   try {
     await prisma.gpsPing.create({
       data: {
+        // A ping arrives before anything is known about it — `vehicleId` is
+        // null for a device nobody has fitted yet — so the tenant is the one
+        // whose poll or webhook brought the fix in.
+        orgId: await requireTenantOrgId(),
         deviceId: ping.deviceId,
         vehicleId: vehicleId ?? undefined,
         latitude: ping.lat,
@@ -389,6 +398,7 @@ async function emitFenceEvent(
 
   const fenceEvent = await prisma.geofenceEvent.create({
     data: {
+      orgId: vehicle.orgId,
       geofenceId: transition.geofenceId,
       vehicleId: vehicle.id,
       tripId: trip?.id ?? undefined,
@@ -616,6 +626,7 @@ async function markTripInTransit(trip: TripContext): Promise<void> {
 
   await prisma.tripEvent.create({
     data: {
+      orgId: trip.orgId,
       tripId: trip.id,
       eventType: "IN_TRANSIT",
       occurredAt: new Date(),

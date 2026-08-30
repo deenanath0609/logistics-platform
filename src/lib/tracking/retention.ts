@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { forEachTenant } from "@/lib/tenant/for-each-tenant";
 
 /**
  * GPS retention.
@@ -44,9 +45,8 @@ import { prisma } from "@/lib/prisma";
  *     primary key with a pause between batches, so the pass is
  *     interruptible at any point and simply resumes on the next run.
  *
- * Not wired up here. `src/instrumentation.ts` is the one place that
- * decides what a server process runs; `startRetentionJob()` is exported
- * for it to call.
+ * Not wired up here. `workers/index.ts` is the one place that decides what
+ * runs on a schedule; `retentionPass()` is exported for it to call.
  */
 
 // ────────────────────────────────────────────────────────────
@@ -74,6 +74,23 @@ const PAUSE_MS = 25;
 
 /** A pass gives up after this long and resumes on the next run. */
 const DEFAULT_BUDGET_MS = 10 * 60_000;
+
+/**
+ * The budget for a whole nightly run, shared out between tenants.
+ *
+ * Separate from `DEFAULT_BUDGET_MS`, which is one tenant's pass, because
+ * fifty tenants at ten minutes each is an eight-hour "daily" job that would
+ * still be pruning history during the morning booking rush.
+ */
+const RUN_BUDGET_MS = 45 * 60_000;
+
+/**
+ * No tenant gets less than this, however little of the run is left. A slice
+ * too short to delete a single batch would burn the pass on overhead and
+ * make no progress at all — better that the last tenants are simply
+ * truncated and resume tomorrow, which they already know how to do.
+ */
+const MIN_SLICE_MS = 30_000;
 
 /**
  * Reads a positive whole number from `process.env`, rather than from
@@ -380,11 +397,16 @@ async function deleteInBatches(ids: readonly string[]): Promise<number> {
 }
 
 /**
- * One retention pass.
+ * One retention pass, over the current tenant's pings.
  *
  * Expiry first, downsampling second: the cheapest way to shrink the table
  * is to drop what nobody may look at again, and doing it first means the
  * downsample scan has less to walk.
+ *
+ * The per-device downsample walk is unchanged by tenancy, but it is worth
+ * knowing that the device list now comes back scoped: `groupBy` over
+ * `gpsPing` sees only this organisation's rows, so the carry between pages
+ * is per tenant as well as per device.
  */
 export async function runRetentionPass(
   options: RetentionOptions = {},
@@ -522,52 +544,82 @@ const globalForRetention = globalThis as unknown as {
 const DEFAULT_INTERVAL_HOURS = 24;
 
 /**
- * Waited out before the first pass, so a server that has just come up
- * spends its first minutes serving the depot rather than pruning history.
+ * Waited out before the first pass, so a process that has just come up
+ * spends its first minutes on live work rather than pruning history.
  */
-const FIRST_RUN_DELAY_MS = 5 * 60_000;
+export const FIRST_RUN_DELAY_MS = 5 * 60_000;
 
-function intervalMs(): number {
+export function retentionIntervalMs(): number {
   const hours = envPositiveInt("GPS_RETENTION_INTERVAL_HOURS", DEFAULT_INTERVAL_HOURS);
   return hours * 3_600_000;
 }
 
 /**
- * Starts the daily retention pass. Safe to call repeatedly.
+ * One retention run across every tenant. Never throws.
  *
- * Not called from this module, and deliberately not from an import side
- * effect: `src/instrumentation.ts` decides what a process runs, and a
- * module that starts its own timers starts them in builds, in tests, and
- * in every worker that happens to touch it.
+ * The one pass here that is genuinely safe to cut short: every delete is an
+ * independent bounded batch, never a transaction, and `planRetention` is
+ * deterministic — so a run that is killed halfway leaves the table
+ * consistent and simply picks up where it left off tomorrow. The worker's
+ * shutdown relies on that; nothing else here does.
  */
-export function startRetentionJob(): void {
-  if (globalForRetention.gpsRetentionTimer) return;
+export async function retentionPass(): Promise<void> {
+  if (globalForRetention.gpsRetentionInFlight) return;
+  globalForRetention.gpsRetentionInFlight = true;
 
-  const run = async () => {
-    if (globalForRetention.gpsRetentionInFlight) return;
-    globalForRetention.gpsRetentionInFlight = true;
-    try {
-      const summary = await runRetentionPass();
+  try {
+    const deadline = Date.now() + RUN_BUDGET_MS;
+
+    const pass = await forEachTenant(
+      { job: "tracking retention" },
+      (_tenant, slice) => {
+        // What is left of the run, divided by the tenants still to go: a
+        // tenant that finishes early hands its unused minutes to the ones
+        // behind it, and a tenant with a billion cold pings cannot take the
+        // whole night and leave the rest untouched.
+        const share = Math.floor(
+          (deadline - Date.now()) / (slice.total - slice.index),
+        );
+        return runRetentionPass({ budgetMs: Math.max(share, MIN_SLICE_MS) });
+      },
+    );
+
+    for (const { slug, value: summary } of pass.results) {
       if (summary.downsampled > 0 || summary.expired > 0 || summary.truncated) {
         console.info(
-          `[tracking] retention: ${summary.downsampled.toLocaleString("en-IN")} ping(s) downsampled, ` +
+          `[tracking] retention ${slug}: ${summary.downsampled.toLocaleString("en-IN")} ping(s) downsampled, ` +
             `${summary.expired.toLocaleString("en-IN")} expired, ` +
             `${summary.kept.toLocaleString("en-IN")} kept across ${summary.devices} device(s)` +
             (summary.truncated ? " — budget reached, resuming next pass" : ""),
         );
       }
-    } catch (error) {
-      console.error("[tracking] retention pass failed", error);
-    } finally {
-      globalForRetention.gpsRetentionInFlight = false;
     }
-  };
+  } catch (error) {
+    console.error("[tracking] retention pass failed", error);
+  } finally {
+    globalForRetention.gpsRetentionInFlight = false;
+  }
+}
 
-  const every = intervalMs();
+/**
+ * Starts the daily retention pass inside whatever process calls it.
+ *
+ * Only reached when `RUN_JOBS_IN_WEB=true`; the worker schedules
+ * `retentionPass` itself. Not called from an import side effect, ever: a
+ * module that starts its own timers starts them in builds, in tests, and in
+ * every process that happens to touch it.
+ */
+export function startRetentionJob(): void {
+  if (globalForRetention.gpsRetentionTimer) return;
+
+  const every = retentionIntervalMs();
 
   globalForRetention.gpsRetentionStartTimer = setTimeout(() => {
-    void run();
-    globalForRetention.gpsRetentionTimer = setInterval(() => void run(), every);
+    void retentionPass();
+    globalForRetention.gpsRetentionTimer = setInterval(
+      () => void retentionPass(),
+      every,
+    );
     globalForRetention.gpsRetentionTimer.unref?.();
   }, FIRST_RUN_DELAY_MS);
   globalForRetention.gpsRetentionStartTimer.unref?.();
@@ -577,13 +629,18 @@ export function startRetentionJob(): void {
   globalForRetention.gpsRetentionTimer =
     globalForRetention.gpsRetentionStartTimer;
 
+  console.info(`[tracking] ${retentionBanner(every)}`);
+}
+
+/** One line describing the policy in force, for a startup log. */
+export function retentionBanner(every = retentionIntervalMs()): string {
   const policy = retentionPolicy();
-  console.info(
-    `[tracking] GPS retention every ${every / 3_600_000}h: full resolution for ${policy.retentionDays} days, ` +
-      `then one fix per ${policy.bucketMinutes} min` +
-      (Number.isFinite(policy.archiveDays)
-        ? `, deleted after ${policy.archiveDays} days`
-        : ", nothing deleted"),
+  return (
+    `GPS retention every ${every / 3_600_000}h: full resolution for ${policy.retentionDays} days, ` +
+    `then one fix per ${policy.bucketMinutes} min` +
+    (Number.isFinite(policy.archiveDays)
+      ? `, deleted after ${policy.archiveDays} days`
+      : ", nothing deleted")
   );
 }
 

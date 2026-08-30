@@ -198,6 +198,8 @@ async function snapshotEta(input: {
 
   await prisma.etaSnapshot.create({
     data: {
+      // The trip this estimate is about owns it.
+      orgId: input.trip.orgId,
       tripId: input.trip.id,
       estimatedArrivalAt: eta.estimatedArrivalAt,
       remainingKm: eta.remainingKm.toFixed(2),
@@ -279,6 +281,9 @@ async function raiseAlert(input: {
 
   const alert = await prisma.trackingAlert.create({
     data: {
+      // Same source the exception above was raised against, so an alert and
+      // its exception cannot end up in two different tenants.
+      orgId: input.vehicle.orgId,
       kind: input.kind,
       vehicleId: input.vehicle.id,
       tripId: input.trip?.id ?? undefined,

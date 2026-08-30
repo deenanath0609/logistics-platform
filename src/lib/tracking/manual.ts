@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import { recordAudit } from "@/server/services/audit";
 import { can, type SessionUser } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import type { Prisma, ShipmentEventType } from "@/generated/prisma/client";
 import { haversineMetres } from "./geo";
 import { activeTripForVehicle, loadBranchPoints, shipmentsOnTrip } from "./context";
@@ -19,12 +20,15 @@ import { activeTripForVehicle, loadBranchPoints, shipmentsOnTrip } from "./conte
  *
  * Three rules hold this together.
  *
- * The permission is the same one the automatic path uses. A geofence
- * arrival is a `GEOFENCE_ENTER` event, and the state machine says that
- * event needs `tracking.read`; a supervisor typing the same arrival needs
- * exactly that and no more. Requiring something stronger for the manual
- * route would push branches into asking the transport desk to do it, which
- * is how arrival data stops being entered at all.
+ * The permission is the same one the state machine demands of a person
+ * posting the equivalent event — but a *person*, not the pipeline. The
+ * automatic path carries `source: "GPS"` and is not permission-checked at
+ * all, so "the same permission the automatic path uses" was never a real
+ * constraint: it read `tracking.read`, which is in `allReads` and which
+ * MANAGEMENT — documented as read-only visibility of the whole network —
+ * and CUSTOMER_SUPPORT both hold. Either could post an arrival against a
+ * trip id and advance every consignment on it, writing custody evidence
+ * and firing customer notifications from a nominally read-only account.
  *
  * The event is the same event, through the same function. Nothing here
  * touches `currentStatus`; `appendShipmentEvent` validates the transition
@@ -40,7 +44,29 @@ export type ManualResult =
   | { ok: true; moved: number; refused: Array<{ lrNumber: string; reason: string }> }
   | { ok: false; error: string };
 
-/** The permission the automatic path runs under, applied to the manual one. */
+/**
+ * Recording a movement by hand.
+ *
+ * `trip.dispatch` — the permission GATE_IN and GATE_OUT already require —
+ * because typing "the truck reached Jaipur" is the same act as scanning it
+ * in, and produces the same rows. Branch managers, dispatch managers and
+ * operations managers hold it; the read-only roles that used to be able to
+ * do this do not.
+ */
+export const MANUAL_MOVEMENT_PERMISSION = "trip.dispatch";
+
+/**
+ * Reporting a position and closing an alert.
+ *
+ * Still the tracking read, deliberately. Neither touches the consignment
+ * timeline: a phoned-in position updates the live map and explicitly
+ * refuses to evaluate fences (see `recordManualPosition`), and closing an
+ * alert annotates an alert. Both are audited. Narrowing them to
+ * `trip.dispatch` would take the phone-in away from the transport desk,
+ * which is the desk that actually takes those calls — the catalogue has no
+ * permission shaped like "may write tracking data but not custody", and
+ * inventing one needs a seed run.
+ */
 export const MANUAL_TRACKING_PERMISSION = "tracking.read";
 
 // ────────────────────────────────────────────────────────────
@@ -61,8 +87,22 @@ async function recordMovement(
   actor: SessionUser,
   direction: "ARRIVAL" | "DEPARTURE",
 ): Promise<ManualResult> {
-  if (!can(actor, MANUAL_TRACKING_PERMISSION)) {
+  if (!can(actor, MANUAL_MOVEMENT_PERMISSION)) {
     return { ok: false, error: "You do not have permission to record vehicle movements." };
+  }
+
+  // Branch scope, which this path had none of. Tenant scoping is automatic
+  // and was never the gap: the gap was that any branch id would do, so a
+  // user at one branch could post arrivals at every other one.
+  //
+  // Checked against the branch the movement is being recorded at rather
+  // than the trip's origin — a Jaipur trip really does arrive at Delhi,
+  // and it is Delhi's people who witness it.
+  if (!coversBranch(actor, input.branchId)) {
+    return {
+      ok: false,
+      error: "You can only record movements at branches you cover.",
+    };
   }
 
   const trip = await prisma.trip.findUnique({
@@ -131,6 +171,7 @@ async function recordMovement(
 
   await prisma.tripEvent.create({
     data: {
+      orgId: actor.orgId,
       tripId: trip.id,
       eventType: direction === "ARRIVAL" ? "MANUAL_ARRIVAL" : "MANUAL_DEPARTURE",
       occurredAt,
@@ -253,8 +294,18 @@ export async function recordManualPosition(
   const trip = await activeTripForVehicle(vehicle.id);
 
   await prisma.gpsPing.upsert({
-    where: { deviceId_recordedAt: { deviceId, recordedAt: occurredAt } },
+    // The compound key, because an upsert needs a genuinely unique `where`
+    // and a device clock is only unique within a tenant now. `orgId` comes
+    // from the vehicle this position is being recorded against.
+    where: {
+      orgId_deviceId_recordedAt: {
+        orgId: vehicle.orgId,
+        deviceId,
+        recordedAt: occurredAt,
+      },
+    },
     create: {
+      orgId: vehicle.orgId,
       deviceId,
       vehicleId: vehicle.id,
       latitude: input.latitude,
@@ -274,6 +325,7 @@ export async function recordManualPosition(
   await prisma.vehicleLocation.upsert({
     where: { vehicleId: vehicle.id },
     create: {
+      orgId: vehicle.orgId,
       vehicleId: vehicle.id,
       deviceId,
       latitude: input.latitude,
@@ -297,6 +349,7 @@ export async function recordManualPosition(
   if (trip) {
     await prisma.tripEvent.create({
       data: {
+        orgId: actor.orgId,
         tripId: trip.id,
         eventType: "MANUAL_POSITION",
         occurredAt,

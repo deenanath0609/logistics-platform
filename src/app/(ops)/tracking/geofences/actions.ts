@@ -124,7 +124,13 @@ export async function saveGeofenceAction(
           data,
           select: { id: true, name: true },
         })
-      : await prisma.geofence.create({ data, select: { id: true, name: true } });
+      : // `orgId` only on the create — an update must not be able to move an
+        // existing fence between carriers, and the extension refuses that
+        // anyway. Same source as the branch lookup above.
+        await prisma.geofence.create({
+          data: { ...data, orgId: actor.orgId },
+          select: { id: true, name: true },
+        });
 
     // The pipeline caches fences for a minute. Drop it now so the change
     // applies on the very next ping.

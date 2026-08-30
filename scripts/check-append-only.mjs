@@ -1,8 +1,9 @@
 import "dotenv/config";
-import pg from "pg";
+import { announceScope, operatorClient } from "./operator-db.mjs";
 
-const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+const client = operatorClient();
 await client.connect();
+announceScope("Append-only enforcement");
 
 let failures = 0;
 const report = (label, ok, detail = "") => {
@@ -10,13 +11,23 @@ const report = (label, ok, detail = "") => {
   console.log(`  [${ok ? "PASS" : "FAIL"}] ${label}${detail ? ` — ${detail}` : ""}`);
 };
 
-console.log("\nAppend-only enforcement\n");
-
 await client.query("BEGIN");
 try {
+  // Every audit row now names the carrier it belongs to, so the probe has to
+  // borrow one. Any organisation will do — the whole transaction is rolled
+  // back, and what is under test is the trigger, not the row.
+  const { rows: orgs } = await client.query(
+    `SELECT id FROM organization ORDER BY "createdAt" LIMIT 1`,
+  );
+  if (!orgs[0]) {
+    console.error("  No organisation exists yet — run the seed first.\n");
+    process.exit(1);
+  }
+
   await client.query(
-    `INSERT INTO audit_log (id, action, entity, "entityId", "createdAt")
-     VALUES ('trigger-probe', 'CREATE', 'TriggerProbe', 'probe', now())`,
+    `INSERT INTO audit_log (id, "orgId", action, entity, "entityId", "createdAt")
+     VALUES ('trigger-probe', $1, 'CREATE', 'TriggerProbe', 'probe', now())`,
+    [orgs[0].id],
   );
   report("INSERT is allowed", true);
 

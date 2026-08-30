@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction, type DbOrTx } from "@/lib/prisma";
 import type { DiscrepancyKind, Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
@@ -110,9 +110,13 @@ export async function openReceipt(
     0,
   );
 
-  const receipt = await prisma.$transaction(async (tx) => {
+  const receipt = await tenantTransaction(async (tx) => {
     const created = await tx.inboundReceipt.create({
       data: {
+        // The receiving clerk's own tenant. The extension refuses the write
+        // if it disagrees with the host, so naming it here asserts rather
+        // than trusts.
+        orgId: actor.orgId,
         branchId: input.branchId,
         manifestId: manifest.id,
         tripId: input.tripId ?? manifest.tripId ?? undefined,
@@ -128,6 +132,7 @@ export async function openReceipt(
 
     await tx.inboundReceiptLine.createMany({
       data: manifest.lines.map((line) => ({
+        orgId: actor.orgId,
         receiptId: created.id,
         shipmentId: line.shipmentId,
         expectedPackages: line.packageCount,
@@ -153,7 +158,7 @@ export async function openReceipt(
 /** The barcodes a receipt is waiting for, normalised for comparison. */
 export async function expectedBarcodesFor(
   receiptId: string,
-  client: Prisma.TransactionClient | typeof prisma = prisma,
+  client: DbOrTx = prisma,
 ): Promise<Set<string>> {
   const packages = await client.shipmentPackage.findMany({
     where: { shipment: { receiptLines: { some: { receiptId } } } },
@@ -409,6 +414,10 @@ export async function closeReceipt(
 
   for (const item of reconciliation.short) {
     discrepancies.push({
+      // The clerk closing the receipt. `ownerBranchId` below points at the
+      // dispatching branch, which answers for the shortage — but that is
+      // another branch of the same carrier, never another carrier.
+      orgId: actor.orgId,
       receiptId: receipt.id,
       kind: "SHORT",
       shipmentId: item.shipmentId,
@@ -426,6 +435,7 @@ export async function closeReceipt(
 
   for (const item of reconciliation.excess) {
     discrepancies.push({
+      orgId: actor.orgId,
       receiptId: receipt.id,
       kind: "EXCESS",
       shipmentId: item.shipmentId,
@@ -444,6 +454,7 @@ export async function closeReceipt(
 
   if (sealBroken) {
     discrepancies.push({
+      orgId: actor.orgId,
       receiptId: receipt.id,
       kind: "SEAL_BROKEN",
       quantity: 1,
@@ -460,7 +471,7 @@ export async function closeReceipt(
   // shortage nobody owns.
   const eventFailures: string[] = [];
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     for (const line of reconciliation.lines) {
       await tx.inboundReceiptLine.updateMany({
         where: { receiptId: receipt.id, shipmentId: line.shipmentId },

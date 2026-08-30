@@ -1,7 +1,7 @@
 /**
  * Does the SLA engine actually measure anything?
  *
- *   npx tsx scripts/verify-sla.ts
+ *   npx tsx scripts/verify-sla.ts [tenant-subdomain]
  *
  * The engine, the scanner and the reports were all built and unit-tested,
  * but until a policy row exists every shipment resolves to NOT_APPLICABLE
@@ -9,7 +9,12 @@
  * scanner. This checks the whole chain against the real database.
  */
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma";
+import { basePrisma, prisma } from "../src/lib/prisma";
+import {
+  runWithTenant,
+  tenantContextFor,
+  type TenantContext,
+} from "../src/lib/tenant";
 import { runSlaScan } from "../src/lib/sla/scanner";
 
 let failures = 0;
@@ -18,9 +23,39 @@ const check = (label: string, ok: boolean, detail = "") => {
   console.log(`  [${ok ? "PASS" : "FAIL"}] ${label}${detail ? ` — ${detail}` : ""}`);
 };
 
-async function main() {
-  console.log("\nSLA engine\n");
+/**
+ * The organisation this run acts as.
+ *
+ * There is no request here and so no `Host` header, which means every
+ * tenant-scoped query would be refused until one is named. Naming it on the
+ * command line rather than reading an environment variable keeps the choice
+ * in the shell history of whoever ran the script, next to the results.
+ *
+ * `findFirstOrThrow` on `basePrisma`: `Organization` is the tenant list
+ * itself, one of the two tables ADR 001 keeps global.
+ */
+async function actingTenant(): Promise<TenantContext> {
+  const subdomain = process.argv[2] ?? "city-logistics";
 
+  const org = await basePrisma.organization.findFirstOrThrow({
+    where: { subdomain },
+    select: {
+      id: true,
+      slug: true,
+      subdomain: true,
+      customDomain: true,
+      status: true,
+    },
+  });
+
+  const tenant = tenantContextFor(org, "job");
+  if (!tenant) {
+    throw new Error(`Organisation "${subdomain}" is closed; refusing to run against it.`);
+  }
+  return tenant;
+}
+
+async function run() {
   const policies = await prisma.slaPolicy.count({ where: { isActive: true } });
   const rungs = await prisma.escalationRule.count();
   check("policies are seeded", policies > 0, `${policies} active`);
@@ -108,6 +143,16 @@ async function main() {
 
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function main() {
+  const tenant = await actingTenant();
+  console.log(`\nSLA engine · acting as ${tenant.slug} (${tenant.subdomain})\n`);
+  // `runSlaScan()` is one pass over one tenant now — the sweep that covers
+  // them all is `forEachTenant` in `startSlaScanner`. Calling it in here
+  // therefore scans this organisation and no other, which is what makes the
+  // before/after counts either side of it mean anything.
+  await runWithTenant(tenant, run);
 }
 
 main().catch(async (error) => {

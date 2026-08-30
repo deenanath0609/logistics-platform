@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { enqueueOutbox } from "@/server/services/outbox";
 import { recordAudit } from "@/server/services/audit";
@@ -59,9 +59,9 @@ export type RaiseResult = {
 /**
  * Opens an exception, or returns the one already open for this problem.
  *
- * The unique index on `dedupeKey` is the actual guarantee — the lookup
- * before it is only an optimisation, and the `P2002` catch is what makes
- * two scanners racing on the same shipment harmless.
+ * The unique index on `(orgId, dedupeKey)` is the actual guarantee — the
+ * lookup before it is only an optimisation, and the `P2002` catch is what
+ * makes two scanners racing on the same shipment harmless.
  */
 export async function raiseException(
   input: RaiseInput,
@@ -69,7 +69,9 @@ export async function raiseException(
   const dedupeKey = input.dedupeKey ?? null;
 
   if (dedupeKey) {
-    const existing = await prisma.exception.findUnique({
+    // A dedupe key is only unique within a tenant now, so the lookup is a
+    // `findFirst` the extension scopes rather than a `findUnique`.
+    const existing = await prisma.exception.findFirst({
       where: { dedupeKey },
     });
     if (existing) return { exception: existing, created: false };
@@ -99,7 +101,7 @@ export async function raiseException(
   };
 
   try {
-    const exception = await prisma.$transaction(async (tx) => {
+    const exception = await tenantTransaction(async (tx) => {
       // Numbered inside the transaction so an exception that fails to
       // write does not burn a number out of the series.
       const number = await nextNumber({ document: "EXCEPTION" }, tx);
@@ -110,6 +112,7 @@ export async function raiseException(
 
       await tx.exceptionAction.create({
         data: {
+          orgId: created.orgId,
           exceptionId: created.id,
           action: "OPENED",
           note: `${kindLabel(input.kind)} detected by ${def?.detectedBy ?? input.source ?? "the system"}.`,
@@ -141,7 +144,7 @@ export async function raiseException(
     // Another pass won the race on the unique dedupe key. That is the
     // index doing its job, not a failure.
     if (isUniqueViolation(error) && dedupeKey) {
-      const existing = await prisma.exception.findUnique({
+      const existing = await prisma.exception.findFirst({
         where: { dedupeKey },
       });
       if (existing) return { exception: existing, created: false };
@@ -178,6 +181,7 @@ export async function addExceptionNote(
 
   await prisma.exceptionAction.create({
     data: {
+      orgId: actor.orgId,
       exceptionId,
       action: "NOTE",
       note: trimmed,
@@ -210,8 +214,8 @@ export async function assignException(
     return { ok: false, error: "That user no longer exists." };
   }
 
-  await prisma.$transaction([
-    prisma.exception.update({
+  await tenantTransaction(async (tx) => {
+    await tx.exception.update({
       where: { id: exceptionId },
       data: {
         assignedToId: assignee?.id ?? null,
@@ -219,16 +223,18 @@ export async function assignException(
         status: assignee ? "ACKNOWLEDGED" : "OPEN",
         acknowledgedAt: assignee ? new Date() : null,
       },
-    }),
-    prisma.exceptionAction.create({
+    });
+
+    await tx.exceptionAction.create({
       data: {
+        orgId: actor.orgId,
         exceptionId,
         action: assignee ? "ASSIGNED" : "UNASSIGNED",
         note: assignee ? `Assigned to ${assignee.name}.` : "Owner removed.",
         userId: actor.id,
       },
-    }),
-  ]);
+    });
+  });
 
   await recordAudit({
     user: actor,
@@ -325,17 +331,19 @@ export async function transitionException(
 
   if (closing) data.closedAt = now;
 
-  await prisma.$transaction([
-    prisma.exception.update({ where: { id: input.exceptionId }, data }),
-    prisma.exceptionAction.create({
+  await tenantTransaction(async (tx) => {
+    await tx.exception.update({ where: { id: input.exceptionId }, data });
+
+    await tx.exceptionAction.create({
       data: {
+        orgId: actor.orgId,
         exceptionId: input.exceptionId,
         action: input.to,
         note: note || null,
         userId: actor.id,
       },
-    }),
-  ]);
+    });
+  });
 
   if (settled || closing) {
     await enqueueOutbox({

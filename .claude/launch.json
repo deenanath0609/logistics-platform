@@ -4,9 +4,9 @@
     {
       "name": "logistics-dev",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": ["run", "dev:3010"],
       "port": 3010,
-      "autoPort": true
+      "url": "http://city-logistics.localhost:3010"
     }
   ]
 }

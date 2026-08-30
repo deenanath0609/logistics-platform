@@ -164,25 +164,34 @@ export const TRANSITIONS: TransitionRule[] = [
     permission: "trip.dispatch",
     describe: "Dispatched",
   },
+  // The three the tracking pipeline writes. A crossing detected from GPS
+  // carries `source: "GPS"` and is not permission-checked at all, so the
+  // code below only ever governs a *human* posting one of these by hand —
+  // which is a movement recorded against every consignment on the trip,
+  // not a look at a map. `tracking.read` was the wrong measure of that: it
+  // is in `allReads`, so MANAGEMENT ("read-only visibility of the whole
+  // network") and CUSTOMER_SUPPORT both held it and could advance custody.
+  // `trip.dispatch` is what the equivalent typed events — GATE_IN and
+  // GATE_OUT — have always required.
   {
     event: "GEOFENCE_EXIT",
     from: ["DISPATCHED"],
     to: "IN_TRANSIT",
-    permission: "tracking.read",
+    permission: "trip.dispatch",
     describe: "In transit",
   },
   {
     event: "IN_TRANSIT_PING",
     from: ["DISPATCHED", "IN_TRANSIT"],
     to: "IN_TRANSIT",
-    permission: "tracking.read",
+    permission: "trip.dispatch",
     describe: "In transit",
   },
   {
     event: "GEOFENCE_ENTER",
     from: ["IN_TRANSIT", "DISPATCHED"],
     to: "ARRIVED_AT_HUB",
-    permission: "tracking.read",
+    permission: "trip.dispatch",
     describe: "Arrived",
   },
   {

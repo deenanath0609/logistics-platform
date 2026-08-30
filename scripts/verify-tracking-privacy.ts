@@ -2,7 +2,7 @@
  * Fetches a real shipment's PUBLIC tracking page as an anonymous visitor
  * and asserts that nothing internal reaches the HTML.
  *
- *   npx tsx scripts/verify-tracking-privacy.ts [baseUrl]
+ *   npx tsx scripts/verify-tracking-privacy.ts [tenant-subdomain] [baseUrl]
  *
  * The unit tests assert this against the projection function. This asserts
  * it against the rendered page, which is what an actual competitor or
@@ -10,9 +10,15 @@
  * breadcrumb, or a debug attribute without the projection ever changing.
  */
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma";
-
-const BASE = process.argv[2] ?? "http://localhost:3010";
+import { basePrisma, prisma } from "../src/lib/prisma";
+import { getEnv } from "../src/lib/env";
+import {
+  runWithTenant,
+  tenantContextFor,
+  tenantOrigin,
+  type ResolvedOrg,
+  type TenantContext,
+} from "../src/lib/tenant";
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = "") => {
@@ -20,9 +26,64 @@ const check = (label: string, ok: boolean, detail = "") => {
   console.log(`  [${ok ? "PASS" : "FAIL"}] ${label}${detail ? ` — ${detail}` : ""}`);
 };
 
-async function main() {
-  console.log(`\nPublic tracking privacy — ${BASE}\n`);
+/**
+ * The organisation this run acts as.
+ *
+ * There is no request here and so no `Host` header, which means every
+ * tenant-scoped query would be refused until one is named. Naming it on the
+ * command line rather than reading an environment variable keeps the choice
+ * in the shell history of whoever ran the script, next to the results.
+ *
+ * `findFirstOrThrow` on `basePrisma`: `Organization` is the tenant list
+ * itself, one of the two tables ADR 001 keeps global.
+ */
+async function actingTenant(): Promise<{ org: ResolvedOrg; tenant: TenantContext }> {
+  const subdomain = process.argv[2] ?? "city-logistics";
 
+  const org = await basePrisma.organization.findFirstOrThrow({
+    where: { subdomain },
+    select: {
+      id: true,
+      slug: true,
+      subdomain: true,
+      customDomain: true,
+      status: true,
+    },
+  });
+
+  const tenant = tenantContextFor(org, "job");
+  if (!tenant) {
+    throw new Error(`Organisation "${subdomain}" is closed; refusing to run against it.`);
+  }
+  return { org, tenant };
+}
+
+/**
+ * Which host to fetch the tracking page from.
+ *
+ * The page resolves its own tenant from the `Host` header, so pointing this
+ * at the bare development host while reading another carrier's shipment
+ * would compare one company's LR against another company's page — and a
+ * page that simply does not know the LR leaks nothing, so the run would
+ * pass while proving nothing at all. So the base URL is always the tenant's
+ * own origin, in development as in production — the bare platform domain
+ * belongs to the operator console and serves no carrier at all.
+ */
+function baseUrlFor(org: ResolvedOrg): string {
+  const override = process.argv[3];
+  if (override) return override;
+
+  const env = getEnv();
+  const app = new URL(env.APP_URL);
+  return tenantOrigin(
+    org,
+    env.APP_ROOT_DOMAIN,
+    app.protocol.replace(":", ""),
+    app.port || undefined,
+  );
+}
+
+async function run(BASE: string) {
   const shipment = await prisma.shipment.findFirst({
     where: { deletedAt: null },
     orderBy: { bookedAt: "desc" },
@@ -129,6 +190,17 @@ async function main() {
 
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function main() {
+  const { org, tenant } = await actingTenant();
+  const base = baseUrlFor(org);
+
+  console.log(
+    `\nPublic tracking privacy — ${base} · acting as ${tenant.slug} (${tenant.subdomain})\n`,
+  );
+
+  await runWithTenant(tenant, () => run(base));
 }
 
 main().catch(async (error) => {

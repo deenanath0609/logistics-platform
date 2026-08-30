@@ -1,5 +1,8 @@
 import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
+import { requireTenantOrgId } from "@/lib/tenant";
+import { getEnv } from "@/lib/env";
+import { clientIpFrom } from "@/lib/net/client-ip";
 import type { AuditAction } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 
@@ -51,9 +54,21 @@ export async function recordAudit(input: AuditInput): Promise<void> {
   try {
     const headerList = await headers();
 
+    // Only an address a configured trusted proxy vouched for reaches this
+    // table. Reading the leftmost `X-Forwarded-For` entry, which is what
+    // used to happen here, let the actor of an audited action nominate the
+    // address recorded against it — a trail that can be written to by the
+    // person it is about is worse than one with a blank column.
+    const ip = clientIpFrom(headerList, getEnv().TRUSTED_PROXY_HOPS);
+
+    // `user` is null for the things that happen before anyone is signed in —
+    // a failed login, an OTP request — and those still belong to the tenant
+    // whose host the request arrived on.
+    const orgId = input.user?.orgId ?? (await requireTenantOrgId());
+
     await prisma.auditLog.create({
       data: {
-        orgId: input.user?.orgId,
+        orgId,
         userId: input.user?.id,
         action: input.action,
         entity: input.entity,
@@ -63,10 +78,7 @@ export async function recordAudit(input: AuditInput): Promise<void> {
         before: (sanitise(input.before) ?? undefined) as never,
         after: (sanitise(input.after) ?? undefined) as never,
         reason: input.reason,
-        ipAddress:
-          headerList.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-          headerList.get("x-real-ip") ??
-          undefined,
+        ipAddress: (ip.trusted ? ip.value : null) ?? undefined,
         userAgent: headerList.get("user-agent") ?? undefined,
       },
     });

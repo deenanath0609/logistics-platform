@@ -1,7 +1,7 @@
 /**
  * Walks a real shipment through its whole life against the real database.
  *
- *   npx tsx scripts/verify-spine.ts
+ *   npx tsx scripts/verify-spine.ts [tenant-subdomain]
  *
  * This is the check that matters for Phase 2: it proves status is a
  * projection of the event log, that a failed delivery attempt behaves
@@ -13,7 +13,13 @@
  * design, so tidying up would mean defeating the guarantee under test.
  */
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma";
+import { basePrisma, prisma } from "../src/lib/prisma";
+import {
+  currentOrgId,
+  runWithTenant,
+  tenantContextFor,
+  type TenantContext,
+} from "../src/lib/tenant";
 import type { SessionUser } from "../src/lib/auth/session";
 import { createBooking } from "../src/lib/shipment/booking";
 import { appendShipmentEvent, replayStatus } from "../src/lib/shipment/events";
@@ -27,8 +33,43 @@ function check(label: string, ok: boolean, detail = "") {
   console.log(`  [${ok ? "PASS" : "FAIL"}] ${label}${detail ? ` — ${detail}` : ""}`);
 }
 
+/**
+ * The organisation this run acts as.
+ *
+ * There is no request here and so no `Host` header, which means every
+ * tenant-scoped query would be refused until one is named. Naming it on the
+ * command line rather than reading an environment variable keeps the choice
+ * in the shell history of whoever ran the script, next to the results.
+ *
+ * `findFirstOrThrow` on `basePrisma`: `Organization` is the tenant list
+ * itself, one of the two tables ADR 001 keeps global.
+ */
+async function actingTenant(): Promise<TenantContext> {
+  const subdomain = process.argv[2] ?? "city-logistics";
+
+  const org = await basePrisma.organization.findFirstOrThrow({
+    where: { subdomain },
+    select: {
+      id: true,
+      slug: true,
+      subdomain: true,
+      customDomain: true,
+      status: true,
+    },
+  });
+
+  const tenant = tenantContextFor(org, "job");
+  if (!tenant) {
+    throw new Error(`Organisation "${subdomain}" is closed; refusing to run against it.`);
+  }
+  return tenant;
+}
+
 async function loadActor(mobile: string): Promise<SessionUser> {
-  const user = await prisma.user.findUniqueOrThrow({
+  // A mobile number is unique per tenant, not per platform, so the fixture
+  // is resolved by the tenant filter plus the number rather than by the
+  // number alone.
+  const user = await prisma.user.findFirstOrThrow({
     where: { mobile },
     include: {
       primaryBranch: { select: { id: true, code: true, name: true } },
@@ -67,9 +108,7 @@ async function loadActor(mobile: string): Promise<SessionUser> {
   };
 }
 
-async function main() {
-  console.log("\nShipment spine — end to end\n");
-
+async function run() {
   const admin = await loadActor("9999999999");
 
   const [origin, hub, service, packageType, reasons] = await Promise.all([
@@ -133,9 +172,19 @@ async function main() {
   }
 
   check("booking succeeds", true, booking.lrNumber);
+  // The prefix is the carrier's own, not the platform's — every tenant
+  // issues consignment notes under its own letters, so this reads it from
+  // the organisation rather than hard-coding ours.
+  const lrPrefix = (
+    await basePrisma.organization.findUniqueOrThrow({
+      where: { id: currentOrgId() },
+      select: { lrPrefix: true },
+    })
+  ).lrPrefix;
+
   check(
     "LR number matches the configured pattern",
-    /^CL\d{12}$/.test(booking.lrNumber),
+    new RegExp(`^${lrPrefix}\\d{12}$`).test(booking.lrNumber),
     booking.lrNumber,
   );
   check("one barcode per package", booking.barcodes.length === 3, booking.barcodes.join(", "));
@@ -475,6 +524,14 @@ async function main() {
 
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function main() {
+  const tenant = await actingTenant();
+  console.log(
+    `\nShipment spine — end to end · acting as ${tenant.slug} (${tenant.subdomain})\n`,
+  );
+  await runWithTenant(tenant, run);
 }
 
 main().catch(async (error) => {

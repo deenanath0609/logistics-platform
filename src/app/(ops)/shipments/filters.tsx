@@ -4,6 +4,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { SHIPMENT_MODES, SHIPMENT_MODE_SHORT } from "@/lib/shipment/modes";
 
 export function ShipmentFilters({
   groups,
@@ -61,9 +62,11 @@ export function ShipmentFilters({
         className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
       >
         <option value="">All modes</option>
-        <option value="FTL">FTL</option>
-        <option value="PTL">PTL</option>
-        <option value="COURIER">Courier</option>
+        {SHIPMENT_MODES.map((mode) => (
+          <option key={mode} value={mode}>
+            {SHIPMENT_MODE_SHORT[mode]}
+          </option>
+        ))}
       </select>
 
       {filtered && (

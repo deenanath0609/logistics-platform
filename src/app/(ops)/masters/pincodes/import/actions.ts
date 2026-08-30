@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { prisma } from "@/lib/prisma";
+import { prisma, tenantTransaction } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
 import {
@@ -105,11 +105,16 @@ export async function commitImport(
     for (let i = 0; i < usable.length; i += CHUNK) {
       const chunk = usable.slice(i, i + CHUNK);
 
-      await prisma.$transaction(
-        chunk.map((row) =>
-          prisma.pincode.upsert({
-            where: { code: row.code },
+      // Awaited in sequence rather than batched, so that two rows for the
+      // same PIN in one file settle in the order the file listed them.
+      await tenantTransaction(async (tx) => {
+        for (const row of chunk) {
+          await tx.pincode.upsert({
+            // The compound key: an upsert needs a genuinely unique `where`,
+            // and a PIN is only unique within a carrier's own geography now.
+            where: { orgId_code: { orgId: actor.orgId, code: row.code } },
             create: {
+              orgId: actor.orgId,
               code: row.code,
               cityId: row.cityId!,
               areaName: row.area,
@@ -124,9 +129,9 @@ export async function commitImport(
               isServiceable: row.serviceable,
               isOda: row.oda,
             },
-          }),
-        ),
-      );
+          });
+        }
+      });
 
       created += chunk.filter((r) => r.status === "NEW").length;
       updated += chunk.filter((r) => r.status === "UPDATE").length;

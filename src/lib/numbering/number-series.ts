@@ -1,4 +1,5 @@
-import { prisma } from "@/lib/prisma";
+import { prisma, type Db } from "@/lib/prisma";
+import { TenantContextError, resolveTenant } from "@/lib/tenant";
 import type { SeriesDocument, SeriesReset } from "@/generated/prisma/client";
 
 /**
@@ -85,46 +86,92 @@ export type NextNumberOptions = {
  */
 export async function nextNumber(
   options: NextNumberOptions,
-  client: Pick<
-    typeof prisma,
-    "$queryRaw" | "$executeRaw" | "numberSeries"
-  > = prisma,
+  // Narrower than `DbOrTx`: the lock and the counter are all this touches.
+  client: Pick<Db, "$executeRaw" | "numberSeries"> = prisma,
 ): Promise<string> {
   const at = options.at ?? new Date();
   const branchId = options.branchId ?? null;
 
-  // Serialise everyone competing for this counter.
-  //
-  // $executeRaw, not $queryRaw: pg_advisory_xact_lock returns void, and the
-  // driver adapter cannot deserialise a void column.
-  const lockKey = `number-series:${options.document}:${branchId ?? "network"}`;
-  await client.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+  // The lock has to name the row it protects, and since multi-tenancy that
+  // row belongs to one organisation — the `findFirst` below is filtered to
+  // it by the tenant extension. An org-less key is wider than the thing it
+  // guards: every carrier booking against a network-wide series would queue
+  // on the same lock, so one carrier's busy morning would throttle
+  // everybody else's for no benefit, since the counters were never shared.
+  // Nothing about that is visible from outside — the numbers stay correct
+  // and only the throughput quietly is not.
+  const tenant = await resolveTenant();
+  if (!tenant) {
+    throw new TenantContextError(
+      "nextNumber() ran with no tenant context; the counter lock cannot be " +
+        "scoped to an organisation. Wrap the job in runWithTenant().",
+    );
+  }
 
-  const series = await client.numberSeries.findFirst({
-    where: { document: options.document, branchId, isActive: true },
+  // Which series applies, before taking the lock — because the lock has to
+  // name the row it protects, and that row is not knowable from the request
+  // alone.
+  //
+  // A branch may have its own counter; most do not. Asking for
+  // `branchId: <branch>` exactly, and failing when only the network-wide row
+  // exists, is what stopped delivery runs being created at all on a default
+  // tenant: the seed writes network-wide series, `createDeliveryRun` is the
+  // one caller that passes a branch, and every attempt threw. The whole
+  // last-mile module had no rows because of this line.
+  const candidates = await client.numberSeries.findMany({
+    where: {
+      document: options.document,
+      isActive: true,
+      OR: [{ branchId }, { branchId: null }],
+    },
   });
+
+  // A branch's own counter wins where it exists; otherwise the network one.
+  const series =
+    candidates.find((row) => branchId !== null && row.branchId === branchId) ??
+    candidates.find((row) => row.branchId === null) ??
+    null;
 
   if (!series) {
     throw new Error(
       `No active number series configured for ${options.document}` +
-        (branchId ? ` at branch ${branchId}` : ""),
+        (branchId ? ` at branch ${branchId}, and none network-wide` : ""),
     );
   }
 
-  const periodKey = periodKeyFor(series.resetPolicy, at);
-  const rolledOver = series.periodKey !== periodKey;
-  const sequence = rolledOver ? 1 : series.currentValue + 1;
+  // $executeRaw, not $queryRaw: pg_advisory_xact_lock returns void, and the
+  // driver adapter cannot deserialise a void column.
+  //
+  // Keyed on the series actually chosen, not on the branch asked for. Two
+  // branches that both fall back to the network counter must queue on the
+  // same lock — keying it on the branch would give them different locks over
+  // one row, which is the race this lock exists to prevent.
+  const lockKey = `number-series:${tenant.orgId}:${series.id}`;
+  await client.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+
+  // Re-read under the lock: the row above was read without it, and another
+  // transaction may have consumed a number in between.
+  const locked = await client.numberSeries.findFirst({ where: { id: series.id } });
+  if (!locked) {
+    throw new Error(
+      `The ${options.document} number series was removed while a number was being issued.`,
+    );
+  }
+
+  const periodKey = periodKeyFor(locked.resetPolicy, at);
+  const rolledOver = locked.periodKey !== periodKey;
+  const sequence = rolledOver ? 1 : locked.currentValue + 1;
 
   await client.numberSeries.update({
-    where: { id: series.id },
+    where: { id: locked.id },
     data: { currentValue: sequence, periodKey },
   });
 
-  return renderPattern(series.pattern, {
-    prefix: series.prefix,
+  return renderPattern(locked.pattern, {
+    prefix: locked.prefix,
     branchCode: options.branchCode,
     sequence,
-    padding: series.padding,
+    padding: locked.padding,
     at,
   });
 }

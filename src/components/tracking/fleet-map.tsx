@@ -51,10 +51,12 @@ export function FleetMap({
   fleet,
   canReplay,
   canRecordManual,
+  canRecordMovement,
 }: {
   fleet: LiveFleet;
   canReplay: boolean;
   canRecordManual: boolean;
+  canRecordMovement: boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
@@ -338,6 +340,7 @@ export function FleetMap({
           branches={fleet.branches}
           canReplay={canReplay}
           canRecordManual={canRecordManual}
+          canRecordMovement={canRecordMovement}
         />
       </div>
     </div>
@@ -531,12 +534,14 @@ function VehiclePanel({
   branches,
   canReplay,
   canRecordManual,
+  canRecordMovement,
 }: {
   vehicle: FleetVehicle | null;
   asOf: string;
   branches: BranchOption[];
   canReplay: boolean;
   canRecordManual: boolean;
+  canRecordMovement: boolean;
 }) {
   if (!vehicle) {
     return (
@@ -750,6 +755,7 @@ function VehiclePanel({
             }
             branches={branches}
             hasDevice={vehicle.hasDevice}
+            canRecordMovement={canRecordMovement}
           />
         )}
       </div>

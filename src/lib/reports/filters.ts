@@ -1,6 +1,7 @@
 import type { ShipmentMode } from "@/generated/prisma/client";
 import { IST_OFFSET_MINUTES, fromLocal, toLocal } from "@/lib/sla/policy";
 import type { FilterKey, ReportFilters } from "./types";
+import { SHIPMENT_MODES } from "@/lib/shipment/modes";
 
 /**
  * Report filters, parsed from and rendered back to the query string.
@@ -20,7 +21,9 @@ export const DEFAULT_RANGE_DAYS = 30;
 /** A hard ceiling. A five-year range is a mistake, not a request. */
 export const MAX_RANGE_DAYS = 400;
 
-const MODES: ShipmentMode[] = ["FTL", "PTL", "COURIER"];
+// From the single list, so a new mode is filterable in reports the day
+// it is bookable rather than the day somebody notices.
+const MODES: readonly ShipmentMode[] = SHIPMENT_MODES;
 
 export type RawParams = Record<string, string | string[] | undefined>;
 
