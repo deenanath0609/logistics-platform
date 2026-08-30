@@ -69,10 +69,19 @@ export const START_WORKER_ADVICE = [
 export async function stalePendingEvents(
   staleAfterMs = STALE_AFTER_MS,
 ): Promise<number> {
+  // The callback is `async` and the `await` is inside it, and both matter.
+  // A Prisma promise is lazy: building the call does not run the query, and
+  // `runCrossTenant` only holds the AsyncLocalStorage scope for as long as
+  // the callback is on the stack. Returning the unawaited promise handed it
+  // back to a caller who then awaited it outside the scope — so the
+  // extension saw no cross-tenant declaration, threw, and the watchdog
+  // caught its own error every minute and reported nothing for the life of
+  // the process. Awaiting here keeps the query inside the scope that
+  // authorises it.
   return runCrossTenant(
     "worker watchdog: is anything draining the outbox at all?",
-    () =>
-      prisma.outboxEvent.count({
+    async () =>
+      await prisma.outboxEvent.count({
         where: {
           status: { in: ["PENDING", "PROCESSING"] },
           createdAt: { lt: new Date(Date.now() - staleAfterMs) },
