@@ -125,8 +125,8 @@ export async function seedNetwork(orgId: string) {
   const stateIds = new Map<string, string>();
   for (const s of STATES) {
     const row = await db.state.upsert({
-      where: { code: s.code },
-      create: s,
+      where: { orgId_code: { orgId, code: s.code } },
+      create: { ...s, orgId },
       update: { name: s.name, gstCode: s.gstCode },
     });
     stateIds.set(s.code, row.id);
@@ -137,8 +137,9 @@ export async function seedNetwork(orgId: string) {
   const cityIds = new Map<string, string>();
   for (const c of CITIES) {
     const row = await db.city.upsert({
-      where: { code: c.code },
+      where: { orgId_code: { orgId, code: c.code } },
       create: {
+        orgId,
         code: c.code,
         name: c.name,
         stateId: stateIds.get(c.state)!,
@@ -192,8 +193,9 @@ export async function seedNetwork(orgId: string) {
   step("pincodes");
   for (const p of PINCODES) {
     await db.pincode.upsert({
-      where: { code: p.code },
+      where: { orgId_code: { orgId, code: p.code } },
       create: {
+        orgId,
         code: p.code,
         cityId: cityIds.get(p.city)!,
         areaName: p.area,
@@ -212,18 +214,18 @@ export async function seedNetwork(orgId: string) {
   step("zones");
   for (const z of ZONES) {
     const zone = await db.zone.upsert({
-      where: { code: z.code },
-      create: { code: z.code, name: z.name },
+      where: { orgId_code: { orgId, code: z.code } },
+      create: { orgId, code: z.code, name: z.name },
       update: { name: z.name },
     });
 
     const pins = await db.pincode.findMany({
-      where: { city: { code: { in: z.cities } } },
+      where: { orgId, city: { code: { in: z.cities } } },
       select: { id: true },
     });
 
     await db.zonePincode.createMany({
-      data: pins.map((p) => ({ zoneId: zone.id, pincodeId: p.id })),
+      data: pins.map((p) => ({ orgId, zoneId: zone.id, pincodeId: p.id })),
       skipDuplicates: true,
     });
   }
@@ -232,8 +234,9 @@ export async function seedNetwork(orgId: string) {
   step("routes");
   for (const r of ROUTES) {
     const route = await db.route.upsert({
-      where: { code: r.code },
+      where: { orgId_code: { orgId, code: r.code } },
       create: {
+        orgId,
         code: r.code,
         name: r.name,
         originBranchId: branchIds.get(r.legs[0].from),
@@ -247,6 +250,7 @@ export async function seedNetwork(orgId: string) {
     await db.routeLeg.deleteMany({ where: { routeId: route.id } });
     await db.routeLeg.createMany({
       data: r.legs.map((leg, i) => ({
+        orgId,
         routeId: route.id,
         sequence: i + 1,
         originBranchId: branchIds.get(leg.from)!,
@@ -262,7 +266,7 @@ export async function seedNetwork(orgId: string) {
   let fences = 0;
   for (const b of BRANCHES) {
     const branchId = branchIds.get(b.code)!;
-    const existing = await db.geofence.findFirst({ where: { branchId } });
+    const existing = await db.geofence.findFirst({ where: { orgId, branchId } });
     if (existing) {
       await db.geofence.update({
         where: { id: existing.id },
@@ -271,6 +275,7 @@ export async function seedNetwork(orgId: string) {
     } else {
       await db.geofence.create({
         data: {
+          orgId,
           name: `${b.name} — site`,
           type: "CIRCLE",
           branchId,

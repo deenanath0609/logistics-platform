@@ -99,6 +99,7 @@ model DeliveryTask {
 /// Permanent. One row per visit to the door.
 model DeliveryAttempt {
   id            String         @id @default(cuid())
+  orgId         String
   taskId        String
   shipmentId    String
   attemptNumber Int
@@ -122,12 +123,14 @@ model DeliveryAttempt {
   clockDriftSeconds Int?
   agentId           String?
   /// Client-generated so the offline queue can retry safely.
-  idempotencyKey    String   @unique
+  idempotencyKey    String
 
   task     DeliveryTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   shipment Shipment     @relation(fields: [shipmentId], references: [id])
 
   @@unique([taskId, attemptNumber])
+  @@unique([orgId, idempotencyKey])
+  @@index([orgId])
   @@index([shipmentId, attemptedAt])
   @@map("delivery_attempt")
 }
@@ -136,6 +139,7 @@ model DeliveryAttempt {
 /// delays the PDF, never the delivery confirmation.
 model Pod {
   id         String @id @default(cuid())
+  orgId      String
   taskId     String @unique
   shipmentId String @unique
 
@@ -163,6 +167,7 @@ model Pod {
   shipment Shipment     @relation(fields: [shipmentId], references: [id])
   assets   PodAsset[]
 
+  @@index([orgId])
   @@index([deliveredAt])
   @@map("pod")
 }
@@ -176,6 +181,7 @@ enum PodAssetKind {
 
 model PodAsset {
   id          String       @id @default(cuid())
+  orgId       String
   podId       String
   kind        PodAssetKind
   fileAssetId String
@@ -184,6 +190,7 @@ model PodAsset {
 
   pod Pod @relation(fields: [podId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([podId])
   @@map("pod_asset")
 }
@@ -209,6 +216,7 @@ enum CodState {
 
 model CodCollection {
   id         String  @id @default(cuid())
+  orgId      String
   shipmentId String  @unique
   taskId     String?
   branchId   String
@@ -234,6 +242,7 @@ model CodCollection {
   deposit    CodDeposit?    @relation(fields: [depositId], references: [id])
   remittance CodRemittance? @relation(fields: [remittanceId], references: [id])
 
+  @@index([orgId])
   @@index([branchId, state])
   @@index([agentId, collectedAt])
   @@map("cod_collection")
@@ -248,6 +257,7 @@ enum DepositStatus {
 /// Day-end handover from an agent to the branch.
 model CodDeposit {
   id       String        @id @default(cuid())
+  orgId    String
   branchId String
   agentId  String
   status   DepositStatus @default(PENDING)
@@ -270,6 +280,7 @@ model CodDeposit {
   branch      Branch          @relation(fields: [branchId], references: [id])
   collections CodCollection[]
 
+  @@index([orgId])
   @@index([branchId, depositDate])
   @@index([agentId, depositDate])
   @@map("cod_deposit")
@@ -284,6 +295,7 @@ enum RemittanceStatus {
 /// Paying the customer what was collected on their behalf.
 model CodRemittance {
   id         String           @id @default(cuid())
+  orgId      String
   customerId String
   status     RemittanceStatus @default(DRAFT)
 
@@ -304,6 +316,7 @@ model CodRemittance {
   customer    Customer        @relation(fields: [customerId], references: [id])
   collections CodCollection[]
 
+  @@index([orgId])
   @@index([customerId, status])
   @@map("cod_remittance")
 }

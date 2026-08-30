@@ -164,7 +164,10 @@ const REASONS: Record<ReasonCategory, ReasonSeed[]> = {
 };
 
 const NUMBER_SERIES = [
-  { document: "LR" as const, pattern: "{PREFIX}{YYYY}{MM}{DD}{SEQ}", prefix: "CL", padding: 4, reset: "DAILY" as const },
+  // `prefix` is filled in from the organisation below: a consignment note
+  // number is printed on the carrier's own paperwork, so it must carry the
+  // carrier's letters and not ours.
+  { document: "LR" as const, pattern: "{PREFIX}{YYYY}{MM}{DD}{SEQ}", prefix: "", padding: 4, reset: "DAILY" as const },
   { document: "MANIFEST" as const, pattern: "M{SEQ}", prefix: "M", padding: 6, reset: "NEVER" as const },
   { document: "TRIP" as const, pattern: "TRIP-{YYYY}-{SEQ}", prefix: "TRIP", padding: 5, reset: "FINANCIAL_YEAR" as const },
   { document: "PICKUP" as const, pattern: "PU{YY}{MM}{DD}{SEQ}", prefix: "PU", padding: 4, reset: "DAILY" as const },
@@ -178,8 +181,8 @@ export async function seedMasters(orgId: string) {
   step("service types");
   for (const s of SERVICE_TYPES) {
     await db.serviceType.upsert({
-      where: { code: s.code },
-      create: s,
+      where: { orgId_code: { orgId, code: s.code } },
+      create: { ...s, orgId },
       update: s,
     });
   }
@@ -188,8 +191,8 @@ export async function seedMasters(orgId: string) {
   step("package types");
   for (const [i, pkg] of PACKAGE_TYPES.entries()) {
     await db.packageType.upsert({
-      where: { code: pkg.code },
-      create: { ...pkg, sortOrder: i * 10 },
+      where: { orgId_code: { orgId, code: pkg.code } },
+      create: { ...pkg, orgId, sortOrder: i * 10 },
       update: { ...pkg, sortOrder: i * 10 },
     });
   }
@@ -200,8 +203,8 @@ export async function seedMasters(orgId: string) {
   const effectiveFrom = new Date("2024-04-01");
   for (const t of TAX_RATES) {
     const row = await db.taxRate.upsert({
-      where: { code: t.code },
-      create: { ...t, effectiveFrom },
+      where: { orgId_code: { orgId, code: t.code } },
+      create: { ...t, orgId, effectiveFrom },
       update: { name: t.name, ratePercent: t.ratePercent, isReverseCharge: t.isReverseCharge },
     });
     taxIds.set(t.code, row.id);
@@ -211,8 +214,9 @@ export async function seedMasters(orgId: string) {
   step("charge types");
   for (const c of CHARGE_TYPES) {
     await db.chargeType.upsert({
-      where: { code: c.code },
+      where: { orgId_code: { orgId, code: c.code } },
       create: {
+        orgId,
         code: c.code,
         name: c.name,
         nature: c.nature,
@@ -248,8 +252,8 @@ export async function seedMasters(orgId: string) {
         sortOrder: i * 10,
       };
       await db.reasonCode.upsert({
-        where: { category_code: { category, code: r.code } },
-        create: { category, code: r.code, ...data },
+        where: { orgId_category_code: { orgId, category, code: r.code } },
+        create: { orgId, category, code: r.code, ...data },
         update: data,
       });
       reasonCount++;
@@ -258,6 +262,15 @@ export async function seedMasters(orgId: string) {
   done(reasonCount);
 
   step("number series");
+
+  // The LR prefix belongs to the carrier, not to the platform. Read once
+  // here rather than passed in, so a caller cannot seed one tenant's series
+  // with another's letters.
+  const org = await db.organization.findUniqueOrThrow({
+    where: { id: orgId },
+    select: { lrPrefix: true },
+  });
+
   for (const n of NUMBER_SERIES) {
     // Not an upsert: branchId is null on these network-wide series, and a
     // compound unique containing a null cannot be used as a `where` target.
@@ -267,7 +280,7 @@ export async function seedMasters(orgId: string) {
 
     const data = {
       pattern: n.pattern,
-      prefix: n.prefix,
+      prefix: n.document === "LR" ? org.lrPrefix : n.prefix,
       padding: n.padding,
       resetPolicy: n.reset,
     };

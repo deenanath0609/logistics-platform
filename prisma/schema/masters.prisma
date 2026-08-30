@@ -10,6 +10,12 @@ enum ShipmentMode {
   FTL
   PTL
   COURIER
+  /// E-commerce last mile. Kept as a mode of its own rather than folded
+  /// into COURIER because the process differs where it matters: COD on
+  /// most consignments, RTO and reverse pickup as ordinary outcomes rather
+  /// than exceptions, and a seller who manifests in bulk instead of
+  /// booking one at a time.
+  ECOMMERCE
 }
 
 /// A sellable service, e.g. "Road Express PTL" or "Surface FTL".

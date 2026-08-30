@@ -32,9 +32,10 @@ model TrackingProviderConfig {
   @@map("tracking_provider_config")
 }
 
-// The four models below each carry their own `orgId`. None of them
-// declares a relation to a tenant-owned model, so there is nothing for
-// them to inherit isolation through.
+// Every model below carries its own `orgId`. Telematics rows arrive from
+// a provider keyed by device, not by anything of ours, so most have no
+// relation to inherit isolation through — and GeofenceEvent, which does,
+// is written before the fence has been resolved.
 
 /// Raw positions. High volume, low value after a few months — retained
 /// hot for 90 days then downsampled.
@@ -99,6 +100,10 @@ enum GeofenceDirection {
 
 model GeofenceEvent {
   id           String            @id @default(cuid())
+  /// The only declared relation here is the fence; vehicleId and tripId are
+  /// bare columns, and the ingest path writes this from a provider payload
+  /// before any of them has been resolved.
+  orgId        String
   geofenceId   String
   vehicleId    String
   tripId       String?
@@ -114,6 +119,7 @@ model GeofenceEvent {
 
   geofence Geofence @relation(fields: [geofenceId], references: [id])
 
+  @@index([orgId])
   @@index([vehicleId, occurredAt])
   @@index([geofenceId, occurredAt])
   @@map("geofence_event")

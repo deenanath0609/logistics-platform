@@ -135,6 +135,7 @@ model Complaint {
 
 model ComplaintMessage {
   id          String @id @default(cuid())
+  orgId       String
   complaintId String
   body        String
 
@@ -152,6 +153,7 @@ model ComplaintMessage {
   authorUser         User?         @relation("ComplaintAuthor", fields: [authorUserId], references: [id])
   authorCustomerUser CustomerUser? @relation(fields: [authorCustomerUserId], references: [id])
 
+  @@index([orgId])
   @@index([complaintId, createdAt])
   @@map("complaint_message")
 }

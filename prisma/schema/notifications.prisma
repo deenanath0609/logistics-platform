@@ -172,6 +172,10 @@ enum WebhookDeliveryStatus {
 
 model WebhookDelivery {
   id             String                @id @default(cuid())
+  /// The queue is drained per tenant and a single delivery is redriven by
+  /// id straight off an operations screen, so it carries the tenant rather
+  /// than relying on every query remembering to join its subscription.
+  orgId          String
   subscriptionId String
   eventType      String
   payload        Json
@@ -187,6 +191,7 @@ model WebhookDelivery {
 
   subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
+  @@index([orgId, status, nextAttemptAt])
   @@index([status, nextAttemptAt])
   @@index([subscriptionId, createdAt])
   @@map("webhook_delivery")

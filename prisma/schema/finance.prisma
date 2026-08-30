@@ -58,6 +58,10 @@ model Vendor {
 
 model VendorBankAccount {
   id            String   @id @default(cuid())
+  /// Where money actually leaves for. A read that crossed tenants here
+  /// would expose another carrier's payee details, so it is scoped on the
+  /// row and not through the vendor.
+  orgId         String
   vendorId      String
   accountName   String
   accountNumber String
@@ -68,6 +72,7 @@ model VendorBankAccount {
 
   vendor Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([vendorId])
   @@map("vendor_bank_account")
 }
@@ -103,6 +108,7 @@ model RateCard {
 
 model RateCardVersion {
   id            String    @id @default(cuid())
+  orgId         String
   rateCardId    String
   version       Int
   effectiveFrom DateTime  @db.Date
@@ -120,6 +126,7 @@ model RateCardVersion {
   rules    ChargeRule[]
 
   @@unique([rateCardId, version])
+  @@index([orgId])
   @@index([effectiveFrom])
   @@map("rate_card_version")
 }
@@ -137,6 +144,9 @@ enum RateBasis {
 /// src/lib/pricing.
 model RateSlab {
   id        String @id @default(cuid())
+  /// Two hops from a tenant (version → card), and the resolver reaches
+  /// slabs directly by lane rather than walking down from a card.
+  orgId     String
   versionId String
 
   serviceTypeId String?
@@ -166,6 +176,7 @@ model RateSlab {
 
   version RateCardVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([versionId])
   @@index([serviceTypeId])
   @@map("rate_slab")
@@ -176,6 +187,7 @@ model RateSlab {
 /// something operations already knows.
 model ChargeRule {
   id            String      @id @default(cuid())
+  orgId         String
   versionId     String
   chargeTypeId  String
   basis         ChargeBasis
@@ -191,6 +203,7 @@ model ChargeRule {
   version    RateCardVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
   chargeType ChargeType      @relation(fields: [chargeTypeId], references: [id])
 
+  @@index([orgId])
   @@index([versionId])
   @@map("charge_rule")
 }
@@ -217,6 +230,7 @@ model FuelSurchargeRule {
 /// be answerable in one click, months later, without re-running anything.
 model FreightCalculation {
   id               String   @id @default(cuid())
+  orgId            String
   shipmentId       String
   versionId        String?
   /// Every rule considered, matched or skipped, and why.
@@ -233,6 +247,7 @@ model FreightCalculation {
 
   shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([shipmentId, createdAt])
   @@map("freight_calculation")
 }
@@ -305,6 +320,7 @@ model Invoice {
 
 model InvoiceLine {
   id           String  @id @default(cuid())
+  orgId        String
   invoiceId    String
   /// Every line traces to the consignment it came from.
   shipmentId   String?
@@ -322,6 +338,7 @@ model InvoiceLine {
   invoice  Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   shipment Shipment? @relation(fields: [shipmentId], references: [id])
 
+  @@index([orgId])
   @@index([invoiceId])
   @@index([shipmentId])
   @@map("invoice_line")
@@ -389,6 +406,7 @@ model Payment {
 
 model PaymentAllocation {
   id        String   @id @default(cuid())
+  orgId     String
   paymentId String
   invoiceId String
   amount    Decimal  @db.Decimal(14, 2)
@@ -398,6 +416,7 @@ model PaymentAllocation {
   invoice Invoice @relation(fields: [invoiceId], references: [id])
 
   @@unique([paymentId, invoiceId])
+  @@index([orgId])
   @@index([invoiceId])
   @@map("payment_allocation")
 }
@@ -408,6 +427,7 @@ model PaymentAllocation {
 
 model VendorRateContract {
   id            String    @id @default(cuid())
+  orgId         String
   vendorId      String
   code          String
   name          String
@@ -420,11 +440,13 @@ model VendorRateContract {
   lines  VendorRateLine[]
 
   @@unique([vendorId, code])
+  @@index([orgId])
   @@map("vendor_rate_contract")
 }
 
 model VendorRateLine {
   id                  String    @id @default(cuid())
+  orgId               String
   contractId          String
   originBranchId      String?
   destinationBranchId String?
@@ -436,6 +458,7 @@ model VendorRateLine {
 
   contract VendorRateContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([contractId])
   @@map("vendor_rate_line")
 }
@@ -491,6 +514,7 @@ model VendorBill {
 
 model VendorBillLine {
   id          String   @id @default(cuid())
+  orgId       String
   billId      String
   tripId      String?
   description String
@@ -501,6 +525,7 @@ model VendorBillLine {
 
   bill VendorBill @relation(fields: [billId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([billId])
   @@map("vendor_bill_line")
 }

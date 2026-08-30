@@ -72,6 +72,7 @@ export async function seedRoles(orgId: string) {
     await db.rolePermission.deleteMany({ where: { roleId: role.id } });
     await db.rolePermission.createMany({
       data: permissionIds.map((permissionId) => ({
+        orgId,
         roleId: role.id,
         permissionId,
       })),

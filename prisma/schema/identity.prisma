@@ -45,6 +45,10 @@ model Organization {
   /// external approval per tenant and is tracked as an onboarding task.
   dltSenderId     String?
   smtpFrom        String?
+  /// The carrier's own WhatsApp Business number, in E.164. Their sender
+  /// identity, like the DLT header — not a credential, so it lives here
+  /// rather than in `TenantCredential`.
+  whatsappNumber  String?
   gstin           String?
   pan             String?
   cin             String?
@@ -243,18 +247,25 @@ model Permission {
 model RolePermission {
   roleId       String
   permissionId String
+  /// Only the role end is tenant-owned — Permission is seeded from code and
+  /// shared by every org — so a grant cannot be derived from both sides.
+  orgId        String
   grantedAt    DateTime @default(now())
 
   role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([roleId, permissionId])
+  @@index([orgId])
   @@map("role_permission")
 }
 
 model UserRole {
   userId     String
   roleId     String
+  /// Who holds which role is the table an escalation would target, so it
+  /// gets a policy of its own rather than trusting both joins.
+  orgId      String
   assignedAt DateTime @default(now())
   assignedBy String?
 
@@ -262,6 +273,7 @@ model UserRole {
   role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([userId, roleId])
+  @@index([orgId])
   @@map("user_role")
 }
 
@@ -270,12 +282,14 @@ model UserRole {
 model UserBranchScope {
   userId    String
   branchId  String
+  orgId     String
   createdAt DateTime @default(now())
 
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@id([userId, branchId])
+  @@index([orgId])
   @@map("user_branch_scope")
 }
 
@@ -332,6 +346,11 @@ model ApiKey {
   createdAt   DateTime  @default(now())
   createdById String?
 
+  // Every request to the partner API looks a key up by its prefix, and a
+  // failed authentication reaches this line before anything else does. With
+  // only `orgId` indexed that was a sequential scan per bogus request —
+  // free denial of service against a live carrier.
+  @@index([keyPrefix])
   @@index([orgId])
   @@map("api_key")
 }

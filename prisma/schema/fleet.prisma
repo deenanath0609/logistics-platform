@@ -112,6 +112,7 @@ enum DocumentKind {
 /// lapsed cannot legally move, so assignment is blocked on it.
 model VehicleDocument {
   id             String       @id @default(cuid())
+  orgId          String
   vehicleId      String
   kind           DocumentKind
   documentNumber String?
@@ -126,6 +127,7 @@ model VehicleDocument {
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([vehicleId, kind])
   @@index([expiresOn])
   @@map("vehicle_document")
@@ -133,6 +135,7 @@ model VehicleDocument {
 
 model VehicleStatusLog {
   id         String         @id @default(cuid())
+  orgId      String
   vehicleId  String
   fromStatus VehicleStatus?
   toStatus   VehicleStatus
@@ -144,12 +147,14 @@ model VehicleStatusLog {
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([vehicleId, createdAt])
   @@map("vehicle_status_log")
 }
 
 model MaintenanceRecord {
   id            String    @id @default(cuid())
+  orgId         String
   vehicleId     String
   description   String
   dueOn         DateTime? @db.Date
@@ -164,6 +169,7 @@ model MaintenanceRecord {
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([vehicleId, completedOn])
   @@map("maintenance_record")
 }
@@ -220,6 +226,7 @@ model Driver {
 
 model DriverDocument {
   id             String       @id @default(cuid())
+  orgId          String
   driverId       String
   kind           DocumentKind
   documentNumber String?
@@ -232,6 +239,7 @@ model DriverDocument {
 
   driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([driverId, kind])
   @@index([expiresOn])
   @@map("driver_document")

@@ -106,12 +106,17 @@ model Zone {
 model ZonePincode {
   zoneId    String
   pincodeId String
+  /// A join table has no natural place to hang a tenant on, but RLS
+  /// cannot write a policy against a table that does not carry the key —
+  /// so it is carried here rather than joined for through either side.
+  orgId     String
   createdAt DateTime @default(now())
 
   zone    Zone    @relation(fields: [zoneId], references: [id], onDelete: Cascade)
   pincode Pincode @relation(fields: [pincodeId], references: [id], onDelete: Cascade)
 
   @@id([zoneId, pincodeId])
+  @@index([orgId])
   @@map("zone_pincode")
 }
 
@@ -212,6 +217,7 @@ model Branch {
 /// Branch-specific non-working days, used by the SLA calendar (P8).
 model BranchHoliday {
   id        String   @id @default(cuid())
+  orgId     String
   branchId  String
   date      DateTime @db.Date
   name      String
@@ -220,6 +226,7 @@ model BranchHoliday {
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@unique([branchId, date])
+  @@index([orgId])
   @@map("branch_holiday")
 }
 
@@ -251,6 +258,7 @@ model Route {
 
 model RouteLeg {
   id                  String   @id @default(cuid())
+  orgId               String
   routeId             String
   sequence            Int
   originBranchId      String
@@ -267,6 +275,7 @@ model RouteLeg {
   destinationBranch Branch @relation("LegDestination", fields: [destinationBranchId], references: [id])
 
   @@unique([routeId, sequence])
+  @@index([orgId])
   @@index([originBranchId, destinationBranchId])
   @@map("route_leg")
 }

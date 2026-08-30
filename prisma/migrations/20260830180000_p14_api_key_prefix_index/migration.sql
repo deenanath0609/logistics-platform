@@ -1,0 +1,13 @@
+-- Index the column every partner-API request is looked up by.
+--
+-- `withApiKey` finds a key by its prefix before it can decide whether the
+-- caller is anybody at all, so a request with a made-up key reached a
+-- sequential scan of the whole table. Only `orgId` was indexed. That is a
+-- denial of service anyone can run against a live carrier for the cost of
+-- an HTTP request, and it costs more the more keys the platform has.
+--
+-- CONCURRENTLY is not used here: the table is small on every deployment
+-- this migration will meet. On a large one, create it by hand first with
+--   CREATE INDEX CONCURRENTLY "api_key_keyPrefix_idx" ON "api_key"("keyPrefix");
+-- and this becomes a no-op.
+CREATE INDEX IF NOT EXISTS "api_key_keyPrefix_idx" ON "api_key"("keyPrefix");

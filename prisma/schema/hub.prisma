@@ -23,6 +23,10 @@ enum ScanType {
 /// the individual rows.
 model ScanRecord {
   id             String   @id @default(cuid())
+  /// A scan is written before anything downstream can refuse it, so it
+  /// carries the tenant rather than inheriting one through the branch it
+  /// happened at.
+  orgId          String
   scanType       ScanType
   barcode        String
   packageId      String?
@@ -41,8 +45,9 @@ model ScanRecord {
   /// Device clock at the scan; differs from recordedAt after offline work.
   scannedAt      DateTime
   recordedAt     DateTime @default(now())
-  /// Client-generated, so an offline queue can retry safely.
-  idempotencyKey String   @unique
+  /// Client-generated, so an offline queue can retry safely. Unique within
+  /// the carrier: two carriers' offline queues can mint the same key.
+  idempotencyKey String
 
   /// False when the barcode did not match anything expected here — an
   /// unexpected scan is an operational fact worth keeping, not an error
@@ -55,6 +60,7 @@ model ScanRecord {
   branch   Branch           @relation(fields: [branchId], references: [id])
   user     User?            @relation(fields: [userId], references: [id])
 
+  @@unique([orgId, idempotencyKey])
   @@index([branchId, scannedAt])
   @@index([barcode, scannedAt])
   @@index([shipmentId])
@@ -106,6 +112,7 @@ model InboundReceipt {
 
 model InboundReceiptLine {
   id               String   @id @default(cuid())
+  orgId            String
   receiptId        String
   shipmentId       String
   expectedPackages Int
@@ -116,6 +123,7 @@ model InboundReceiptLine {
   shipment Shipment       @relation(fields: [shipmentId], references: [id])
 
   @@unique([receiptId, shipmentId])
+  @@index([orgId])
   @@map("inbound_receipt_line")
 }
 
@@ -129,6 +137,7 @@ enum DiscrepancyKind {
 
 model ReceiptDiscrepancy {
   id            String          @id @default(cuid())
+  orgId         String
   receiptId     String
   kind          DiscrepancyKind
   shipmentId    String?
@@ -149,6 +158,7 @@ model ReceiptDiscrepancy {
   receipt  InboundReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
   shipment Shipment?      @relation(fields: [shipmentId], references: [id])
 
+  @@index([orgId])
   @@index([receiptId, kind])
   @@index([shipmentId])
   @@map("receipt_discrepancy")
@@ -157,6 +167,7 @@ model ReceiptDiscrepancy {
 /// Where a package physically sits on the floor.
 model SortBin {
   id                  String   @id @default(cuid())
+  orgId               String
   branchId            String
   code                String
   name                String
@@ -171,11 +182,16 @@ model SortBin {
   locations PackageLocation[]
 
   @@unique([branchId, code])
+  @@index([orgId])
   @@map("sort_bin")
 }
 
 model PackageLocation {
   id         String    @id @default(cuid())
+  /// The floor console looks a package up by barcode and writes the bin it
+  /// landed in, never navigating down from a shipment — so the row that
+  /// says where someone's goods physically are carries its own tenant.
+  orgId      String
   packageId  String    @unique
   branchId   String
   binId      String?
@@ -186,6 +202,7 @@ model PackageLocation {
   package ShipmentPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
   bin     SortBin?        @relation(fields: [binId], references: [id])
 
+  @@index([orgId])
   @@index([branchId, binId])
   @@map("package_location")
 }

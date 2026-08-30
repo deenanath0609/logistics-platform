@@ -6,14 +6,26 @@
  * Adds customers, portal logins, vehicles and drivers for testing. Kept
  * out of the main seed because invented trucks do not belong in
  * production. Safe to re-run.
+ *
+ * Loads into the default tenant unless another slug is named:
+ *
+ *   npm run db:seed:demo -- acme-freight
  */
 import { db, disconnect } from "./client";
+import { DEFAULT_ORG_SLUG } from "./organizations";
 import { seedDemo } from "./demo";
 
 async function main() {
-  console.log("\nLoading demo data\n");
+  // By slug, not "the first row": once a second tenant exists, `findFirst`
+  // loads Acme's demo trucks into whoever was inserted earliest.
+  const slug = process.argv[2] ?? DEFAULT_ORG_SLUG;
 
-  const org = await db.organization.findFirstOrThrow({ select: { id: true } });
+  console.log(`\nLoading demo data into ${slug}\n`);
+
+  const org = await db.organization.findUniqueOrThrow({
+    where: { slug },
+    select: { id: true },
+  });
   const { portalPassword } = await seedDemo(org.id);
 
   console.log("\nDone.\n");

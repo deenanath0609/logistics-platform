@@ -85,6 +85,7 @@ enum AddressKind {
 
 model CustomerAddress {
   id          String      @id @default(cuid())
+  orgId       String
   customerId  String
   label       String
   kind        AddressKind @default(PICKUP)
@@ -105,12 +106,14 @@ model CustomerAddress {
   city     City            @relation(fields: [cityId], references: [id])
   pickups  PickupRequest[]
 
+  @@index([orgId])
   @@index([customerId, kind])
   @@map("customer_address")
 }
 
 model CustomerContact {
   id          String   @id @default(cuid())
+  orgId       String
   customerId  String
   name        String
   designation String?
@@ -121,6 +124,7 @@ model CustomerContact {
 
   customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([customerId])
   @@map("customer_contact")
 }

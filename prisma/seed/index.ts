@@ -5,57 +5,37 @@
  *
  * Idempotent: safe to run against a database that already has data.
  * Nothing here resets a counter or overwrites a changed password.
+ *
+ * Everything below the permission catalogue is seeded *per organisation*.
+ * The org id is threaded down as a parameter rather than looked up inside
+ * each module: a module that re-queries "the" organisation works right up
+ * until there are two, and then quietly writes one tenant's masters into
+ * the other.
  */
-import { db, disconnect, step, done } from "./client";
-import { seedPermissions, seedRoles } from "./rbac";
-import { seedNetwork } from "./network";
-import { seedMasters } from "./masters";
-import { seedNotificationTemplates } from "./notifications";
-import { seedSla } from "./sla";
-import { seedBillingSeries } from "./billing";
-import { seedRateCards } from "./rate-cards";
-import { seedUsers } from "./users";
-
-async function seedOrganization() {
-  step("organization");
-
-  const org = await db.organization.upsert({
-    where: { slug: "city-logistics" },
-    create: {
-      name: process.env.APP_NAME ?? "City Logistics",
-      legalName: "City Logistics Private Limited",
-      slug: "city-logistics",
-      lrPrefix: process.env.LR_PREFIX ?? "CL",
-      city: "Delhi",
-      state: "Delhi",
-      currency: process.env.DEFAULT_CURRENCY ?? "INR",
-      timezone: process.env.DEFAULT_TIMEZONE ?? "Asia/Kolkata",
-    },
-    update: {},
-  });
-
-  done(org.name);
-  return org;
-}
+import { disconnect } from "./client";
+import { ORGANIZATIONS, seedOrganization } from "./organizations";
+import { seedPermissions } from "./rbac";
+import { seedPlans } from "./plans";
+import { seedOrganizationData } from "./org-data";
 
 async function main() {
   const started = Date.now();
-  console.log("\nSeeding City Logistics — Phase 1\n");
-
-  const org = await seedOrganization();
+  console.log(
+    `\nSeeding Phase 1 — ${ORGANIZATIONS.length} organisation(s)\n`,
+  );
 
   await seedPermissions();
-  await seedRoles(org.id);
+  // Platform-level, like the permission catalogue: a price list, not a
+  // tenant's data. Without it a new carrier comes up with the product off.
+  await seedPlans();
 
-  const { branchIds } = await seedNetwork(org.id);
-  await seedMasters(org.id);
-  await seedBillingSeries(org.id);
-  // After masters — slabs resolve ServiceType.code, rules resolve ChargeType.code.
-  await seedRateCards(org.id);
-  await seedNotificationTemplates();
-  const { devPassword } = await seedUsers(org.id, branchIds);
-  // After roles exist — escalation ladders resolve Role.code.
-  await seedSla(org.id);
+  let devPassword = "";
+
+  for (const [i, def] of ORGANIZATIONS.entries()) {
+    if (i > 0) console.log("");
+    const org = await seedOrganization(def);
+    ({ devPassword } = await seedOrganizationData(org.id));
+  }
 
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   console.log(`\nDone in ${seconds}s`);

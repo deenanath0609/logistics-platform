@@ -52,6 +52,10 @@ enum SlaState {
 /// so a policy change can be replayed over open shipments.
 model ShipmentSla {
   shipmentId String   @id
+  /// The primary key here *is* the foreign key, which made this look like
+  /// the strongest case for inheriting isolation and is exactly why it
+  /// needs the column: RLS has no other handle on the row.
+  orgId      String
   policyId   String?
   state      SlaState @default(ON_TIME)
 
@@ -74,6 +78,7 @@ model ShipmentSla {
 
   shipment Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([state, dueAt])
   @@index([dueAt])
   @@map("shipment_sla")
@@ -175,6 +180,7 @@ model Exception {
 
 model ExceptionAction {
   id          String   @id @default(cuid())
+  orgId       String
   exceptionId String
   action      String
   note        String?
@@ -183,6 +189,7 @@ model ExceptionAction {
 
   exception Exception @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([exceptionId, createdAt])
   @@map("exception_action")
 }

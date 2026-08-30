@@ -176,3 +176,49 @@ model JobRun {
   @@index([jobName, startedAt])
   @@map("job_run")
 }
+
+/// A carrier's own account with an outside service.
+///
+/// Kept out of `Organization` on purpose. Branding is read on nearly every
+/// request — the layout, the documents, every notification — and a secret
+/// that rides along with it is a secret in a hundred log lines and a
+/// hundred React payloads waiting to happen. This table is read only by the
+/// code that is about to make a call to the service.
+///
+/// `secret` is ciphertext, never a plaintext key. Settings that are not
+/// secret — an SMTP host, a sender id, a base URL — sit beside it in
+/// `settings` so the pair can be shown in an operator screen without
+/// decrypting anything.
+model TenantCredential {
+  id    String @id @default(cuid())
+  orgId String
+
+  /// Which service: "sms", "smtp", "whatsapp", "gps".
+  kind CredentialKind
+
+  /// AES-256-GCM, keyed from CREDENTIALS_KEY. Null while a carrier has been
+  /// given a slot but has not supplied the key yet — which is an ordinary
+  /// state during onboarding, not an error.
+  secret String?
+
+  /// Non-secret configuration: host, port, sender id, base URL.
+  settings Json?
+
+  /// Who last touched it, so a rotation has a name against it. A plain
+  /// column rather than a relation: the row must outlive the operator.
+  updatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, kind])
+  @@index([orgId])
+  @@map("tenant_credential")
+}
+
+enum CredentialKind {
+  SMS
+  SMTP
+  WHATSAPP
+  GPS
+}

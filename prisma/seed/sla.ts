@@ -22,9 +22,9 @@ export async function seedSla(orgId: string) {
   step("SLA policies");
 
   const [serviceTypes, cities, zones] = await Promise.all([
-    db.serviceType.findMany({ select: { id: true, code: true } }),
-    db.city.findMany({ select: { id: true, code: true } }),
-    db.zone.findMany({ select: { id: true, code: true } }),
+    db.serviceType.findMany({ where: { orgId }, select: { id: true, code: true } }),
+    db.city.findMany({ where: { orgId }, select: { id: true, code: true } }),
+    db.zone.findMany({ where: { orgId }, select: { id: true, code: true } }),
   ]);
 
   const serviceByCode = new Map(serviceTypes.map((s) => [s.code, s.id]));

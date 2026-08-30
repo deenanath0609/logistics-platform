@@ -36,7 +36,12 @@ export async function seedUsers(orgId: string, branchIds: Map<string, string>) {
   let created = 0;
 
   for (const u of DEV_USERS) {
-    const existing = await db.user.findUnique({ where: { mobile: u.mobile } });
+    // Scoped to the org, not global: the same mobile may be a login at two
+    // carriers on the platform, and skipping on a match in *another* tenant
+    // would leave this one without its administrator.
+    const existing = await db.user.findUnique({
+      where: { orgId_mobile: { orgId, mobile: u.mobile } },
+    });
     if (existing) continue;
 
     const user = await db.user.create({
@@ -56,7 +61,7 @@ export async function seedUsers(orgId: string, branchIds: Map<string, string>) {
 
     const roleId = roleIdByCode.get(u.role);
     if (roleId) {
-      await db.userRole.create({ data: { userId: user.id, roleId } });
+      await db.userRole.create({ data: { orgId, userId: user.id, roleId } });
     } else {
       console.warn(`\n    ! unknown role "${u.role}" for ${u.name}`);
     }

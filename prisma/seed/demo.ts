@@ -169,9 +169,18 @@ function daysFromNow(days: number): Date {
 }
 
 export async function seedDemo(orgId: string) {
-  const branches = await db.branch.findMany({ select: { id: true, code: true } });
+  // Scoped: branch and city codes repeat across tenants — every install has
+  // an HO — so an unfiltered lookup would hang this org's demo trucks off
+  // whichever company happened to be seeded first.
+  const branches = await db.branch.findMany({
+    where: { orgId },
+    select: { id: true, code: true },
+  });
   const branchId = new Map(branches.map((b) => [b.code, b.id]));
-  const cities = await db.city.findMany({ select: { id: true, code: true } });
+  const cities = await db.city.findMany({
+    where: { orgId },
+    select: { id: true, code: true },
+  });
   const cityId = new Map(cities.map((c) => [c.code, c.id]));
 
   // ── Customers, addresses, portal logins ──────────────────
@@ -206,6 +215,7 @@ export async function seedDemo(orgId: string) {
         where: { customerId: customer.id, label: a.label },
       });
       const data = {
+        orgId,
         customerId: customer.id,
         label: a.label,
         kind: a.kind,
@@ -221,10 +231,13 @@ export async function seedDemo(orgId: string) {
     }
 
     for (const u of c.portalUsers) {
-      const existing = await db.customerUser.findUnique({ where: { email: u.email } });
+      const existing = await db.customerUser.findUnique({
+        where: { orgId_email: { orgId, email: u.email } },
+      });
       if (existing) continue;
       await db.customerUser.create({
         data: {
+          orgId,
           customerId: customer.id,
           name: u.name,
           email: u.email,
@@ -245,8 +258,8 @@ export async function seedDemo(orgId: string) {
   const typeId = new Map<string, string>();
   for (const [i, t] of VEHICLE_TYPES.entries()) {
     const row = await db.vehicleType.upsert({
-      where: { code: t.code },
-      create: { ...t, sortOrder: i * 10 },
+      where: { orgId_code: { orgId, code: t.code } },
+      create: { ...t, orgId, sortOrder: i * 10 },
       update: { name: t.name, capacityKg: t.capacityKg, capacityCft: t.capacityCft },
     });
     typeId.set(t.code, row.id);
@@ -256,7 +269,7 @@ export async function seedDemo(orgId: string) {
   step("demo vehicles");
   for (const v of VEHICLES) {
     const vehicle = await db.vehicle.upsert({
-      where: { registrationNumber: v.reg },
+      where: { orgId_registrationNumber: { orgId, registrationNumber: v.reg } },
       create: {
         orgId,
         registrationNumber: v.reg,
@@ -275,6 +288,7 @@ export async function seedDemo(orgId: string) {
         where: { vehicleId: vehicle.id, kind: d.kind },
       });
       const data = {
+        orgId,
         vehicleId: vehicle.id,
         kind: d.kind,
         documentNumber: `${v.reg}-${d.kind}`,
@@ -290,7 +304,7 @@ export async function seedDemo(orgId: string) {
   step("demo drivers");
   for (const d of DRIVERS) {
     await db.driver.upsert({
-      where: { mobile: d.mobile },
+      where: { orgId_mobile: { orgId, mobile: d.mobile } },
       create: {
         orgId,
         code: d.code,

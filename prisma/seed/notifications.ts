@@ -14,7 +14,7 @@ import { DEFAULT_TEMPLATES } from "../../src/lib/notifications/default-templates
  * silently at the gateway. Operations activates them once registration
  * comes back — the screen at /notifications/templates says so.
  */
-export async function seedNotificationTemplates() {
+export async function seedNotificationTemplates(orgId: string) {
   step("notification templates");
 
   let created = 0;
@@ -23,6 +23,7 @@ export async function seedNotificationTemplates() {
   for (const tpl of DEFAULT_TEMPLATES) {
     const existing = await db.notificationTemplate.findFirst({
       where: {
+        orgId,
         code: tpl.code,
         channel: tpl.channel,
         language: tpl.language ?? "en",
@@ -49,6 +50,7 @@ export async function seedNotificationTemplates() {
       await db.notificationTemplate.create({
         data: {
           ...data,
+          orgId,
           code: tpl.code,
           channel: tpl.channel,
           language: tpl.language ?? "en",
@@ -62,7 +64,7 @@ export async function seedNotificationTemplates() {
   done(`${created} new, ${updated} refreshed`);
 
   const pendingDlt = await db.notificationTemplate.count({
-    where: { channel: "SMS", dltTemplateId: null },
+    where: { orgId, channel: "SMS", dltTemplateId: null },
   });
 
   if (pendingDlt > 0) {

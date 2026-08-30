@@ -79,6 +79,7 @@ model Trip {
 
 model TripEvent {
   id         String   @id @default(cuid())
+  orgId      String
   tripId     String
   eventType  String
   occurredAt DateTime @default(now())
@@ -92,6 +93,7 @@ model TripEvent {
 
   trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([tripId, occurredAt])
   @@map("trip_event")
 }
@@ -152,6 +154,7 @@ model Manifest {
 
 model ManifestLine {
   id           String   @id @default(cuid())
+  orgId        String
   manifestId   String
   shipmentId   String
   /// Snapshot at the time of manifesting — what the dispatching branch
@@ -166,6 +169,7 @@ model ManifestLine {
   shipment Shipment @relation(fields: [shipmentId], references: [id])
 
   @@unique([manifestId, shipmentId])
+  @@index([orgId])
   @@index([shipmentId])
   @@map("manifest_line")
 }
@@ -179,6 +183,10 @@ enum LoadingSheetStatus {
 /// scanned but not loaded, or loaded but not scanned.
 model LoadingSheet {
   id         String             @id @default(cuid())
+  /// Both tripId and manifestId are optional — a sheet can be opened at the
+  /// dock before either document exists — so branchId is the only path back
+  /// to a tenant, and one nullable-FK hop is not a backstop.
+  orgId      String
   tripId     String?
   manifestId String?
   branchId   String
@@ -191,12 +199,14 @@ model LoadingSheet {
   branch Branch             @relation(fields: [branchId], references: [id])
   lines  LoadingSheetLine[]
 
+  @@index([orgId])
   @@index([branchId, status])
   @@map("loading_sheet")
 }
 
 model LoadingSheetLine {
   id             String   @id @default(cuid())
+  orgId          String
   loadingSheetId String
   packageId      String
   barcode        String
@@ -207,11 +217,13 @@ model LoadingSheetLine {
   package      ShipmentPackage @relation(fields: [packageId], references: [id])
 
   @@unique([loadingSheetId, packageId])
+  @@index([orgId])
   @@map("loading_sheet_line")
 }
 
 model TripExpense {
   id           String    @id @default(cuid())
+  orgId        String
   tripId       String
   category     String
   amount       Decimal   @db.Decimal(14, 2)
@@ -227,6 +239,7 @@ model TripExpense {
 
   trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
+  @@index([orgId])
   @@index([tripId])
   @@map("trip_expense")
 }

@@ -129,8 +129,8 @@ export async function seedRateCards(orgId: string) {
   }
 
   const [services, charges] = await Promise.all([
-    db.serviceType.findMany({ select: { id: true, code: true, mode: true } }),
-    db.chargeType.findMany({ select: { id: true, code: true } }),
+    db.serviceType.findMany({ where: { orgId }, select: { id: true, code: true, mode: true } }),
+    db.chargeType.findMany({ where: { orgId }, select: { id: true, code: true } }),
   ]);
 
   const serviceByCode = new Map(services.map((s) => [s.code, s]));
@@ -158,6 +158,7 @@ export async function seedRateCards(orgId: string) {
 
   const version = await db.rateCardVersion.create({
     data: {
+      orgId,
       rateCardId: card.id,
       version: 1,
       effectiveFrom,
@@ -179,6 +180,7 @@ export async function seedRateCards(orgId: string) {
 
     await db.rateSlab.create({
       data: {
+        orgId,
         versionId: version.id,
         serviceTypeId: service.id,
         mode: service.mode,
@@ -198,6 +200,7 @@ export async function seedRateCards(orgId: string) {
   if (ftl) {
     await db.rateSlab.create({
       data: {
+        orgId,
         versionId: version.id,
         serviceTypeId: ftl.id,
         mode: "FTL",
@@ -218,6 +221,7 @@ export async function seedRateCards(orgId: string) {
 
     await db.chargeRule.create({
       data: {
+        orgId,
         versionId: version.id,
         chargeTypeId,
         basis: rule.basis,
