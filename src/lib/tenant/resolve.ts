@@ -59,6 +59,37 @@ async function lookupOrg(host: string): Promise<ResolvedOrg | null> {
   });
 }
 
+/**
+ * The host the *browser* asked for, which is not always the `Host` header.
+ *
+ * Behind a proxy there are two answers and they disagree in one place that
+ * matters. Nginx passes the carrier's host through faithfully, so an
+ * ordinary request carries the right `Host`. But when a server action ends
+ * in a redirect, Next renders the target page from an internally
+ * constructed request: the browser's user agent and every `X-Forwarded-*`
+ * header survive, and `Host` becomes the address the process itself listens
+ * on — `localhost:3010`. That host belongs to no carrier, so the tenant
+ * resolved to nobody and the page 404'd, while the same URL typed again
+ * worked perfectly. It cost a day.
+ *
+ * `X-Forwarded-Host` is right in both cases, which is what it is for.
+ *
+ * It is trusted only when `TRUSTED_PROXY_HOPS` says a proxy is in front —
+ * the same switch, and the same reasoning, as the client-IP resolution in
+ * `lib/net/client-ip.ts`. Trusting it unconditionally would let anyone who
+ * can reach the app directly name whichever carrier they liked, which is
+ * the whole boundary handed over in one header.
+ */
+function clientFacingHost(headers: Headers): string | null {
+  if (getEnv().TRUSTED_PROXY_HOPS > 0) {
+    // A chain appends, so the first entry is the one the browser asked for.
+    const forwarded = headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    if (forwarded) return forwarded;
+  }
+
+  return headers.get("host");
+}
+
 /** Host → organisation, or null when no tenant owns that host. */
 export async function orgForHost(host: string | null): Promise<ResolvedOrg | null> {
   if (!host) return null;
@@ -126,7 +157,7 @@ export async function resolveTenant(): Promise<TenantContext | null> {
     // Imported lazily: `next/headers` throws outside a request, and this
     // module is also loaded by workers and scripts.
     const { headers } = await import("next/headers");
-    host = (await headers()).get("host");
+    host = clientFacingHost(await headers());
   } catch (error) {
     // Swallowing this silently cost a day. "No tenant context" is what the
     // extension reports downstream, and it names two possible causes — a
