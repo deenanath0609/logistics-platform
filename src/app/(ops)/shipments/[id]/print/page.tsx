@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import { DocumentLogo } from "@/components/documents/letterhead";
 import {
   documentDateTime,
@@ -25,7 +26,7 @@ export default async function PrintPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requirePermission("shipment.print");
+  const user = await requirePermission("shipment.print");
   const { id } = await params;
 
   const shipment = await prisma.shipment.findUnique({
@@ -46,6 +47,19 @@ export default async function PrintPage({
   });
 
   if (!shipment || shipment.deletedAt) notFound();
+
+  // The same branch check the detail page makes, and for a sharper reason:
+  // this is the consignment note. Without it, holding `shipment.print` and a
+  // consignment id was enough to print another branch's paperwork —
+  // consignor, consignee, freight and COD amount on carrier letterhead.
+  const reachable = [
+    shipment.bookingBranchId,
+    shipment.originBranchId,
+    shipment.destinationBranchId,
+    shipment.currentBranchId,
+  ].filter((branchId): branchId is string => Boolean(branchId));
+
+  if (!reachable.some((branchId) => coversBranch(user, branchId))) notFound();
 
   // The letterhead belongs to the carrier that owns the consignment, so it
   // is looked up by that id. `Organization` is one of the two global tables

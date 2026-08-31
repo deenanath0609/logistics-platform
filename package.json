@@ -38,7 +38,8 @@
     "load": "tsx scripts/load-test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:pickup": "tsx scripts/verify-pickup-cycle.ts"
+    "verify:pickup": "tsx scripts/verify-pickup-cycle.ts",
+    "verify:scope": "tsx scripts/verify-branch-scope.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",

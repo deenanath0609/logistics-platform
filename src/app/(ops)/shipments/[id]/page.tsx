@@ -5,6 +5,7 @@ import { format } from "date-fns";
 import { ChevronLeft, Package, PauseCircle, Printer } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame } from "@/components/data/data-shell";
 import { StatusPill } from "@/components/shipment/status-pill";
@@ -111,6 +112,26 @@ export default async function ShipmentDetailPage({
   });
 
   if (!shipment || shipment.deletedAt) notFound();
+
+  // The list one directory up scopes to the branches a person covers; this
+  // page did not, so a booking clerk at one branch could read any
+  // consignment in the carrier by its id — parties, freight, COD amount and
+  // the whole timeline — and the print view would hand them the consignment
+  // note. Every other `[id]` screen in the product makes this check; these
+  // two were the outliers.
+  //
+  // Four branches, because a consignment belongs to all of them at
+  // different points in its life: where it was booked, where it started,
+  // where it is going, and where it physically is now. Somebody covering
+  // any one of those has a reason to open it.
+  const reachable = [
+    shipment.bookingBranchId,
+    shipment.originBranchId,
+    shipment.destinationBranchId,
+    shipment.currentBranchId,
+  ].filter((branchId): branchId is string => Boolean(branchId));
+
+  if (!reachable.some((branchId) => coversBranch(user, branchId))) notFound();
 
   const canPrint = can(user, "shipment.print");
 
