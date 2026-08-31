@@ -188,12 +188,19 @@ async function main() {
   console.log(`  copied         ${rows}`);
   console.log(`\nNext:`);
   console.log(`  1. Point ${data.subdomain}.<platform> at this deployment.`);
-  console.log(`  2. Sign in at https://${data.subdomain}.<platform>/login`);
+  // Second, and before anyone is told the address. The session cookie is
+  // issued `Secure` in production, and a browser will not send a Secure
+  // cookie back over plain HTTP — so on a host with no certificate this
+  // carrier can sign in and find themselves signed out on the very next
+  // click. That reads as a broken login, and the cause is three layers away.
+  console.log(`  2. Issue this host's certificate:  sudo carrier-cert ${data.subdomain}`);
+  console.log(`     Until it exists, sign-in appears to work and no session survives.`);
+  console.log(`  3. Sign in at https://${data.subdomain}.<platform>/login`);
   console.log(`     ${args["owner-mobile"] ?? "9000000001"} / ${data.ownerPassword}`);
   console.log(`     Shown once. It is not stored anywhere but the hash on the user row.`);
-  console.log(`  3. Start DLT sender registration — it is the long pole.`);
-  console.log(`  4. Load rate cards; nothing can be billed without them.`);
-  console.log(`  5. Set status to ACTIVE once the blocking tasks are done.\n`);
+  console.log(`  4. Start DLT sender registration — it is the long pole.`);
+  console.log(`  5. Load rate cards; nothing can be billed without them.`);
+  console.log(`  6. Set status to ACTIVE once the blocking tasks are done.\n`);
 }
 
 main()
