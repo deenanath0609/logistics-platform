@@ -177,8 +177,11 @@ async function main() {
   if (!tenant) throw new Error(`Organisation "${SUBDOMAIN}" is closed.`);
 
   await runWithTenant(tenant, async () => {
+    // Every branch, not just the three on the lane. A branch that cannot
+    // staff itself is a branch that will telephone head office on its first
+    // consignment, and there is no reason to learn that one lane at a time.
     const branches = await prisma.branch.findMany({
-      where: { code: { in: ["BR-GGN", "HUB-DEL", "HUB-JAI", "HO-DEL"] } },
+      where: { isActive: true },
       select: { id: true, code: true, name: true },
       orderBy: { code: "asc" },
     });

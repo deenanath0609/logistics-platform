@@ -13,9 +13,9 @@
  * administrator, which is precisely the thing a branch test is meant to
  * avoid proving.
  *
- * So this fills the gaps rather than replacing anybody: six posts at each of
- * the four branches on the test lane, skipping any mobile already present.
- * No password is ever reset — an existing login is left exactly as it is.
+ * So this fills the gaps rather than replacing anybody: six posts at every
+ * branch in the network, skipping any mobile already present. No password is
+ * ever reset — an existing login is left exactly as it is.
  *
  * The Branch Manager is not decoration. Two things the flow needs are absent
  * from the smaller roles: `scan.inbound`, without which a branch cannot
@@ -48,6 +48,9 @@ const BRANCHES = [
   { code: "HUB-DEL", prefix: "9222", label: "Delhi Hub" },
   { code: "BR-GGN", prefix: "9333", label: "Gurugram Branch" },
   { code: "HUB-JAI", prefix: "9444", label: "Jaipur Hub" },
+  { code: "BR-BOM", prefix: "9555", label: "Mumbai Branch" },
+  { code: "BR-FBD", prefix: "9666", label: "Faridabad Branch" },
+  { code: "HUB-AMD", prefix: "9777", label: "Ahmedabad Hub" },
 ] as const;
 
 const POSTS = [
@@ -65,6 +68,9 @@ const NAMES: Record<string, string[]> = {
   "HUB-DEL": ["Meera Kapoor", "Arjun Malhotra", "Sunil Tomar", "Farhan Sheikh", "Rajesh Pal", "Amit Chauhan"],
   "BR-GGN": ["Neha Bhatia", "Gaurav Saini", "Dinesh Rawat", "Shalini Ahuja", "Pankaj Yadav", "Vinod Meena"],
   "HUB-JAI": ["Alka Sharma", "Mahesh Choudhary", "Bhanu Pratap", "Kirti Jain", "Ramniwas Gurjar", "Sohan Lal"],
+  "BR-BOM": ["Sneha Deshmukh", "Nikhil Joshi", "Santosh Pawar", "Ritu Kulkarni", "Ganesh Shinde", "Prakash More"],
+  "BR-FBD": ["Anjali Tyagi", "Mohit Bansal", "Jaiveer Singh", "Preeti Solanki", "Hariom Sharma", "Lokesh Kumar"],
+  "HUB-AMD": ["Bhavna Patel", "Chirag Shah", "Jignesh Barot", "Hetal Trivedi", "Kiran Vaghela", "Ashok Parmar"],
 };
 
 type Row = {
@@ -97,9 +103,12 @@ async function main() {
     const roles = await prisma.role.findMany({ select: { id: true, code: true } });
     const roleId = new Map(roles.map((r) => [r.code, r.id]));
 
-    const missingBranch = BRANCHES.filter((b) => !branchId.has(b.code));
-    if (missingBranch.length) {
-      throw new Error(`No such branch: ${missingBranch.map((b) => b.code).join(", ")}`);
+    // A branch named here but absent from this carrier's masters is skipped
+    // with a word, not thrown on: the table is the platform's idea of a full
+    // network, and a carrier that has closed one should still get the rest.
+    const absent = BRANCHES.filter((b) => !branchId.has(b.code));
+    if (absent.length) {
+      console.log(`  ! no such branch here, skipped: ${absent.map((b) => b.code).join(", ")}`);
     }
     const missingRole = POSTS.filter((p) => !roleId.has(p.role));
     if (missingRole.length) {
@@ -109,6 +118,7 @@ async function main() {
     const passwordHash = await bcrypt.hash(PASSWORD, 10);
 
     for (const branch of BRANCHES) {
+      if (!branchId.has(branch.code)) continue;
       for (const [index, post] of POSTS.entries()) {
         const mobile = `${branch.prefix}00000${post.digit}`;
         const name = NAMES[branch.code]?.[index] ?? `${post.post} — ${branch.code}`;
@@ -170,6 +180,7 @@ async function main() {
   );
 
   for (const branch of BRANCHES) {
+    if (!rows.some((r) => r.branch === branch.code)) continue;
     console.log(`${branch.code} — ${branch.label}`);
     for (const row of rows.filter((r) => r.branch === branch.code)) {
       console.log(
