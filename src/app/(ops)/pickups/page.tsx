@@ -10,6 +10,8 @@ import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { SearchInput } from "@/components/data/search-input";
 import { AssignDialog } from "./assign-dialog";
+import { CreatePickupDialog } from "./create-dialog";
+import { CancelPickupDialog } from "./cancel-dialog";
 import {
   Table,
   TableBody,
@@ -31,6 +33,39 @@ const STATUS_TONE: Record<string, string> = {
   CANCELLED: "bg-bad-muted text-bad",
 };
 
+/**
+ * The calendar day the desk is looking at, as a `date` column stores it.
+ *
+ * This window used to be built from local midnight, and it never matched.
+ * `requestedDate` is `@db.Date`, and Prisma narrows a filter on one of those
+ * to the UTC calendar day of whatever it is handed — so local midnight at
+ * +5:30 went down as the *previous* day, and the desk asked for
+ * `>= 30 August AND < 31 August` while meaning the 31st. Every pickup raised
+ * for today was invisible on the day it mattered and appeared the morning
+ * after, which is also why "0 scheduled" was the ordinary reading of a busy
+ * branch.
+ *
+ * Taking the year, month and day the person means and rebuilding them at UTC
+ * midnight is the same correction `asStoredDate` makes in
+ * `lib/pickup/execute.ts`, for the same reason.
+ */
+function calendarDay(value?: string): Date {
+  // `?date=` arrives as YYYY-MM-DD. Read the parts rather than parsing and
+  // reading them back, which would put the day through the local offset
+  // twice.
+  const parts = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (parts) {
+    return new Date(
+      Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])),
+    );
+  }
+
+  const now = new Date();
+  return new Date(
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0),
+  );
+}
+
 const SLOT_LABEL: Record<string, string> = {
   MORNING: "Morning",
   AFTERNOON: "Afternoon",
@@ -45,14 +80,14 @@ export default async function PickupsPage({
 }) {
   const user = await requirePermission("pickup.read");
   const canAssign = can(user, "pickup.assign");
+  const canCreate = can(user, "pickup.create");
+  const canCancel = can(user, "pickup.cancel");
   const { q, date } = await searchParams;
 
   // Default to today — a pickup desk works a day at a time.
-  const day = date ? new Date(date) : new Date();
-  const dayStart = new Date(day);
-  dayStart.setHours(0, 0, 0, 0);
+  const dayStart = calendarDay(date);
   const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
   const where = {
     ...branchScope(user, "branchId"),
@@ -69,7 +104,7 @@ export default async function PickupsPage({
       : {}),
   };
 
-  const [requests, executives] = await Promise.all([
+  const [requests, executives, branches, cities, customers] = await Promise.all([
     prisma.pickupRequest.findMany({
       where,
       orderBy: [{ priority: "desc" }, { slot: "asc" }, { pincode: "asc" }],
@@ -104,6 +139,35 @@ export default async function PickupsPage({
         },
       },
     }),
+    // What the create dialog offers. Branch-scoped, because the action
+    // rejects a branch outside the actor's scope anyway and offering one is
+    // offering a mistake.
+    canCreate
+      ? prisma.branch.findMany({
+          where: { isActive: true, deletedAt: null, ...branchScope(user, "id") },
+          orderBy: { code: "asc" },
+          select: { id: true, code: true, name: true },
+        })
+      : Promise.resolve([]),
+    canCreate
+      ? prisma.city.findMany({
+          where: { isActive: true },
+          orderBy: { name: "asc" },
+          select: { id: true, code: true, name: true },
+        })
+      : Promise.resolve([]),
+    canCreate
+      ? prisma.customer.findMany({
+          where: {
+            isActive: true,
+            deletedAt: null,
+            ...branchScope(user, "branchId"),
+          },
+          orderBy: { name: "asc" },
+          take: 500,
+          select: { id: true, code: true, name: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   const loads = executives.map((executive) => ({
@@ -151,7 +215,19 @@ export default async function PickupsPage({
         eyebrow="Operations"
         title="Pickups"
         description={`${format(dayStart, "EEEE d MMMM")} · ${rows.length} scheduled, ${pending} unassigned.`}
-        actions={<SearchInput placeholder="Number, name, phone, PIN" />}
+        actions={
+          <div className="flex items-center gap-2">
+            <SearchInput placeholder="Number, name, phone, PIN" />
+            {canCreate && (
+              <CreatePickupDialog
+                branches={branches}
+                cities={cities}
+                customers={customers}
+                defaultBranchId={user.primaryBranch?.id ?? null}
+              />
+            )}
+          </div>
+        }
       />
 
       <div className="mb-4 flex flex-wrap gap-3">
@@ -195,7 +271,9 @@ export default async function PickupsPage({
                 <TableHead className="text-right">Expected</TableHead>
                 <TableHead>Assigned to</TableHead>
                 <TableHead>Status</TableHead>
-                {canAssign && <TableHead className="text-right">Action</TableHead>}
+                {(canAssign || canCancel) && (
+                  <TableHead className="text-right">Action</TableHead>
+                )}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -269,18 +347,29 @@ export default async function PickupsPage({
                         {request.status.replace("_", " ")}
                       </span>
                     </TableCell>
-                    {canAssign && (
+                    {(canAssign || canCancel) && (
                       <TableCell className="text-right">
                         {["REQUESTED", "ASSIGNED", "IN_PROGRESS"].includes(
                           request.status,
                         ) && (
-                          <AssignDialog
-                            pickupId={request.id}
-                            pickupNumber={request.number}
-                            executives={choices}
-                            currentAssigneeId={assignment?.assignedTo.id}
-                            nextSequence={orderIndex.get(request.id) ?? 0}
-                          />
+                          <span className="flex items-center justify-end gap-1">
+                            {canAssign && (
+                              <AssignDialog
+                                pickupId={request.id}
+                                pickupNumber={request.number}
+                                executives={choices}
+                                currentAssigneeId={assignment?.assignedTo.id}
+                                nextSequence={orderIndex.get(request.id) ?? 0}
+                              />
+                            )}
+                            {canCancel && (
+                              <CancelPickupDialog
+                                pickupId={request.id}
+                                pickupNumber={request.number}
+                                assigneeName={assignment?.assignedTo.name}
+                              />
+                            )}
+                          </span>
                         )}
                       </TableCell>
                     )}

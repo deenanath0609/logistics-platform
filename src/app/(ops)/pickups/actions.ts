@@ -6,43 +6,13 @@ import { prisma, tenantTransaction } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
-import { nextNumber } from "@/lib/numbering/number-series";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import { canReassign } from "@/lib/pickup/assignment";
+import { cancelPickupRequest } from "@/lib/pickup/cancel";
+import { pickupRequestSchema, raisePickupRequest } from "@/lib/pickup/request";
 import type { ActionState } from "@/server/services/master-crud";
 
 const PATH = "/pickups";
-
-const optional = (max = 200) =>
-  z.preprocess(
-    (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-    z.string().trim().max(max).nullable(),
-  );
-
-const requestSchema = z.object({
-  shipmentId: optional(40),
-  customerId: optional(40),
-  branchId: z.string().min(1, "Choose a branch"),
-  contactName: z.string().trim().min(2, "Required").max(120),
-  phone: z.string().trim().regex(/^\d{10}$/, "Ten digits"),
-  address: z.string().trim().min(4, "Required").max(300),
-  cityId: z.string().min(1, "Choose a city"),
-  pincode: z.string().trim().regex(/^\d{6}$/, "Six digits"),
-  landmark: optional(120),
-  requestedDate: z.coerce.date({ message: "Enter a valid date" }),
-  slot: z.enum(["MORNING", "AFTERNOON", "EVENING", "ANYTIME"]),
-  priority: z.coerce.number().int().min(0).max(9),
-  expectedPackages: z.preprocess(
-    (v) => (v === "" || v === null || v === undefined ? null : Number(v)),
-    z.number().int().min(1).nullable(),
-  ),
-  expectedWeight: z.preprocess(
-    (v) => (v === "" || v === null || v === undefined ? null : Number(v)),
-    z.number().min(0).nullable(),
-  ),
-  goodsDescription: optional(300),
-  notes: optional(300),
-});
 
 function fieldErrors(error: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
@@ -61,6 +31,13 @@ function describe(error: unknown): string {
   return "Something went wrong. Nothing was saved.";
 }
 
+/**
+ * Raising a collection by hand — the consignor who telephones.
+ *
+ * The validation and the write are in `lib/pickup/request.ts`, so the screen
+ * and the verification suite go through the same code. This is the form
+ * boundary: authorise, parse, audit, revalidate.
+ */
 export async function createPickupRequest(
   _prev: ActionState,
   formData: FormData,
@@ -68,7 +45,7 @@ export async function createPickupRequest(
   try {
     const actor = await authorize("pickup.create");
 
-    const parsed = requestSchema.safeParse(
+    const parsed = pickupRequestSchema.safeParse(
       Object.fromEntries(formData.entries()),
     );
     if (!parsed.success) {
@@ -78,23 +55,8 @@ export async function createPickupRequest(
       };
     }
 
-    const data = parsed.data;
-    if (!coversBranch(actor, data.branchId)) {
-      return { error: "That branch is outside your scope." };
-    }
-
-    const created = await tenantTransaction(async (tx) => {
-      // Numbered inside the transaction, so an abandoned request does not
-      // consume a number.
-      const number = await nextNumber(
-        { document: "PICKUP" },
-        tx,
-      );
-
-      return tx.pickupRequest.create({
-        data: { ...data, number, orgId: actor.orgId, createdById: actor.id },
-      });
-    });
+    const created = await raisePickupRequest(parsed.data, actor);
+    if (!created.ok) return { error: created.error };
 
     await recordAudit({
       user: actor,
@@ -103,7 +65,7 @@ export async function createPickupRequest(
       entityId: created.id,
       entityRef: created.number,
       branchId: created.branchId,
-      after: created,
+      after: { ...parsed.data, number: created.number },
     });
 
     revalidatePath(PATH);
@@ -231,6 +193,23 @@ export async function assignPickup(
   }
 }
 
+const cancelSchema = z.object({
+  id: z.string().min(1, "Nothing selected."),
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Give a reason — it goes on the record.")
+    .max(300),
+});
+
+/**
+ * Calling a collection off.
+ *
+ * The work is in `lib/pickup/cancel.ts`, which is also where the reasoning
+ * lives — including why a cancelled pickup leaves its consignment reading
+ * `PICKUP_ASSIGNED`. This is the form boundary: authorise, parse, audit,
+ * revalidate.
+ */
 export async function cancelPickup(
   _prev: ActionState,
   formData: FormData,
@@ -238,45 +217,41 @@ export async function cancelPickup(
   try {
     const actor = await authorize("pickup.cancel");
 
-    const id = String(formData.get("id") ?? "");
-    const reason = String(formData.get("reason") ?? "").trim();
-
-    if (!id) return { error: "Nothing selected." };
-    if (reason.length < 3) {
+    const parsed = cancelSchema.safeParse(
+      Object.fromEntries(formData.entries()),
+    );
+    if (!parsed.success) {
       return {
         error: "Give a reason — it goes on the record.",
-        fieldErrors: { reason: "Required" },
+        fieldErrors: fieldErrors(parsed.error),
       };
     }
 
-    const request = await prisma.pickupRequest.findUnique({ where: { id } });
-    if (!request) return { error: "That pickup no longer exists." };
-    if (!coversBranch(actor, request.branchId)) {
-      return { error: "That pickup is outside your scope." };
-    }
-    if (request.status === "COMPLETED") {
-      return { error: "That pickup has already been collected." };
-    }
+    const { id, reason } = parsed.data;
 
-    await prisma.pickupRequest.update({
-      where: { id },
-      data: { status: "CANCELLED", cancelledAt: new Date(), notes: reason },
-    });
+    const result = await cancelPickupRequest(
+      { pickupRequestId: id, reason },
+      actor,
+    );
+    if (!result.ok) return { error: result.error };
 
     await recordAudit({
       user: actor,
       action: "CANCEL",
       entity: "PickupRequest",
       entityId: id,
-      entityRef: request.number,
-      branchId: request.branchId,
+      entityRef: result.number,
+      branchId: result.branchId,
       reason,
-      before: { status: request.status },
-      after: { status: "CANCELLED" },
+      before: {
+        status: result.previousStatus,
+        assignedTo: result.unassigned,
+      },
+      after: { status: "CANCELLED", assignedTo: [] },
     });
 
     revalidatePath(PATH);
-    return { ok: true, message: `${request.number} cancelled.` };
+    return { ok: true, message: `${result.number} cancelled.` };
   } catch (error) {
     return { error: describe(error) };
   }

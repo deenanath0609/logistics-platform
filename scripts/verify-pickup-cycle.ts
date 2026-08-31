@@ -23,9 +23,16 @@
  *   · replaying either action with the same idempotency key does not record
  *     it twice — the property the offline queue depends on and the one a
  *     browser cannot easily test;
- *   · an executive cannot touch another executive's pickup; and
+ *   · an executive cannot touch another executive's pickup;
  *   · the shipment's own event log tells the story and projects back to the
- *     status that is stored.
+ *     status that is stored;
+ *   · a pickup raised by hand — the consignor who telephones, which had a
+ *     validated action and no caller anywhere in the product — is raised
+ *     from what the dialog actually posts, lands on the day the desk is
+ *     looking at, and runs to collection with no consignment behind it; and
+ *   · a cancelled pickup keeps the branch's notes, leaves the executive's
+ *     run, cannot be completed afterwards by a phone that still holds it,
+ *     and tells its consignment.
  *
  * It calls the services the screens call. Like `verify-field-cycle.ts` it
  * books its own consignment and leaves everything behind: the event log is
@@ -44,6 +51,11 @@ import {
   recordPickupFailed,
   startPickup,
 } from "../src/lib/pickup/execute";
+import {
+  pickupRequestSchema,
+  raisePickupRequest,
+} from "../src/lib/pickup/request";
+import { cancelPickupRequest } from "../src/lib/pickup/cancel";
 import { nextNumber } from "../src/lib/numbering/number-series";
 
 let failures = 0;
@@ -425,6 +437,309 @@ async function run() {
     replay.matches,
     `${replay.replayed} vs ${replay.stored}`,
   );
+
+  // ── The consignor who telephones ──────────────────────────
+  //
+  // Everything above starts from a booking. The third way a pickup comes
+  // into existence — somebody rings the branch and asks for a collection —
+  // had a validated server action and no caller anywhere in the product,
+  // so nothing here or on any screen had ever raised one.
+  //
+  // This posts what the create dialog posts, as strings, through the same
+  // schema the action parses with: if the two ever drift, this is where it
+  // shows.
+  console.log("\nRaised by hand");
+
+  const posted = {
+    shipmentId: "",
+    customerId: "",
+    branchId: branch.id,
+    contactName: "Telephoned Consignor",
+    phone: "9800000013",
+    address: "Shop 7, Old Market",
+    cityId: gurugram.id,
+    pincode: "122001",
+    landmark: "Opposite the bank",
+    requestedDate: todayValue(),
+    slot: "AFTERNOON",
+    priority: "0",
+    expectedPackages: "2",
+    expectedWeight: "8.5",
+    goodsDescription: "Two cartons of spares",
+    notes: "Gate code 4821 — ask for the store manager",
+  };
+
+  const parsed = pickupRequestSchema.safeParse(posted);
+  check(
+    "what the dialog posts is what the action accepts",
+    parsed.success,
+    parsed.success ? "" : JSON.stringify(parsed.error.issues.map((i) => i.path)),
+  );
+  if (!parsed.success) return;
+
+  const byHand = await raisePickupRequest(parsed.data, admin);
+  check(
+    "a pickup is raised by hand",
+    byHand.ok,
+    byHand.ok ? byHand.number : byHand.error,
+  );
+  if (!byHand.ok) return;
+
+  const blind = await prisma.pickupRequest.findUniqueOrThrow({
+    where: { id: byHand.id },
+    select: { shipmentId: true, requestedDate: true, notes: true },
+  });
+  check(
+    "it carries no consignment — nothing is booked yet",
+    blind.shipmentId === null,
+    blind.shipmentId ?? "null",
+  );
+
+  // Asked for the way `/pickups` asks for it, because this is where the
+  // `date` column bites. Prisma narrows a filter on a `@db.Date` field to
+  // the UTC calendar day of whatever it is given, so a window built from
+  // local midnight at +5:30 asks for yesterday: the desk was querying
+  // `>= 30 August AND < 31 August` while meaning the 31st, and every pickup
+  // raised for today was invisible until the following morning.
+  const [dayStart, dayEnd] = deskWindow();
+  const onTheDesk = await prisma.pickupRequest.findFirst({
+    where: { id: byHand.id, requestedDate: { gte: dayStart, lt: dayEnd } },
+    select: { id: true },
+  });
+  check(
+    "and lands on the day the desk is looking at",
+    onTheDesk !== null,
+    `${blind.requestedDate.toISOString()} in [${dayStart.toISOString()}, ${dayEnd.toISOString()})`,
+  );
+
+  // It has no shipment to lean on, so every step below is the pickup
+  // module standing on its own.
+  const blindAssignment = await prisma.pickupAssignment.create({
+    data: {
+      orgId: admin.orgId,
+      pickupRequestId: byHand.id,
+      assignedToId: agent.id,
+      assignedById: admin.id,
+    },
+  });
+  await prisma.pickupRequest.update({
+    where: { id: byHand.id },
+    data: { status: "ASSIGNED" },
+  });
+
+  const blindCollected = await recordPickupCollected(
+    {
+      assignmentId: blindAssignment.id,
+      packagesCollected: 2,
+      weightCollected: 8.5,
+      receiverName: "Telephoned Consignor",
+      ...field(),
+    },
+    agent,
+  );
+  check(
+    "a pickup with no consignment behind it still runs to collection",
+    blindCollected.ok,
+    blindCollected.ok ? "" : blindCollected.error,
+  );
+
+  // ── Called off ────────────────────────────────────────────
+  console.log("\nCalled off");
+
+  const second = await createBooking(
+    {
+      mode: "PTL",
+      serviceTypeId: service.id,
+      bookingBranchId: branch.id,
+      originBranchId: branch.id,
+      destinationBranchId: destination.id,
+
+      consignorName: "Verify Cancel Consignor",
+      consignorPhone: "9800000014",
+      consignorAddress: "Plot 9, Sector 18",
+      consignorCityId: gurugram.id,
+      consignorPincode: "122015",
+
+      consigneeName: "Verify Cancel Consignee",
+      consigneePhone: "9800000015",
+      consigneeAddress: "44 Station Road",
+      consigneeCityId: jaipur.id,
+      consigneePincode: "302013",
+
+      packageCount: 2,
+      packageTypeId: packageType.id,
+      actualWeight: 10,
+      goodsDescription: "Cancellation verification — auto-generated",
+      declaredValue: 4000,
+      packages: [
+        { lengthCm: 30, breadthCm: 30, heightCm: 20 },
+        { lengthCm: 30, breadthCm: 30, heightCm: 20 },
+      ],
+      paymentType: "PAID",
+      pickupRequired: true,
+    },
+    admin,
+  );
+
+  if (!second.ok) {
+    check("a second consignment was booked", false, second.error);
+    return;
+  }
+
+  const branchNote = "Loading bay at the rear — the front shutter is welded";
+  const raised = await raisePickupRequest(
+    {
+      ...parsed.data,
+      shipmentId: second.shipmentId,
+      contactName: "Verify Cancel Consignor",
+      phone: "9800000014",
+      notes: branchNote,
+    },
+    admin,
+  );
+  if (!raised.ok) {
+    check("a pickup was raised against it", false, raised.error);
+    return;
+  }
+
+  const doomed = await prisma.pickupAssignment.create({
+    data: {
+      orgId: admin.orgId,
+      pickupRequestId: raised.id,
+      assignedToId: agent.id,
+      assignedById: admin.id,
+    },
+  });
+  await prisma.pickupRequest.update({
+    where: { id: raised.id },
+    data: { status: "ASSIGNED" },
+  });
+  await appendShipmentEvent(
+    {
+      shipmentId: second.shipmentId,
+      eventType: "PICKUP_ASSIGNED",
+      branchId: branch.id,
+      payload: { pickupNumber: raised.number, assignedToId: agent.id },
+    },
+    admin,
+  );
+
+  const reason = "Consignor postponed to next week";
+  const cancelled = await cancelPickupRequest(
+    { pickupRequestId: raised.id, reason },
+    admin,
+  );
+  check(
+    "the cancellation is accepted",
+    cancelled.ok,
+    cancelled.ok ? raised.number : cancelled.error,
+  );
+
+  const afterCancel = await prisma.pickupRequest.findUniqueOrThrow({
+    where: { id: raised.id },
+    select: { status: true, notes: true, cancelReason: true, cancelledById: true },
+  });
+
+  // The bug this replaces wrote the reason into `notes`, over the top of
+  // whatever the branch had put there for the executive.
+  check(
+    "the branch's own notes survive it",
+    afterCancel.notes === branchNote,
+    afterCancel.notes ?? "null",
+  );
+  check(
+    "and the reason is kept in its own column, against whoever gave it",
+    afterCancel.cancelReason === reason && afterCancel.cancelledById === admin.id,
+    afterCancel.cancelReason ?? "null",
+  );
+
+  // The executive's day list, spelled the way `(field)/pickups/today`
+  // spells it. A cancelled pickup that stayed on it is somebody driving to
+  // a door for nothing.
+  const stillOnTheRun = await prisma.pickupAssignment.findMany({
+    where: {
+      supersededAt: null,
+      status: { in: ["ASSIGNED", "IN_PROGRESS"] },
+      assignedToId: agent.id,
+      request: { status: { notIn: ["CANCELLED", "COMPLETED"] } },
+      pickupRequestId: raised.id,
+    },
+    select: { id: true },
+  });
+  check(
+    "the stop leaves the executive's run",
+    stillOnTheRun.length === 0,
+    `${stillOnTheRun.length} still assigned`,
+  );
+
+  const superseded = await prisma.pickupAssignment.findUniqueOrThrow({
+    where: { id: doomed.id },
+    select: { supersededAt: true, status: true },
+  });
+  check(
+    "the assignment is superseded rather than deleted — who was sent survives",
+    superseded.supersededAt !== null && superseded.status === "CANCELLED",
+    `${superseded.status} at ${superseded.supersededAt?.toISOString() ?? "null"}`,
+  );
+
+  // The offline queue replays. A phone holding this stop must not be able
+  // to post a collection against a pickup the branch called off.
+  const zombie = await recordPickupCollected(
+    { assignmentId: doomed.id, packagesCollected: 2, ...field() },
+    agent,
+  );
+  check(
+    "and a stale phone cannot complete it after the fact",
+    !zombie.ok,
+    zombie.ok ? "IT WAS ALLOWED" : zombie.error,
+  );
+
+  // There is no PICKUP_CANCELLED in the state machine and no rule that
+  // takes a consignment back out of PICKUP_ASSIGNED, so this is
+  // BOOKING_AMENDED: recorded, status untouched. The consignment reads as
+  // still assigned, which is honest about the log but not about the world —
+  // see the note in `lib/pickup/cancel.ts`.
+  const cancelEvents = await prisma.shipmentEvent.findMany({
+    where: { shipmentId: second.shipmentId },
+    orderBy: { occurredAt: "asc" },
+    select: { eventType: true, payload: true },
+  });
+  const told = cancelEvents.some(
+    (e) =>
+      e.eventType === "BOOKING_AMENDED" &&
+      (e.payload as { pickupCancelled?: boolean } | null)?.pickupCancelled === true,
+  );
+  check(
+    "the consignment is told the collection was called off",
+    told,
+    cancelEvents.map((e) => e.eventType).join(", "),
+  );
+
+  const cancelReplay = await replayStatus(second.shipmentId);
+  check(
+    "and it is left where its own log says it is",
+    cancelReplay.matches && cancelReplay.stored === "PICKUP_ASSIGNED",
+    `${cancelReplay.replayed} vs ${cancelReplay.stored}`,
+  );
+}
+
+/** Today, as an `<input type="date">` spells it. */
+function todayValue(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/** The window `/pickups` builds for "today" — the UTC calendar day. */
+function deskWindow(): [Date, Date] {
+  const now = new Date();
+  const start = new Date(
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0),
+  );
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return [start, end];
 }
 
 async function main() {

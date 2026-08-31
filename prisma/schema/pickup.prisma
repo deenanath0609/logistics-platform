@@ -50,12 +50,20 @@ model PickupRequest {
   expectedPackages Int?
   expectedWeight   Decimal?   @db.Decimal(10, 3)
   goodsDescription String?
+  /// What the branch wrote for the executive: gate codes, whom to ask for,
+  /// which dock. Belongs to whoever raised the request and is never written
+  /// over by anything the system decides later.
   notes            String?
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   createdById String?
   cancelledAt DateTime?
+  /// Why it was called off, in its own column. It used to be written into
+  /// `notes`, which destroyed the branch's own instructions — and the
+  /// instructions are what the next attempt needs.
+  cancelReason   String?
+  cancelledById  String?
 
   branch      Branch             @relation(fields: [branchId], references: [id])
   shipment    Shipment?          @relation(fields: [shipmentId], references: [id])
