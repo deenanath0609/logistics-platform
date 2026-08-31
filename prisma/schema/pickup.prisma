@@ -133,10 +133,18 @@ model PickupAttempt {
   recordedAt  DateTime @default(now())
   createdById String?
 
+  /// Client-generated, so the executive's phone can retry safely. Same
+  /// arrangement as `DeliveryAttempt`: a reply lost on the road is
+  /// indistinguishable from a request that never arrived, so the device
+  /// sends again and the unique index below is what makes the second send
+  /// harmless.
+  idempotencyKey String?
+
   assignment PickupAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   reasonCode ReasonCode?      @relation(fields: [reasonCodeId], references: [id])
 
   @@unique([assignmentId, attemptNumber])
+  @@unique([orgId, idempotencyKey])
   @@index([orgId])
   @@index([assignmentId])
   @@map("pickup_attempt")
