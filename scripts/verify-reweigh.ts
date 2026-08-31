@@ -212,9 +212,6 @@ async function run() {
   }
 
   await waitForOutboxIdle();
-  const notificationsBefore = await prisma.notificationLog.count({
-    where: { eventType: "shipment.reweighed" },
-  });
 
   // ── The weighing ──────────────────────────────────────────
   const weighed = await captureRevisedWeight(
@@ -321,10 +318,21 @@ async function run() {
   const drained = await waitForOutboxIdle();
   check("the server drained the reweigh event", drained);
 
+  /*
+    Scoped to this consignment, not counted across the table.
+
+    This compared a `count()` of every `shipment.reweighed` row taken before
+    the weighing against a `findMany({ take: 6 })` taken after — so once the
+    log held six such rows the "after" figure saturated at six and could
+    never exceed the "before" figure again. The check did not fail when the
+    product broke; it began failing when the script had been run often
+    enough, reporting "7 → 6" while the notification sat in the log, sent,
+    to the right address. A verification that rots with its own data is
+    worse than none, because it teaches you to ignore a red line.
+  */
   const notificationsAfter = await prisma.notificationLog.findMany({
-    where: { eventType: "shipment.reweighed" },
+    where: { eventType: "shipment.reweighed", shipmentId: booking.shipmentId },
     orderBy: { queuedAt: "desc" },
-    take: 6,
     select: {
       channel: true,
       status: true,
@@ -336,8 +344,10 @@ async function run() {
 
   check(
     "the consignor was told about the revision",
-    notificationsAfter.length > notificationsBefore,
-    `${notificationsBefore} → ${notificationsAfter.length}`,
+    notificationsAfter.length > 0,
+    notificationsAfter.length > 0
+      ? `${notificationsAfter.length} message(s) for this consignment`
+      : "nothing was logged against this consignment",
   );
 
   for (const row of notificationsAfter.slice(0, 3)) {
