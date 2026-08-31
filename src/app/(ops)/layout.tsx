@@ -52,7 +52,20 @@ export default async function OpsLayout({
           impersonating ? "min-h-[calc(100dvh-2.75rem)]" : "min-h-dvh",
         )}
       >
-        <aside className="hidden border-r bg-sidebar lg:flex lg:flex-col">
+        {/*
+          Sticky, and exactly as tall as the space the shell actually has —
+          which is one screen, less the impersonation banner when there is
+          one. The same arithmetic as the shell height above, for the same
+          reason: during a support session the banner owns the top 2.75rem,
+          so a sidebar starting at 0 would slide under the one bar that must
+          never be hidden.
+        */}
+        <aside
+          className={cn(
+            "hidden border-r bg-sidebar lg:sticky lg:flex lg:flex-col",
+            impersonating ? "lg:top-11 lg:h-[calc(100dvh-2.75rem)]" : "lg:top-0 lg:h-dvh",
+          )}
+        >
           <div className="flex h-14 items-center border-b px-4">
             <TenantMark
               name={branding.name}

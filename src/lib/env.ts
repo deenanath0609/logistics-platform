@@ -17,7 +17,33 @@ const serverSchema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6380"),
 
   AUTH_SECRET: z.string().min(1, "AUTH_SECRET is required"),
-  AUTH_URL: z.string().url().optional(),
+
+  /**
+   * Deliberately refused, not merely optional.
+   *
+   * Auth.js resolves the post-sign-in redirect against this URL, and this URL
+   * is a single host. On a platform where every carrier has a host of their
+   * own, setting it sends all of them to whichever one is named here — in the
+   * deployment that found this, every carrier signing in was thrown onto the
+   * operator console's domain, where `/dashboard` does not exist, and got a
+   * 404. It read as a broken login: the session had in fact been created, so
+   * typing the address again "fixed" it, which is the worst kind of bug
+   * report to receive.
+   *
+   * `trustHost: true` in `auth/config.ts` is what replaces it: the redirect
+   * follows the host the request actually arrived on, which is the only
+   * answer that can be right for more than one tenant. So this refuses at
+   * boot rather than letting a deployment discover it one carrier at a time.
+   */
+  AUTH_URL: z
+    .string()
+    .max(0, {
+      message:
+        "AUTH_URL must not be set: it pins every post-sign-in redirect to one " +
+        "host, and each carrier has their own. Remove it — trustHost resolves " +
+        "the redirect from the request instead.",
+    })
+    .optional(),
   SESSION_MAX_AGE_SECONDS: z.coerce.number().int().positive().default(43200),
   OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),

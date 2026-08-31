@@ -29,7 +29,16 @@ export default async function ConsoleLayout({
 
   return (
     <div className="grid min-h-dvh lg:grid-cols-[248px_minmax(0,1fr)]">
-      <aside className="hidden bg-sidebar text-sidebar-foreground lg:flex lg:flex-col">
+      {/*
+        Sticky and exactly one screen tall, so the page scrolls underneath it
+        rather than carrying it away. The nav in the middle takes the slack
+        and scrolls on its own when an operator has enough entries to need
+        it, which keeps the two controls at the bottom — change password and
+        sign out — on screen at every scroll position. They are the two a
+        person reaches for without looking, and hunting for them by scrolling
+        back to the top is how a shared console stays signed in.
+      */}
+      <aside className="hidden bg-sidebar text-sidebar-foreground lg:sticky lg:top-0 lg:flex lg:h-dvh lg:flex-col">
         <div className="flex h-14 items-center gap-2.5 border-b border-sidebar-border px-4">
           <span className="flex size-7 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
             <ShieldAlert className="size-4" />

@@ -40,7 +40,8 @@ export default async function PortalAppLayout({
 
   return (
     <div className="grid min-h-dvh lg:grid-cols-[236px_minmax(0,1fr)]">
-      <aside className="hidden border-r bg-sidebar lg:flex lg:flex-col">
+      {/* Sticky, one screen tall — see the same note in the ops shell. */}
+      <aside className="hidden border-r bg-sidebar lg:sticky lg:top-0 lg:flex lg:h-dvh lg:flex-col">
         <div className="flex h-14 items-center border-b px-4">
           <TenantMark
             name={branding.name}
