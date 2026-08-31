@@ -127,12 +127,39 @@ export async function resolveTenant(): Promise<TenantContext | null> {
     // module is also loaded by workers and scripts.
     const { headers } = await import("next/headers");
     host = (await headers()).get("host");
-  } catch {
+  } catch (error) {
+    // Swallowing this silently cost a day. "No tenant context" is what the
+    // extension reports downstream, and it names two possible causes — a
+    // host that resolves to nobody, or code running outside a request — with
+    // no way to tell which. They have opposite fixes. Outside a request is
+    // the ordinary case for a worker or a script, so this stays quiet at
+    // `debug` level rather than becoming noise in every background pass; set
+    // `TENANT_DEBUG=on` when a request is the one failing.
+    if (process.env.TENANT_DEBUG === "on") {
+      console.warn(
+        "[tenant] could not read the request host: " +
+          (error instanceof Error ? `${error.name}: ${error.message}` : String(error)),
+      );
+    }
     return null;
   }
 
+  if (!host && process.env.TENANT_DEBUG === "on") {
+    console.warn("[tenant] the request carried no Host header.");
+  }
+
   const org = await orgForHost(host);
-  if (!org) return null;
+  if (!org) {
+    // The other half of the same ambiguity: the request had a host and no
+    // carrier answered to it. On the bare platform domain that is correct
+    // and expected; anywhere else it is a missing organisation, a typo in
+    // `APP_ROOT_DOMAIN`, or a lookup that returned nothing because the row
+    // was invisible to the connection making it.
+    if (process.env.TENANT_DEBUG === "on") {
+      console.warn(`[tenant] no organisation answers to host "${host}".`);
+    }
+    return null;
+  }
 
   // Imported lazily for the same reason, and because it reaches the
   // database: an ordinary request pays a cookie read and stops there.
