@@ -48,6 +48,7 @@ export function MobileNav({
             permissions={permissions}
             modules={modules}
             onNavigate={() => setOpen(false)}
+            serverRendered={false}
           />
         </div>
       </SheetContent>

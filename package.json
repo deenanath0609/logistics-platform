@@ -37,7 +37,8 @@
     "verify:restore": "node scripts/restore-drill.mjs",
     "load": "tsx scripts/load-test.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify:pickup": "tsx scripts/verify-pickup-cycle.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",
