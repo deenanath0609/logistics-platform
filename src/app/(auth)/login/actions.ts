@@ -1,6 +1,7 @@
 "use server";
 
 import { AuthError } from "next-auth";
+import { redirect } from "next/navigation";
 import { z } from "zod";
 import { signIn } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -14,6 +15,31 @@ export type LoginState = {
 };
 
 const mobileSchema = z.string().regex(/^\d{10}$/, "Enter a 10-digit mobile number");
+
+/**
+ * Where a successful sign-in lands, as a path and never as a URL.
+ *
+ * Auth.js is asked not to redirect at all, and this is why. Given
+ * `redirectTo`, it resolves that path against a base URL it works out for
+ * itself — and in a production build behind a proxy it worked out
+ * `http://localhost:3010`, the port the process listens on, no matter what
+ * the request's `Host` said and no matter that `trustHost` was set. Every
+ * carrier's sign-in was therefore answered inside a request whose host
+ * belonged to no carrier: the tenant resolved to nobody, the user lookup
+ * was refused, and the browser was handed a 404. The session had already
+ * been issued, so typing the address again worked, which is what made it
+ * look like a routing bug for most of a day.
+ *
+ * `next/navigation`'s `redirect` takes a path and stays on whatever host the
+ * request arrived on, which is the only host that can be right here. There
+ * is nothing to configure and nothing to keep in step with DNS.
+ *
+ * The path is still checked: an open redirect on a sign-in form is how a
+ * phishing page borrows somebody's login.
+ */
+function landing(next: string): string {
+  return next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
+}
 
 export async function signInWithPassword(
   _prev: LoginState,
@@ -31,13 +57,9 @@ export async function signInWithPassword(
   }
 
   try {
-    await signIn("password", {
-      mobile,
-      password,
-      redirectTo: next.startsWith("/") ? next : "/dashboard",
-    });
+    // `redirect: false`, and then our own redirect. See `landing()` below.
+    await signIn("password", { mobile, password, redirect: false });
   } catch (error) {
-    // next/navigation signals a successful redirect by throwing; let it pass.
     if (error instanceof AuthError) {
       return {
         error:
@@ -47,7 +69,7 @@ export async function signInWithPassword(
     throw error;
   }
 
-  return {};
+  redirect(landing(next));
 }
 
 export async function requestOtp(
@@ -103,11 +125,7 @@ export async function signInWithOtp(
   if (!code) return { otpSentTo: mobile, error: "Enter the code you received." };
 
   try {
-    await signIn("otp", {
-      mobile,
-      code,
-      redirectTo: next.startsWith("/") ? next : "/dashboard",
-    });
+    await signIn("otp", { mobile, code, redirect: false });
   } catch (error) {
     if (error instanceof AuthError) {
       return {
@@ -118,5 +136,5 @@ export async function signInWithOtp(
     throw error;
   }
 
-  return {};
+  redirect(landing(next));
 }

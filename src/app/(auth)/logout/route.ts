@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { signOut } from "@/lib/auth";
 
 /**
@@ -13,5 +14,9 @@ import { signOut } from "@/lib/auth";
  * exactly what stops a script from touching it.
  */
 export async function GET() {
-  await signOut({ redirectTo: "/login" });
+  // See `(auth)/login/actions.ts`: a `redirectTo` is resolved against a base
+  // URL Auth.js works out for itself, which in production is not the host the
+  // request arrived on. A relative redirect stays where it started.
+  await signOut({ redirect: false });
+  redirect("/login");
 }

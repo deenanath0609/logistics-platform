@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth/session";
 import { requireModuleForPath } from "@/lib/modules/guard";
 import { getTenantModules } from "@/lib/modules/tenant-modules";
 import { requireTenantPage } from "@/lib/tenant/page";
+import { redirect } from "next/navigation";
 import { signOut } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { SidebarNav } from "@/components/shell/sidebar-nav";
@@ -39,7 +40,12 @@ export default async function OpsLayout({
 
   async function handleSignOut() {
     "use server";
-    await signOut({ redirectTo: "/login" });
+    // `redirect: false` and our own redirect, for the reason spelled out in
+    // `(auth)/login/actions.ts`: given a path, Auth.js resolves it against a
+    // base URL it derives itself, which in production came out as
+    // `localhost:PORT` and sent every carrier to a host that is not theirs.
+    await signOut({ redirect: false });
+    redirect("/login");
   }
 
   return (

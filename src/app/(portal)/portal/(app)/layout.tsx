@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { KeyRound, LogOut } from "lucide-react";
 import { Toaster } from "@/components/ui/sonner";
+import { redirect } from "next/navigation";
 import { signOut } from "@/lib/auth";
 import {
   canWrite,
@@ -35,7 +36,10 @@ export default async function PortalAppLayout({
 
   async function handleSignOut() {
     "use server";
-    await signOut({ redirectTo: "/portal/login" });
+    // See `(auth)/login/actions.ts` — Auth.js resolves a `redirectTo` against
+    // a base URL of its own devising, which is not this carrier's host.
+    await signOut({ redirect: false });
+    redirect("/portal/login");
   }
 
   return (
