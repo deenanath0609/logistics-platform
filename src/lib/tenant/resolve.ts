@@ -156,7 +156,22 @@ export async function resolveTenant(): Promise<TenantContext | null> {
     // `APP_ROOT_DOMAIN`, or a lookup that returned nothing because the row
     // was invisible to the connection making it.
     if (process.env.TENANT_DEBUG === "on") {
-      console.warn(`[tenant] no organisation answers to host "${host}".`);
+      // The path and the user agent as well as the host. A host that belongs
+      // to nobody is only half the story: knowing *which request* carried it
+      // is what separates "somebody typed the bare domain" from "something
+      // inside this process is calling itself".
+      let where = "";
+      try {
+        const { headers } = await import("next/headers");
+        const h = await headers();
+        where =
+          ` path="${h.get("x-pathname") ?? h.get("next-url") ?? "?"}"` +
+          ` ua="${(h.get("user-agent") ?? "none").slice(0, 40)}"` +
+          ` fwd="${h.get("x-forwarded-host") ?? "none"}"`;
+      } catch {
+        // Best effort; the host line below is the part that matters.
+      }
+      console.warn(`[tenant] no organisation answers to host "${host}".${where}`);
     }
     return null;
   }
