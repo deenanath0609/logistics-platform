@@ -23,6 +23,7 @@ const store = vi.hoisted(() => ({
   creditAllowed: true,
   creditReason: null as string | null,
   shipmentsCreated: [] as Array<Record<string, unknown>>,
+  pickupsRaised: [] as Array<Record<string, unknown>>,
   shipmentUpdates: [] as Array<Record<string, unknown>>,
   chargeBatches: [] as Array<Array<Record<string, unknown>>>,
   calculations: [] as Array<{ stage: string; total: string }>,
@@ -149,6 +150,12 @@ vi.mock("@/lib/prisma", () => {
       }),
     },
     shipmentPackage: { createMany: async () => ({ count: 1 }) },
+    pickupRequest: {
+      create: async (args: { data: Record<string, unknown> }) => {
+        store.pickupsRaised.push(args.data);
+        return { id: "pu-1", number: args.data.number };
+      },
+    },
     shipmentCharge: {
       createMany: async (args: { data: Array<Record<string, unknown>> }) => {
         store.chargeBatches.push(args.data);
@@ -229,6 +236,7 @@ beforeEach(() => {
   store.creditAllowed = true;
   store.creditReason = null;
   store.shipmentsCreated = [];
+  store.pickupsRaised = [];
   store.shipmentUpdates = [];
   store.chargeBatches = [];
   store.calculations = [];
@@ -345,5 +353,48 @@ describe("a credit block is enforced by the service, not by the picker", () => {
 
     expect(result.ok).toBe(true);
     expect(store.creditChecks).toHaveLength(0);
+  });
+});
+
+describe("a booking that asks for a collection gets one", () => {
+  /*
+    `pickupRequired` was written on the shipment and read by nothing, so a
+    consignment booked "with pickup" produced no pickup at all. The flag was
+    an opinion nobody acted on, and the branch found out when the consignor
+    rang to ask where the van was.
+  */
+
+  it("raises the pickup in the same transaction as the booking", async () => {
+    const result = await createBooking(bookingInput(), actor);
+
+    expect(result.ok).toBe(true);
+    expect(store.pickupsRaised).toHaveLength(1);
+
+    const pickup = store.pickupsRaised[0];
+    expect(pickup.shipmentId).toBe("shp-1");
+    // The van is going to the consignor, so the address is theirs and not
+    // the booking branch's.
+    expect(pickup.contactName).toBe(bookingInput().consignorName);
+    expect(pickup.pincode).toBe(bookingInput().consignorPincode);
+    expect(pickup.expectedPackages).toBe(bookingInput().packageCount);
+  });
+
+  it("leaves it unassigned, because who goes is the branch's call", async () => {
+    await createBooking(bookingInput(), actor);
+
+    // Nothing here names an executive. `/pickups` suggests one against the
+    // day's load; inventing an assignee at booking would put work on
+    // somebody's phone their supervisor never gave them.
+    expect(store.pickupsRaised[0]).not.toHaveProperty("assignedToId");
+  });
+
+  it("raises nothing when the consignor is bringing it to the counter", async () => {
+    const result = await createBooking(
+      bookingInput({ pickupRequired: false }),
+      actor,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(store.pickupsRaised).toHaveLength(0);
   });
 });

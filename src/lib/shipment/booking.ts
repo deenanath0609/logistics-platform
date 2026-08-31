@@ -166,7 +166,19 @@ export type BookingInput = {
 };
 
 export type BookingResult =
-  | { ok: true; shipmentId: string; lrNumber: string; barcodes: string[] }
+  | {
+      ok: true;
+      shipmentId: string;
+      lrNumber: string;
+      barcodes: string[];
+      /**
+       * The collection raised alongside this booking, when one was asked
+       * for. Null when the consignor is bringing it to the counter — so a
+       * caller can tell the difference rather than guessing from
+       * `pickupRequired` a second time.
+       */
+      pickupNumber?: string | null;
+    }
   | { ok: false; error: string; field?: string };
 
 export async function createBooking(
@@ -551,10 +563,66 @@ export async function createBooking(
         throw new Error(event.error);
       }
 
+      // ── The collection this booking asked for ─────────────
+      //
+      // `pickupRequired` was written on the shipment and read by nothing, so
+      // a consignment booked "with pickup" produced no pickup: the flag was
+      // an opinion nobody acted on, and the branch found out when the
+      // consignor rang to ask where the van was.
+      //
+      // Raised inside the same transaction as the booking. A consignment
+      // that exists with no collection behind it is the failure this is
+      // fixing, and doing it afterwards would reintroduce exactly that
+      // window.
+      //
+      // Unassigned on purpose. Which executive goes is a branch's decision
+      // made against the day's load, and `/pickups` suggests one; inventing
+      // an assignee here would put work on somebody's phone that their
+      // supervisor never gave them.
+      const pickupRequired = input.pickupRequired ?? true;
+      let pickupNumber: string | null = null;
+
+      if (pickupRequired) {
+        pickupNumber = await nextNumber({ document: "PICKUP" }, tx);
+
+        await tx.pickupRequest.create({
+          data: {
+            orgId: shipment.orgId,
+            number: pickupNumber,
+            branchId: input.bookingBranchId,
+            shipmentId: shipment.id,
+            customerId: input.consignorId ?? undefined,
+            // The consignor is who the van is going to see, so the address
+            // is theirs and not the booking branch's.
+            contactName: input.consignorName,
+            phone: input.consignorPhone,
+            address: input.consignorAddress,
+            cityId: input.consignorCityId,
+            pincode: input.consignorPincode,
+            // Today unless the caller said otherwise. A consignor who booked
+            // this morning expects somebody today, and a branch that cannot
+            // manage it moves the date rather than being silently given a
+            // week.
+            // Today, and any slot. A consignor who booked this morning
+            // expects somebody today; a branch that cannot manage it moves
+            // the date on the pickup rather than being silently given a
+            // week. Booking does not ask for a slot, and inventing one
+            // would be a promise nobody made.
+            requestedDate: new Date(),
+            slot: "ANYTIME",
+            expectedPackages: input.packageCount,
+            expectedWeight: input.actualWeight ?? undefined,
+            goodsDescription: input.goodsDescription ?? undefined,
+            createdById: input.bookedByCustomerUserId ? null : actor.id,
+          },
+        });
+      }
+
       return {
         shipmentId: shipment.id,
         lrNumber: shipment.lrNumber,
         barcodes,
+        pickupNumber,
         ratedTotal: priced ? priced.total.toFixed(2) : null,
       };
     });
