@@ -103,6 +103,31 @@ jobs:
             --slug acme-freight --name "Acme Freight" --subdomain acme \
             --owner-mobile 9800000001 --owner-name "Priya Rao"
 
+      # A carrier mid-provisioning has no plan, and no plan means every module
+      # except core is withheld. That is correct behaviour and useless as a
+      # gating fixture: the suite needs a carrier who has bought *some* of the
+      # catalogue, so that "reaches what they bought" and "is refused what
+      # they did not" are both real assertions rather than one blanket no.
+      # STARTER is hub and last mile, which is exactly that shape.
+      - name: Put the second carrier on a limited plan
+        run: |
+          node -e "
+            const { Client } = require('pg');
+            const db = new Client({ connectionString: process.env.MIGRATE_DATABASE_URL });
+            db.connect()
+              .then(() => db.query(\`
+                UPDATE organization
+                   SET \\\"planId\\\" = (SELECT id FROM tenant_plan WHERE code = 'STARTER')
+                 WHERE slug = 'acme-freight'
+              \`))
+              .then((r) => {
+                if (r.rowCount !== 1) throw new Error('acme-freight was not put on STARTER');
+                console.log('acme-freight is on STARTER');
+                return db.end();
+              })
+              .catch((e) => { console.error(e.message); process.exit(1); });
+          "
+
       - name: Types
         run: npm run typecheck
 
