@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import { AlertTriangle, Clock } from "lucide-react";
+import { AlertTriangle, Clock, ShieldAlert } from "lucide-react";
 import type {
   ShipmentEventType,
   ShipmentStatus,
@@ -61,6 +61,10 @@ export function ShipmentTimeline({ events }: { events: TimelineEvent[] }) {
         const isLast = index === events.length - 1;
         const changedStatus = Boolean(event.resultingStatus);
         const isException = Boolean(event.reasonCode);
+        // A status somebody typed, not one that was earned. It is the only
+        // entry here that did not follow from something physically
+        // happening, so it does not get to look like the others.
+        const isCorrection = event.eventType === "STATUS_CORRECTED";
         const drifted =
           event.clockDriftSeconds !== null &&
           Math.abs(event.clockDriftSeconds) > DRIFT_WARNING_SECONDS;
@@ -72,11 +76,13 @@ export function ShipmentTimeline({ events }: { events: TimelineEvent[] }) {
               <span
                 className={cn(
                   "mt-1.5 size-2.5 shrink-0 rounded-full ring-4 ring-background",
-                  isException
-                    ? "bg-bad"
-                    : changedStatus
-                      ? "bg-primary"
-                      : "bg-border",
+                  isCorrection
+                    ? "size-3.5 border-2 border-bad bg-background"
+                    : isException
+                      ? "bg-bad"
+                      : changedStatus
+                        ? "bg-primary"
+                        : "bg-border",
                 )}
               />
               {!isLast && (
@@ -84,11 +90,25 @@ export function ShipmentTimeline({ events }: { events: TimelineEvent[] }) {
               )}
             </div>
 
-            <div className={cn("flex flex-col gap-1", isLast ? "pb-0" : "pb-5")}>
+            <div
+              className={cn(
+                "flex flex-col gap-1",
+                isLast ? "pb-0" : "pb-5",
+                isCorrection &&
+                  "-my-1 mb-4 rounded-md border border-bad/40 bg-bad-muted px-3 py-2",
+              )}
+            >
               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span className="text-sm font-medium">
                   {rule?.describe ?? event.eventType.replace(/_/g, " ")}
                 </span>
+
+                {isCorrection && (
+                  <span className="inline-flex items-center gap-1 rounded-sm bg-bad px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-background">
+                    <ShieldAlert className="size-3" />
+                    Entered by hand
+                  </span>
+                )}
 
                 {event.resultingStatus && (
                   <span className="font-mono text-[0.65rem] uppercase tracking-wider text-primary">

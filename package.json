@@ -39,6 +39,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:pickup": "tsx scripts/verify-pickup-cycle.ts",
+    "verify:lifecycle": "tsx scripts/verify-shipment-lifecycle.ts",
     "verify:scope": "tsx scripts/verify-branch-scope.ts",
     "verify:pickup:screens": "tsx scripts/verify-pickup-screens.ts",
     "verify:help": "tsx scripts/verify-help.ts",

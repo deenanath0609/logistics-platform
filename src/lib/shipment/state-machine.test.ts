@@ -72,6 +72,23 @@ describe("an inbound scan means different things in different places", () => {
     );
     expect(result.ok && result.nextStatus).toBe("RECEIVED_AT_HUB");
   });
+
+  it("is receipt at origin when the consignor carried it to the counter", () => {
+    /*
+      A great deal of freight is never collected — the consignor books it
+      and brings it in, which is what "Needs pickup" being off means on the
+      booking form. Until this, the only ways out of BOOKED were the two
+      pickup events, so a branch had to raise a collection and complete it
+      for a van that never left the yard: a false record of who moved the
+      goods, written into an append-only log to get around a missing edge.
+    */
+    const result = evaluateTransition(
+      "INBOUND_SCAN",
+      ctx({ currentStatus: "BOOKED" }),
+      { branchId: "origin" },
+    );
+    expect(result.ok && result.nextStatus).toBe("RECEIVED_AT_ORIGIN");
+  });
 });
 
 describe("a failed delivery attempt", () => {

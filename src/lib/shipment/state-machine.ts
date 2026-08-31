@@ -109,11 +109,20 @@ export const TRANSITIONS: TransitionRule[] = [
   },
   {
     event: "INBOUND_SCAN",
-    from: ["PICKED_UP", "DISPATCHED", "IN_TRANSIT", "ARRIVED_AT_HUB"],
+    from: ["BOOKED", "PICKED_UP", "DISPATCHED", "IN_TRANSIT", "ARRIVED_AT_HUB"],
     // The same physical act — a package scanned at a dock — means
     // "entered the network" at the origin and "arrived here" anywhere else.
+    //
+    // `BOOKED` is here because a great deal of freight never gets collected:
+    // the consignor books and carries it to the counter themselves, which is
+    // what "Needs pickup" being off on the booking form means. Without this
+    // there was no way for such a consignment to enter the network at all —
+    // the only routes out of `BOOKED` were the two pickup events, so the
+    // branch had to raise a collection and complete it for a van that never
+    // left the yard. That is a false record of who moved the goods, written
+    // into an append-only log to work around a missing edge.
     to: (ctx) =>
-      ctx.currentStatus === "PICKED_UP"
+      ctx.currentStatus === "PICKED_UP" || ctx.currentStatus === "BOOKED"
         ? "RECEIVED_AT_ORIGIN"
         : "RECEIVED_AT_HUB",
     permission: "scan.inbound",

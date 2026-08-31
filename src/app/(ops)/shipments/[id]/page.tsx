@@ -10,6 +10,13 @@ import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame } from "@/components/data/data-shell";
 import { StatusPill } from "@/components/shipment/status-pill";
 import { ShipmentTimeline } from "@/components/shipment/timeline";
+import { ruleFor, STATUS_LABELS, humanise } from "@/lib/shipment/state-machine";
+import {
+  CANCELLABLE_FROM,
+  UNCORRECTABLE_TO,
+  hasCustody,
+} from "@/lib/shipment/lifecycle";
+import { ShipmentLifecycleActions } from "./lifecycle-actions";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -135,6 +142,43 @@ export default async function ShipmentDetailPage({
 
   const canPrint = can(user, "shipment.print");
 
+  // ── What this consignment can still have done to it ───────
+  //
+  // Two questions per control, and both have to be yes: does this person
+  // hold the permission the transition rule names, and is the consignment
+  // in a status that rule accepts? Rendering a button the server is going
+  // to refuse is a promise the product cannot keep, so the `from` lists are
+  // read straight off the rules rather than restated here.
+  const status = shipment.currentStatus;
+  const canCancel = can(user, "shipment.cancel") && CANCELLABLE_FROM.includes(status);
+  const canAmend =
+    can(user, "shipment.update") &&
+    (ruleFor("BOOKING_AMENDED")?.from.includes(status) ?? false);
+  const holdRule = shipment.isOnHold ? ruleFor("HOLD_RELEASED") : ruleFor("HELD");
+  const canHoldOrRelease =
+    can(user, "shipment.hold") && (holdRule?.from.includes(status) ?? false);
+  const canCorrect = can(user, "shipment.correct_status");
+
+  const needsReasons = canCancel || canHoldOrRelease || canCorrect;
+
+  // One query, sliced three ways. A reason drawer is small master data and
+  // this page is already doing far heavier reads.
+  const reasons = needsReasons
+    ? await prisma.reasonCode.findMany({
+        where: {
+          isActive: true,
+          category: { in: ["CANCELLATION", "HOLD", "STATUS_CORRECTION"] },
+        },
+        orderBy: [{ category: "asc" }, { sortOrder: "asc" }, { code: "asc" }],
+        select: { id: true, code: true, name: true, category: true },
+      })
+    : [];
+
+  const reasonsFor = (category: string) =>
+    reasons
+      .filter((reason) => reason.category === category)
+      .map(({ id, code, name }) => ({ id, code, name }));
+
   const facts = [
     { label: "Service", value: `${shipment.serviceType.code}` },
     { label: "Mode", value: shipment.mode },
@@ -158,12 +202,52 @@ export default async function ShipmentDetailPage({
         title={shipment.lrNumber}
         description={shipment.goodsDescription}
         actions={
-          canPrint && (
-            <Button variant="outline" render={<Link href={`/shipments/${shipment.id}/print`} />}>
-              <Printer />
-              Print LR &amp; labels
-            </Button>
-          )
+          <>
+            <ShipmentLifecycleActions
+              shipmentId={shipment.id}
+              lrNumber={shipment.lrNumber}
+              statusLabel={humanise(status)}
+              isOnHold={shipment.isOnHold}
+              inCustody={hasCustody(status)}
+              canCancel={canCancel}
+              canHoldOrRelease={canHoldOrRelease}
+              canAmend={canAmend}
+              canCorrect={canCorrect}
+              cancellationReasons={reasonsFor("CANCELLATION")}
+              holdReasons={reasonsFor("HOLD")}
+              correctionReasons={reasonsFor("STATUS_CORRECTION")}
+              correctableStatuses={Object.entries(STATUS_LABELS)
+                .filter(
+                  ([value]) =>
+                    value !== status &&
+                    !UNCORRECTABLE_TO.includes(value as typeof status),
+                )
+                .map(([value, label]) => ({ value, label }))}
+              fields={{
+                consignorName: shipment.consignorName,
+                consignorCompany: shipment.consignorCompany ?? "",
+                consignorPhone: shipment.consignorPhone,
+                consignorEmail: shipment.consignorEmail ?? "",
+                consignorAddress: shipment.consignorAddress,
+                consigneeName: shipment.consigneeName,
+                consigneeCompany: shipment.consigneeCompany ?? "",
+                consigneePhone: shipment.consigneePhone,
+                consigneeEmail: shipment.consigneeEmail ?? "",
+                consigneeAddress: shipment.consigneeAddress,
+                consigneeLandmark: shipment.consigneeLandmark ?? "",
+                goodsDescription: shipment.goodsDescription,
+                specialInstructions: shipment.specialInstructions ?? "",
+                packageCount: shipment.packageCount,
+                actualWeight: String(Number(shipment.actualWeight)),
+              }}
+            />
+            {canPrint && (
+              <Button variant="outline" render={<Link href={`/shipments/${shipment.id}/print`} />}>
+                <Printer />
+                Print LR &amp; labels
+              </Button>
+            )}
+          </>
         }
       />
 
