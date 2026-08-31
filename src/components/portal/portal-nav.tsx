@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BookOpen,
   Gauge,
   LifeBuoy,
   MapPin,
@@ -32,6 +33,7 @@ const ICONS: Record<PortalIconName, LucideIcon> = {
   users: Users,
   upload: Upload,
   lifeBuoy: LifeBuoy,
+  bookOpen: BookOpen,
 };
 
 export function PortalNav({

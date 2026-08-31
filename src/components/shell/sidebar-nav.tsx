@@ -5,9 +5,8 @@ import { usePathname } from "next/navigation";
 import { useEffect, useId, useSyncExternalStore } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { moduleGateFor } from "@/lib/modules/refusal";
 import type { ModuleKey } from "@/lib/modules/registry";
-import { NAV } from "./nav";
+import { visibleNavGroups } from "./nav";
 import {
   collapseInitScript,
   collapseStyles,
@@ -46,28 +45,14 @@ export function SidebarNav({
   const grantedModules = new Set(modules);
 
   /**
-   * Two filters, because neither one covers the other.
-   *
-   * Narrowing the session already removes most unbought entries — the
-   * permissions this nav checks are largely module-owned, so `Manifests`
-   * and `Invoices` vanish without anything here changing. Two entries
-   * survive that, and they are the reason this second filter exists:
-   * `COD` is guarded by `delivery.read`, which the last mile owns rather
-   * than COD, and `SLA policies` by `master.read`, which core owns. Both
-   * would keep drawing a link into a module the carrier never bought.
-   *
-   * Hiding is still only presentation; `requireModuleForPath()` in the ops
-   * layout is what actually refuses the URL.
+   * Which groups survive is decided in `nav.ts`, next to the data, so the
+   * drift test can assert what a role is shown without rendering a tree.
+   * The id is a rendering concern and stays here.
    */
-  const groups = NAV.map((group) => ({
+  const groups = visibleNavGroups(granted, grantedModules).map((group) => ({
     ...group,
     id: sectionId(group.label),
-    items: group.items.filter(
-      (item) =>
-        granted.has(item.permission) &&
-        moduleGateFor(item.href, grantedModules).allowed,
-    ),
-  })).filter((group) => group.items.length > 0);
+  }));
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BookOpen,
   Building2,
   CreditCard,
   Gauge,
@@ -23,6 +24,7 @@ const ICONS: Record<ConsoleIconName, LucideIcon> = {
   creditCard: CreditCard,
   scrollText: ScrollText,
   userCog: UserCog,
+  bookOpen: BookOpen,
 };
 
 export function ConsoleNav({

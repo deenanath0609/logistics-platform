@@ -40,7 +40,8 @@
     "test:watch": "vitest",
     "verify:pickup": "tsx scripts/verify-pickup-cycle.ts",
     "verify:scope": "tsx scripts/verify-branch-scope.ts",
-    "verify:pickup:screens": "tsx scripts/verify-pickup-screens.ts"
+    "verify:pickup:screens": "tsx scripts/verify-pickup-screens.ts",
+    "verify:help": "tsx scripts/verify-help.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",

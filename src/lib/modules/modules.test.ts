@@ -195,7 +195,11 @@ describe("navigation agrees with the registry", () => {
     // cheapest place to catch that.
     const mismatched: string[] = [];
     for (const item of items) {
-      const owner = OWNER_OF_PERMISSION.get(item.permission);
+      // A null permission is an entry shown to everybody — Help — and there
+      // is nothing for a module to own.
+      const owner = item.permission
+        ? OWNER_OF_PERMISSION.get(item.permission)
+        : undefined;
       if (!owner) continue; // Unowned permissions are core's, and core is universal.
       const key = moduleForRoute(item.href, MODULES);
       if (!key || !withRequires(key).has(owner)) {

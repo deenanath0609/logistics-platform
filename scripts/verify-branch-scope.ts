@@ -91,7 +91,8 @@ async function main() {
     }),
   );
 
-  if (!clerk.primaryBranchId) {
+  const homeBranchId = clerk.primaryBranchId;
+  if (!homeBranchId) {
     console.error(`  ${CLERK_MOBILE} has no primary branch; nothing to scope to.`);
     process.exit(1);
   }
@@ -106,21 +107,25 @@ async function main() {
     await prisma.shipment.findFirst({
     where: {
       deletedAt: null,
-      bookingBranchId: { not: clerk.primaryBranchId },
-      originBranchId: { not: clerk.primaryBranchId },
-      destinationBranchId: { not: clerk.primaryBranchId },
+      bookingBranchId: { not: homeBranchId },
+      originBranchId: { not: homeBranchId },
+      destinationBranchId: { not: homeBranchId },
       OR: [
         { currentBranchId: null },
-        { currentBranchId: { not: clerk.primaryBranchId } },
+        { currentBranchId: { not: homeBranchId } },
       ],
     },
-    select: { id: true, lrNumber: true, originBranch: { select: { code: true } } },
+    select: {
+      id: true,
+      lrNumber: true,
+      originBranch: { select: { code: true } },
+    },
     }),
   );
 
   const own = await runWithTenant(tenant, async () =>
     await prisma.shipment.findFirst({
-      where: { deletedAt: null, originBranchId: clerk.primaryBranchId },
+      where: { deletedAt: null, originBranchId: homeBranchId },
       select: { id: true, lrNumber: true },
     }),
   );

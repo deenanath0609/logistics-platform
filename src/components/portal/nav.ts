@@ -25,7 +25,8 @@ export type PortalIconName =
   | "receipt"
   | "users"
   | "upload"
-  | "lifeBuoy";
+  | "lifeBuoy"
+  | "bookOpen";
 
 export const PORTAL_NAV: PortalNavItem[] = [
   { href: "/portal", label: "Overview", icon: "gauge" },
@@ -37,6 +38,9 @@ export const PORTAL_NAV: PortalNavItem[] = [
   { href: "/portal/invoices", label: "Invoices", icon: "receipt" },
   { href: "/portal/complaints", label: "Complaints", icon: "lifeBuoy" },
   { href: "/portal/users", label: "People", icon: "users", ownerOnly: true },
+  // Last, and neither `writeOnly` nor `ownerOnly`: a VIEWER login is the
+  // one most likely to be somebody's first day in here.
+  { href: "/portal/help", label: "Help", icon: "bookOpen" },
 ];
 
 export function visibleNav(options: {

@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  CircleHelp,
   LayoutDashboard,
   Truck,
   Contact,
@@ -45,13 +46,24 @@ import {
   ScrollText,
   Map,
 } from "lucide-react";
+import { moduleGateFor } from "@/lib/modules/refusal";
+import type { ModuleKey } from "@/lib/modules/registry";
 
 export type NavItem = {
   label: string;
   href: string;
   icon: LucideIcon;
-  /** Hidden entirely when the user lacks this permission. */
-  permission: string;
+  /**
+   * Hidden entirely when the user lacks this permission.
+   *
+   * Null means the entry is shown to everybody. That has to be its own case
+   * rather than "pick a permission everyone holds", because there is no such
+   * permission: a DRIVER holds four codes and `master.read` is not among
+   * them, a PICKUP_EXEC holds three, and the two sets share nothing with the
+   * booking counter's. An entry that must survive the narrowest role is
+   * therefore ungated by construction.
+   */
+  permission: string | null;
 };
 
 export type NavGroup = {
@@ -407,4 +419,47 @@ export const NAV: NavGroup[] = [
       },
     ],
   },
+  {
+    label: "Help",
+    items: [
+      {
+        label: "How this works",
+        href: "/help",
+        icon: CircleHelp,
+        // Ungated on purpose, and last so it is where a lost person looks.
+        // Whoever most needs the page holds the fewest permissions.
+        permission: null,
+      },
+    ],
+  },
 ];
+
+/**
+ * The groups a given user should be shown.
+ *
+ * Two filters, because neither one covers the other.
+ *
+ * Narrowing the session already removes most unbought entries — the
+ * permissions checked here are largely module-owned, so `Manifests` and
+ * `Invoices` vanish without anything in this file changing. Two entries
+ * survive that, and they are the reason the module filter exists: `COD` is
+ * guarded by `delivery.read`, which the last mile owns rather than COD, and
+ * `SLA policies` by `master.read`, which core owns. Both would keep drawing
+ * a link into a module the carrier never bought.
+ *
+ * Hiding is still only presentation; `requireModuleForPath()` in the ops
+ * layout is what actually refuses the URL.
+ */
+export function visibleNavGroups(
+  permissions: ReadonlySet<string>,
+  modules: ReadonlySet<ModuleKey>,
+): NavGroup[] {
+  return NAV.map((group) => ({
+    ...group,
+    items: group.items.filter(
+      (item) =>
+        (item.permission === null || permissions.has(item.permission)) &&
+        moduleGateFor(item.href, modules).allowed,
+    ),
+  })).filter((group) => group.items.length > 0);
+}

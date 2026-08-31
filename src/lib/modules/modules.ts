@@ -35,8 +35,15 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
     // `/reports` is core too: the operational report runner is how a branch
     // manager checks their own day's work. Management dashboards and bulk
     // export are the upsell, and those live in `insights`.
+    //
+    // `/help` is claimed here for the same reason everything else is: a route
+    // no module claims is a route nothing gates, and the drift test refuses
+    // one. Core being `alwaysOn` is what makes the claim harmless — the help
+    // screen is reachable on the barest plan there is, which is precisely
+    // when somebody needs it.
     routes: [
       "/dashboard",
+      "/help",
       "/shipments",
       "/pickups",
       "/customers",

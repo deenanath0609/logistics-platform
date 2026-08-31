@@ -13,14 +13,22 @@ export type ConsoleIconName =
   | "building"
   | "creditCard"
   | "scrollText"
-  | "userCog";
+  | "userCog"
+  | "bookOpen";
 
 export type ConsoleNavItem = {
   href: string;
   label: string;
   icon: ConsoleIconName;
-  /** Hidden when the operator's role does not hold this. */
-  needs: PlatformCapability;
+  /**
+   * Hidden when the operator's role does not hold this. Null means shown to
+   * every operator.
+   *
+   * Written as its own case rather than as `tenant.read`, which every role
+   * happens to hold today. That is a coincidence of the current matrix, and
+   * an entry that must never disappear should not be resting on one.
+   */
+  needs: PlatformCapability | null;
 };
 
 export const CONSOLE_NAV: ConsoleNavItem[] = [
@@ -34,6 +42,7 @@ export const CONSOLE_NAV: ConsoleNavItem[] = [
     needs: "impersonate",
   },
   { href: "/platform/audit", label: "Operator log", icon: "scrollText", needs: "audit.read" },
+  { href: "/platform/help", label: "Help", icon: "bookOpen", needs: null },
 ];
 
 /**
@@ -45,5 +54,7 @@ export const CONSOLE_NAV: ConsoleNavItem[] = [
 export function visibleConsoleNav(
   capabilities: ReadonlySet<PlatformCapability>,
 ): ConsoleNavItem[] {
-  return CONSOLE_NAV.filter((item) => capabilities.has(item.needs));
+  return CONSOLE_NAV.filter(
+    (item) => item.needs === null || capabilities.has(item.needs),
+  );
 }
