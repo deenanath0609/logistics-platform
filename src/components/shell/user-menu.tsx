@@ -4,6 +4,7 @@ import { LogOut, Building2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -44,12 +45,23 @@ export function UserMenu({
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel className="flex flex-col gap-1 font-normal">
-          <span className="text-sm font-medium">{name}</span>
-          <span className="font-mono text-xs text-muted-foreground">
-            {mobile}
-          </span>
-        </DropdownMenuLabel>
+        {/*
+          The group is not decoration. `DropdownMenuLabel` is Base UI's
+          `Menu.GroupLabel`, which reads a context only `Menu.Group` provides
+          — without it the component throws, and because it throws during
+          render the whole page goes down rather than just the menu. That is
+          what happened here: opening this menu replaced the application with
+          "This page couldn't load", and since sign-out lives inside it,
+          there was no way to sign out at all.
+        */}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="flex flex-col gap-1 font-normal">
+            <span className="text-sm font-medium">{name}</span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {mobile}
+            </span>
+          </DropdownMenuLabel>
+        </DropdownMenuGroup>
 
         <DropdownMenuSeparator />
 
