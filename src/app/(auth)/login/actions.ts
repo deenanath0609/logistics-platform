@@ -6,6 +6,7 @@ import { z } from "zod";
 import { signIn } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { issueOtp } from "@/lib/auth/otp";
+import { deliverLoginCode } from "@/lib/auth/otp-delivery";
 
 export type LoginState = {
   error?: string;
@@ -96,17 +97,28 @@ export async function requestOtp(
     return { otpSentTo: mobile };
   }
 
-  const { code } = await issueOtp({ destination: mobile, purpose: "LOGIN" });
+  const { code, expiresAt } = await issueOtp({ destination: mobile, purpose: "LOGIN" });
 
   // Never logged. A login code printed to stdout is not a second factor —
   // it is the whole of authentication for this flow, sitting in a log
-  // aggregator next to the mobile number it belongs to. The line below is
-  // the only place the code is returned, and it is already gated on
-  // development.
+  // aggregator next to the mobile number it belongs to. `devCode` below is
+  // the only place the code is returned, and it is gated on development.
   //
-  // No SMS channel is wired for LOGIN yet, so outside development this flow
-  // currently has no delivery path at all. That is a missing feature; a log
-  // line is not an acceptable stand-in for it.
+  // The send goes out on the carrier's own gateway account. It used to go
+  // nowhere at all outside development, which meant a field user — created
+  // without a password on purpose, because a driver should not be typing
+  // one at a loading bay — could not sign in to a deployed system.
+  const delivery = await deliverLoginCode({ mobile, code, expiresAt });
+
+  if (!delivery.delivered) {
+    // Deliberately not surfaced. Whether this number belongs to a staff
+    // member is not something a sign-in form may reveal, and "we could not
+    // send you a code" reveals it as plainly as "no such user" would. The
+    // reason is in the log, where the people who can act on it will look.
+    console.error("[auth] a login code could not be delivered", {
+      reason: delivery.reason,
+    });
+  }
 
   return {
     otpSentTo: mobile,
