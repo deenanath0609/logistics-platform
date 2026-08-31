@@ -5,6 +5,7 @@ import { ChevronRight, MapPin, Phone, Package } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
+import { branchScope } from "@/server/repositories/scope";
 import { sequencePickups } from "@/lib/pickup/assignment";
 
 export const metadata: Metadata = { title: "Collections" };
@@ -41,7 +42,18 @@ export default async function FieldPickupsPage() {
       // A wider role — a branch manager checking a round — sees the
       // branch's work. An executive's own scope resolves to themselves.
       ...(can(user, "pickup.assign") ? {} : { assignedToId: user.id }),
-      request: { requestedDate: { gte: from }, status: { notIn: ["CANCELLED", "COMPLETED"] } },
+      request: {
+        requestedDate: { gte: from },
+        status: { notIn: ["CANCELLED", "COMPLETED"] },
+        // Branch-scoped as well as person-scoped, and the two are not the
+        // same thing. A network-scoped dispatcher can assign a stop at one
+        // branch to an executive who covers another; without this the stop
+        // appeared on their list and then 404'd when they tapped it,
+        // because the task screen checks `coversBranch` and this did not.
+        // A list that shows work its owner cannot open is worse than one
+        // that shows nothing.
+        ...branchScope(user, "branchId"),
+      },
     },
     orderBy: [{ sequence: "asc" }, { assignedAt: "asc" }],
     select: {

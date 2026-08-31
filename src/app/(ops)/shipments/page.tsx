@@ -28,11 +28,43 @@ const PAGE_SIZE = 25;
 
 const GROUP_LABEL: Record<string, string> = {
   pending: "Awaiting pickup",
+  counter: "Coming to the counter",
   inNetwork: "In the network",
   moving: "In transit",
   lastMile: "Last mile",
   done: "Delivered",
   exception: "Exceptions",
+};
+
+/**
+ * What each chip actually asks the database.
+ *
+ * `STATUS_GROUPS` is a status vocabulary and stays one; this is where the
+ * list adds the one thing status alone cannot say. "Awaiting pickup" used
+ * to mean `BOOKED` or `PICKUP_ASSIGNED` and nothing else, so a consignment
+ * the consignor is walking in with — booked with "Needs pickup" off — sat
+ * in the same chip as the ones a van has to be sent for. A duty manager
+ * reading "Awaiting pickup 19" could not tell how many vans that was, and
+ * the ones nobody was collecting never appeared on `/pickups` either,
+ * because no pickup exists for them.
+ *
+ * So they are two chips. Both are still `BOOKED`; the difference is who is
+ * doing the moving.
+ */
+const GROUP_WHERE: Record<string, Record<string, unknown>> = {
+  pending: {
+    currentStatus: { in: STATUS_GROUPS.pending },
+    pickupRequired: true,
+  },
+  counter: {
+    currentStatus: { in: ["BOOKED"] },
+    pickupRequired: false,
+  },
+  inNetwork: { currentStatus: { in: STATUS_GROUPS.inNetwork } },
+  moving: { currentStatus: { in: STATUS_GROUPS.moving } },
+  lastMile: { currentStatus: { in: STATUS_GROUPS.lastMile } },
+  done: { currentStatus: { in: STATUS_GROUPS.done } },
+  exception: { currentStatus: { in: STATUS_GROUPS.exception } },
 };
 
 export default async function ShipmentsPage({
@@ -45,10 +77,7 @@ export default async function ShipmentsPage({
   const { q, group, mode, page: pageParam } = await searchParams;
   const page = Math.max(1, Number(pageParam ?? 1) || 1);
 
-  const groupStatuses =
-    group && group in STATUS_GROUPS
-      ? STATUS_GROUPS[group as keyof typeof STATUS_GROUPS]
-      : undefined;
+  const groupFilter = group && group in GROUP_WHERE ? GROUP_WHERE[group] : undefined;
 
   const where = {
     deletedAt: null,
@@ -59,7 +88,7 @@ export default async function ShipmentsPage({
       "currentBranchId",
       "destinationBranchId",
     ]),
-    ...(groupStatuses ? { currentStatus: { in: groupStatuses } } : {}),
+    ...(groupFilter ?? {}),
     ...(mode ? { mode: mode as never } : {}),
     ...(q
       ? {
@@ -105,7 +134,7 @@ export default async function ShipmentsPage({
     // Counts per group for the filter chips, so a duty manager sees where
     // the volume sits before clicking anything.
     Promise.all(
-      Object.entries(STATUS_GROUPS).map(async ([key, statuses]) => ({
+      Object.entries(GROUP_WHERE).map(async ([key, filter]) => ({
         key,
         count: await prisma.shipment.count({
           where: {
@@ -115,7 +144,7 @@ export default async function ShipmentsPage({
               "currentBranchId",
               "destinationBranchId",
             ]),
-            currentStatus: { in: statuses },
+            ...filter,
           },
         }),
       })),
