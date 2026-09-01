@@ -21,6 +21,13 @@ function describe(error: unknown): string {
   return "Something went wrong. No money was moved.";
 }
 
+/**
+ * `yyyy-mm-dd` from the hidden field, as a local day.
+ *
+ * `createCodDeposit` normalises this to the UTC calendar day the `@db.Date`
+ * column keeps — see `lib/delivery/calendar.ts`. Handing it a local midnight
+ * is what it expects; handing it a raw instant would work too.
+ */
 function localDay(value: string): Date {
   const [year, month, day] = value.split("-").map(Number);
   return new Date(year, month - 1, day);
@@ -124,16 +131,40 @@ export async function verifyDepositAction(
       action: result.disputed ? "OVERRIDE" : "APPROVE",
       entity: "CodDeposit",
       entityId: parsed.data.depositId,
-      after: { amountVerified: parsed.data.amountVerified, shortfall: result.shortfall },
-      reason: result.disputed ? `Counted ₹${result.shortfall} short` : undefined,
+      after: {
+        amountVerified: parsed.data.amountVerified,
+        shortfall: result.shortfall,
+        miscount: result.miscount,
+      },
+      reason: result.disputed
+        ? `₹${result.shortfall} short of what was collected; counted ₹${result.miscount} against the slip`
+        : undefined,
     });
 
     revalidatePath(PATH);
 
+    if (!result.disputed) return { message: "Counted and reconciled." };
+
+    // Two different failures, said separately, because they are two
+    // different conversations at the branch.
+    const parts: string[] = [];
+    if (Number(result.miscount) !== 0) {
+      parts.push(
+        `The count is ₹${Math.abs(Number(result.miscount)).toLocaleString("en-IN")} ${
+          Number(result.miscount) > 0 ? "under" : "over"
+        } the slip.`,
+      );
+    }
+    if (Number(result.shortfall) !== 0) {
+      parts.push(
+        `₹${Math.abs(Number(result.shortfall)).toLocaleString("en-IN")} of what was collected at the doors is still ${
+          Number(result.shortfall) > 0 ? "outstanding" : "unaccounted for"
+        }.`,
+      );
+    }
+
     return {
-      message: result.disputed
-        ? `Counted ₹${result.shortfall} short. The deposit is disputed and stays open.`
-        : "Counted and reconciled.",
+      message: `${parts.join(" ")} The deposit is disputed and its collections stay open.`,
     };
   } catch (error) {
     return { error: describe(error) };

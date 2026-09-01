@@ -2,10 +2,13 @@ import Decimal from "decimal.js";
 import { prisma, tenantTransaction, type Db, type DbOrTx } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
-import { branchScope } from "@/server/repositories/scope";
+import { branchScope, coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
 import { nextNumber } from "@/lib/numbering/number-series";
+import { addDays, businessDay } from "@/lib/time/business-day";
+import type { Prisma } from "@/generated/prisma/client";
 import { dec, money, type MoneyIn } from "./ageing";
+import { isDebitNoteNumber } from "./default-series";
 import { GTA_SAC } from "./gst";
 import { totalInvoice } from "./totals";
 
@@ -78,18 +81,6 @@ export async function billableShipments(
   },
   user: SessionUser,
 ): Promise<BillableShipment[]> {
-  const taken = await prisma.invoiceLine.findMany({
-    where: {
-      shipmentId: { not: null },
-      invoice: { status: { in: [...LIVE_INVOICE_STATUSES] } },
-    },
-    select: { shipmentId: true },
-  });
-
-  const alreadyBilled = new Set(
-    taken.map((line) => line.shipmentId).filter((id): id is string => Boolean(id)),
-  );
-
   const shipments = await prisma.shipment.findMany({
     where: {
       consignorId: options.customerId,
@@ -129,6 +120,28 @@ export async function billableShipments(
       _count: { select: { charges: true } },
     },
   });
+
+  /**
+   * Which of these are already on a live invoice.
+   *
+   * Asked *after* the candidates are known, and bounded by them. This used
+   * to read every `invoice_line` in the organisation with a shipment on it
+   * — every line of every invoice ever raised — to build a set that was
+   * then used to filter a page's worth of consignments. It answered
+   * correctly and grew without limit, which is the sort of query that is
+   * fine for a year and then is the month-end bill run.
+   */
+  const taken = await prisma.invoiceLine.findMany({
+    where: {
+      shipmentId: { in: shipments.map((shipment) => shipment.id) },
+      invoice: { status: { in: [...LIVE_INVOICE_STATUSES] } },
+    },
+    select: { shipmentId: true },
+  });
+
+  const alreadyBilled = new Set(
+    taken.map((line) => line.shipmentId).filter((id): id is string => Boolean(id)),
+  );
 
   return shipments
     .filter((shipment) => !alreadyBilled.has(shipment.id))
@@ -293,6 +306,13 @@ export async function generateInvoice(
   if (input.shipmentIds.length === 0) {
     return { ok: false, error: "Pick at least one consignment to bill." };
   }
+  // The billing branch decides the number series and the GSTIN the supply
+  // is made from. `billableShipments` is branch-scoped, but this takes a
+  // branch id straight off a form and every server action reaching it
+  // bypasses the screen that offered the list.
+  if (!coversBranch(actor, input.branchId)) {
+    return { ok: false, error: "You cannot raise invoices from that branch." };
+  }
 
   const [customer, branch] = await Promise.all([
     prisma.customer.findUnique({
@@ -324,6 +344,59 @@ export async function generateInvoice(
     return { ok: false, error: "That billing branch does not exist." };
   }
 
+  /**
+   * The consignments actually billable, re-established here.
+   *
+   * `draftLines` used to be handed the posted ids and trusted them. Two
+   * things were wrong with that. A shipment belonging to a branch the actor
+   * does not cover could be pulled onto their invoice by id. And nothing
+   * re-checked that the consignment was still unbilled: the action selects
+   * a list, a second clerk bills half of it, and the first submit then
+   * raises a *second* invoice for the same consignments — the one complaint
+   * that costs an account, arrived at by two people doing their job.
+   */
+  const eligible = await prisma.shipment.findMany({
+    where: {
+      id: { in: input.shipmentIds },
+      consignorId: customer.id,
+      deletedAt: null,
+      cancelledAt: null,
+      ...branchScope(actor, "originBranchId"),
+    },
+    select: { id: true, lrNumber: true },
+  });
+
+  const eligibleIds = new Set(eligible.map((shipment) => shipment.id));
+  const rejected = input.shipmentIds.filter((id) => !eligibleIds.has(id));
+
+  if (rejected.length > 0) {
+    return {
+      ok: false,
+      error:
+        `${rejected.length} of the ${input.shipmentIds.length} consignment(s) selected are not ` +
+        `billable to this account from your branches — they may have been cancelled, or they ` +
+        `belong somewhere else. Nothing was saved.`,
+    };
+  }
+
+  const taken = await prisma.invoiceLine.findMany({
+    where: {
+      shipmentId: { in: [...eligibleIds] },
+      invoice: { status: { in: [...LIVE_INVOICE_STATUSES] } },
+    },
+    select: { shipmentId: true, invoice: { select: { number: true } } },
+  });
+
+  if (taken.length > 0) {
+    const first = taken[0];
+    return {
+      ok: false,
+      error:
+        `${taken.length} of these consignment(s) are already on a live invoice ` +
+        `(${first.invoice.number}). Refresh the list and bill what is left.`,
+    };
+  }
+
   const { lines, anyReverseCharge, allReverseCharge } = await draftLines(
     input.shipmentIds,
     prisma,
@@ -347,9 +420,22 @@ export async function generateInvoice(
   const isReverseCharge = input.isReverseCharge ?? allReverseCharge;
   const totals = totalInvoice(lines, isReverseCharge);
 
-  const invoiceDate = input.invoiceDate ?? new Date();
-  const dueDate = new Date(invoiceDate);
-  dueDate.setDate(dueDate.getDate() + (customer.creditDays ?? 0));
+  /**
+   * The date the document carries.
+   *
+   * `invoiceDate` and `dueDate` are `@db.Date`, so Prisma keeps the **UTC**
+   * day of whatever it is handed, and nothing pins `process.env.TZ`. A bare
+   * `new Date()` therefore dated every invoice raised between midnight and
+   * 05:30 IST to the *previous* day — the due date went back with it, and
+   * so did the `{FY}` bucket the number is drawn from, which on the 1st of
+   * April is the wrong financial year in an invoice number that can never
+   * be corrected. `businessDay` resolves the carrier's calendar day and
+   * leaves a date that already came out of such a column untouched.
+   */
+  const invoiceDate = businessDay(input.invoiceDate ?? new Date());
+  // In UTC, not `setDate`: `setDate` moves the *local* day, which lands on
+  // the wrong side of midnight the moment the server is not on IST.
+  const dueDate = addDays(invoiceDate, customer.creditDays ?? 0);
 
   // A tax invoice has to state a place of supply, and the customer's
   // billing state is the answer whenever nobody has typed a different one.
@@ -358,6 +444,22 @@ export async function generateInvoice(
 
   try {
     const created = await tenantTransaction(async (tx) => {
+      // Asked again, inside the transaction that writes the document. The
+      // check above gives the better message; this one narrows the window
+      // between selecting a list and committing it to as little as the
+      // database will allow.
+      const stolen = await tx.invoiceLine.findFirst({
+        where: {
+          shipmentId: { in: [...eligibleIds] },
+          invoice: { status: { in: [...LIVE_INVOICE_STATUSES] } },
+        },
+        select: { invoice: { select: { number: true } } },
+      });
+
+      if (stolen) {
+        throw new AlreadyBilledError(stolen.invoice.number);
+      }
+
       const number = await nextNumber(
         { document: "INVOICE", at: invoiceDate, branchCode: branch.code },
         tx,
@@ -600,13 +702,29 @@ export async function issueInvoice(
 
   const invoice = await prisma.invoice.findUnique({
     where: { id: input.invoiceId },
-    select: { id: true, number: true, status: true, branchId: true, total: true },
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      branchId: true,
+      total: true,
+      lines: { select: { shipmentId: true, amount: true } },
+    },
   });
 
   if (!invoice) return { ok: false, error: "That invoice no longer exists." };
+  // The detail screen refuses to render another branch's invoice; a server
+  // action never passes that screen, and issuing is the step that makes the
+  // document real.
+  if (!coversBranch(actor, invoice.branchId)) {
+    return { ok: false, error: "That invoice belongs to another branch." };
+  }
   if (invoice.status !== "DRAFT") {
     return { ok: false, error: `This invoice is already ${invoice.status.toLowerCase()}.` };
   }
+
+  const stale = await staleAgainstConsignments(invoice);
+  if (stale) return { ok: false, error: stale };
 
   await prisma.invoice.update({
     where: { id: invoice.id },
@@ -626,6 +744,88 @@ export async function issueInvoice(
   });
 
   return { ok: true, invoiceId: invoice.id, number: invoice.number };
+}
+
+/**
+ * Has a consignment been re-rated since this draft was cut?
+ *
+ * ── The leak this closes ─────────────────────────────────────────────────
+ *
+ * A draft is a snapshot. The hub reweighs, `rerateShipment` moves the
+ * consignment's charges, and `raiseReweighDebitNote` deliberately raises
+ * nothing — because the invoice is still a draft and regenerating it is
+ * cleaner than correcting it. That advice is right, and nothing was
+ * enforcing it: nobody regenerated, the draft issued at the *old* figure,
+ * and once issued the only correction left is a debit note that the reweigh
+ * had already declined to raise. The difference was simply lost, on a
+ * document that looked perfectly ordinary.
+ *
+ * So issuing asks the question the reweigh assumed somebody would. Compared
+ * by re-running `draftLines` rather than against `chargesTotal`, so a charge
+ * head that is not customer-visible does not read as a mismatch on an
+ * invoice that never billed it.
+ *
+ * A debit note is exempt: it carries a delta by design and will never match
+ * the consignment's full charges.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+async function staleAgainstConsignments(invoice: {
+  number: string;
+  lines: Array<{ shipmentId: string | null; amount: Prisma.Decimal }>;
+}): Promise<string | null> {
+  if (isDebitNoteNumber(invoice.number)) return null;
+
+  const shipmentIds = [
+    ...new Set(invoice.lines.map((line) => line.shipmentId).filter(Boolean)),
+  ] as string[];
+
+  if (shipmentIds.length === 0) return null;
+
+  const { lines: fresh } = await draftLines(shipmentIds, prisma);
+
+  const totalBy = (
+    lines: Array<{ shipmentId: string | null; amount: Decimal | Prisma.Decimal }>,
+  ): Map<string, Decimal> => {
+    const totals = new Map<string, Decimal>();
+    for (const line of lines) {
+      if (!line.shipmentId) continue;
+      totals.set(
+        line.shipmentId,
+        (totals.get(line.shipmentId) ?? new Decimal(0)).plus(dec(line.amount.toString())),
+      );
+    }
+    return totals;
+  };
+
+  const stored = totalBy(invoice.lines);
+  const current = totalBy(fresh);
+
+  const moved = shipmentIds.filter(
+    (id) =>
+      !(stored.get(id) ?? new Decimal(0)).equals(current.get(id) ?? new Decimal(0)),
+  );
+
+  if (moved.length === 0) return null;
+
+  // Bounded by the mismatches, which is at most the invoice's own lines.
+  const shipments = await prisma.shipment.findMany({
+    where: { id: { in: moved } },
+    select: { id: true, lrNumber: true },
+  });
+
+  const named = shipments
+    .map((shipment) => {
+      const was = (stored.get(shipment.id) ?? new Decimal(0)).toFixed(2);
+      const now = (current.get(shipment.id) ?? new Decimal(0)).toFixed(2);
+      return `${shipment.lrNumber} (₹${was} → ₹${now})`;
+    })
+    .join(", ");
+
+  return (
+    `${moved.length} consignment(s) have been re-rated since this draft was cut: ${named}. ` +
+    `Cancel this draft and bill them again — issuing it now would send the customer the old ` +
+    `figure, and an issued invoice can only be corrected with a debit note.`
+  );
 }
 
 /**
@@ -660,6 +860,9 @@ export async function cancelInvoice(
   });
 
   if (!invoice) return { ok: false, error: "That invoice no longer exists." };
+  if (!coversBranch(actor, invoice.branchId)) {
+    return { ok: false, error: "That invoice belongs to another branch." };
+  }
   if (invoice.status === "CANCELLED") {
     return { ok: false, error: "That invoice is already cancelled." };
   }
@@ -736,6 +939,9 @@ export async function createCreditNote(
   });
 
   if (!invoice) return { ok: false, error: "That invoice no longer exists." };
+  if (!coversBranch(actor, invoice.branchId)) {
+    return { ok: false, error: "That invoice belongs to another branch." };
+  }
   if (invoice.status === "CANCELLED") {
     return { ok: false, error: "That invoice is cancelled; there is nothing to credit." };
   }
@@ -767,8 +973,13 @@ export async function createCreditNote(
 
   try {
     const created = await tenantTransaction(async (tx) => {
+      // `at` spelled out. The CREDIT_NOTE series resets on the financial
+      // year and renders `{FY}`, and `nextNumber` defaults `at` to a bare
+      // `new Date()` — which on a UTC container reads as the previous day
+      // until 05:30 IST, so a note raised at one in the morning on 1 April
+      // was numbered into the year that closed the night before.
       const number = await nextNumber(
-        { document: "CREDIT_NOTE" },
+        { document: "CREDIT_NOTE", at: businessDay() },
         tx,
       );
 
@@ -885,7 +1096,26 @@ export async function recomputeInvoiceBalance(
   });
 }
 
+/**
+ * Thrown inside the transaction when a consignment was billed by somebody
+ * else between the selection and the commit. A class rather than a string
+ * match, so `describe` cannot mistake it for a database failure and answer
+ * "something went wrong" to a question with a precise answer.
+ */
+class AlreadyBilledError extends Error {
+  constructor(readonly invoiceNumber: string) {
+    super(`Already billed on ${invoiceNumber}`);
+    this.name = "AlreadyBilledError";
+  }
+}
+
 function describe(error: unknown): string {
+  if (error instanceof AlreadyBilledError) {
+    return (
+      `Those consignments were billed on ${error.invoiceNumber} while this invoice was ` +
+      `being raised. Nothing was saved — refresh and bill what is left.`
+    );
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("No active number series")) {
     return "No invoice number series is configured. Set one up under Masters → Number series.";

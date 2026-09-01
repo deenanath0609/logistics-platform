@@ -18,12 +18,18 @@ export function ToggleActive({
   label,
   action,
   disabled,
+  disabledReason,
 }: {
   id: string;
   isActive: boolean;
   label: string;
   action: (prev: ActionState, formData: FormData) => Promise<ActionState>;
   disabled?: boolean;
+  /**
+   * Why the button is off, shown on hover. A disabled control with no
+   * explanation is indistinguishable from a broken one.
+   */
+  disabledReason?: string;
 }) {
   const [state, formAction, pending] = useActionState(action, EMPTY);
 
@@ -41,7 +47,13 @@ export function ToggleActive({
         variant="ghost"
         size="icon-sm"
         disabled={pending || disabled}
-        title={isActive ? `Deactivate ${label}` : `Reactivate ${label}`}
+        title={
+          disabled && disabledReason
+            ? disabledReason
+            : isActive
+              ? `Deactivate ${label}`
+              : `Reactivate ${label}`
+        }
         className={isActive ? "text-muted-foreground" : "text-ok"}
       >
         {pending ? (

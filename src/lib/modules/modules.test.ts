@@ -11,7 +11,7 @@ import {
   type ModuleKey,
 } from "@/lib/modules/registry";
 import { NAV } from "@/components/shell/nav";
-import { PERMISSION_CODES } from "@/lib/rbac/permissions";
+import { PERMISSION_CODES, PERMISSIONS } from "@/lib/rbac/permissions";
 
 /**
  * The drift test matters more than the data it checks.
@@ -230,6 +230,28 @@ describe("permission ownership", () => {
       expect(OWNER_OF_PERMISSION.get(code)).toBeUndefined();
     }
     expect(MODULES.core.permissions).toEqual([]);
+  });
+
+  /**
+   * The drift that actually happened.
+   *
+   * `settlement.prepare` was added to the catalogue under `finance` and
+   * never added here, so no module owned it — and a permission no module
+   * owns is never narrowed out of a session. `prepareSettlementAction`
+   * checks it, server actions do not pass the layout's URL guard, and a
+   * carrier who had not bought billing could draft a driver payout.
+   *
+   * Checked by walking the catalogue rather than by naming the code, so the
+   * next finance permission somebody adds fails here instead of shipping.
+   */
+  it("claims every finance permission in the catalogue for billing", () => {
+    const unowned = PERMISSIONS.filter(
+      (permission) =>
+        permission.module === "finance" &&
+        OWNER_OF_PERMISSION.get(permission.code) !== "billing",
+    ).map((permission) => permission.code);
+
+    expect(unowned).toEqual([]);
   });
 
   it("owns the permissions that are meaningless without the module", () => {

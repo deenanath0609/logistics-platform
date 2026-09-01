@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { businessDay } from "@/lib/time/business-day";
 import {
   chargeableWeight,
   roundUpToStep,
@@ -495,13 +496,25 @@ export function conditionFailure(
 // Dates
 // ────────────────────────────────────────────────────────────
 
+/**
+ * The calendar day a value falls on, on the carrier's clock.
+ *
+ * Not `getUTC*`. `effectiveFrom` and `effectiveTo` come out of `@db.Date`
+ * columns as UTC midnight, and truncating those in UTC is right — but
+ * `context.at` is an *instant*, and a booking taken at 01:00 IST is
+ * 19:30 UTC the day before. Truncated in UTC it priced against yesterday's
+ * tariff: a card effective from the 1st did not apply to a consignment
+ * booked at one in the morning on the 1st, and the trace said the version
+ * "was not in force on the pricing date" while the contract said it was.
+ *
+ * `businessDay` maps UTC midnight to itself, so the stored `@db.Date`
+ * values are unchanged and only the instant is corrected.
+ */
 function asDay(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-  );
+  return businessDay(date);
 }
 
 /** Inclusive of from, inclusive of to — the way a contract reads. */

@@ -5,6 +5,7 @@ import { Bike, PackageCheck, WifiOff } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
+import { grantableRoles } from "@/lib/rbac/grant-guard";
 import {
   countFieldStaff,
   loadFieldStaffRoster,
@@ -132,6 +133,19 @@ function Carrying({ row }: { row: FieldStaffRow }) {
           </span>
         </Link>
       )}
+      {/* The cell shows the newest open run, and its stop count and COD
+          belong to that one. A second unfinished run is said rather than
+          hidden — it is usually yesterday's, and it is the thing somebody
+          has to chase. */}
+      {row.openRunCount > 1 && (
+        <Badge
+          variant="outline"
+          className="text-warn"
+          title="Older runs still open. Open the delivery board to see them."
+        >
+          +{row.openRunCount - 1} older
+        </Badge>
+      )}
       {row.openPickups > 0 && (
         <Badge variant="secondary" className="gap-1">
           <PackageCheck />
@@ -196,6 +210,13 @@ export default async function FieldStaffPage({
     }),
   ]);
 
+  // Only the roles this administrator may actually pass on. `createUser`
+  // and `updateUser` already refuse an escalation — correctly — but the
+  // picker offered every active role in the organisation, so a branch
+  // administrator adding a delivery boy was shown ACCOUNTS and Super
+  // Admin and found out on submit. The refusal stays; the trap does not.
+  const grantable = await grantableRoles(actor, roles);
+
   // Counted from the rows on screen rather than the whole network, because
   // the numbers have to agree with the table underneath them — a tile that
   // disagrees with the list below it is worse than no tile.
@@ -219,7 +240,7 @@ export default async function FieldStaffPage({
               <UserFormDialog
                 mode="create"
                 action={createUser}
-                roles={roles}
+                roles={grantable}
                 branches={branches}
                 defaultFieldUser
                 createLabel="New field user"
@@ -348,7 +369,7 @@ export default async function FieldStaffPage({
                         <UserFormDialog
                           mode="edit"
                           action={updateUser}
-                          roles={roles}
+                          roles={grantable}
                           branches={branches}
                           user={{
                             id: row.id,
@@ -373,6 +394,7 @@ export default async function FieldStaffPage({
                           userName={row.name}
                           branchLabel={row.branch?.code ?? "no branch"}
                           codInHand={row.codInHand}
+                          blockedReason={row.deactivationBlockedReason}
                           action={
                             row.isDeactivated ? reactivateUser : deactivateUser
                           }

@@ -194,8 +194,15 @@ export type FieldStaffRow = {
     stopsRemaining: number;
     codExpected: string;
   } | null;
+  /** How many open runs they hold, when `openRun` is only the newest. */
+  openRunCount: number;
   /** Pickups assigned and not yet collected. */
   openPickups: number;
+  /**
+   * Why `deactivateFieldUser` would refuse right now, in the words it
+   * would use. Null when the person can be stood down.
+   */
+  deactivationBlockedReason: string | null;
   /** Cash collected and not yet handed over, in rupees. */
   codInHand: string;
   lastActivityAt: Date | null;
@@ -303,12 +310,14 @@ export async function loadFieldStaffRoster(
     await Promise.all([
       prisma.deliveryRun.findMany({
         where: { agentId: { in: ids }, status: { in: [...OPEN_RUN_STATUSES] } },
-        orderBy: { runDate: "desc" },
+        // Newest first, and `runByAgent` below keeps the first it sees.
+        orderBy: [{ runDate: "desc" }, { createdAt: "desc" }],
         select: {
           id: true,
           number: true,
           status: true,
           agentId: true,
+          runDate: true,
           totalTasks: true,
           codExpected: true,
           _count: {
@@ -321,14 +330,20 @@ export async function loadFieldStaffRoster(
         },
       }),
 
-      prisma.pickupAssignment.groupBy({
-        by: ["assignedToId"],
+      // The rows themselves, not a count. `canDeactivateFieldUser` names
+      // the documents in its refusal — "reassign PU-DEL-0031 first" is
+      // actionable at seven in the morning and "reassign their work" is
+      // not — so the screen has to hold the same facts the action does or
+      // it cannot preview the refusal. Bounded to one page of staff and
+      // to open assignments only.
+      prisma.pickupAssignment.findMany({
         where: {
           assignedToId: { in: ids },
           supersededAt: null,
           status: { in: [...UNFINISHED_PICKUP_STATUSES] },
         },
-        _count: { _all: true },
+        orderBy: { assignedAt: "asc" },
+        select: { assignedToId: true, request: { select: { number: true } } },
       }),
 
       // `recalculateRunTotals` rewrites the run row on every delivery the
@@ -367,10 +382,27 @@ export async function loadFieldStaffRoster(
       })
     : [];
 
-  const runByAgent = new Map(openRuns.map((run) => [run.agentId, run]));
-  const pickupCount = new Map(
-    openPickups.map((row) => [row.assignedToId, row._count._all]),
-  );
+  // ── First wins, not last ──────────────────────────────────────────────
+  //
+  // `new Map(rows.map(r => [r.agentId, r]))` keeps the **last** entry for
+  // a repeated key. With `runDate: "desc"` that is the *oldest* open run,
+  // so a delivery boy who still had yesterday's run unfinished showed
+  // yesterday's number in "Carrying now" — and the stop count and the COD
+  // figure in that cell belonged to the wrong run with nothing to say so.
+  // Written as a loop because the correct behaviour here is the one the
+  // `Map` constructor does not have.
+  const runByAgent = new Map<string, (typeof openRuns)[number]>();
+  const openRunCount = new Map<string, number>();
+  for (const run of openRuns) {
+    if (!runByAgent.has(run.agentId)) runByAgent.set(run.agentId, run);
+    openRunCount.set(run.agentId, (openRunCount.get(run.agentId) ?? 0) + 1);
+  }
+  const pickupsByAgent = new Map<string, string[]>();
+  for (const assignment of openPickups) {
+    const list = pickupsByAgent.get(assignment.assignedToId) ?? [];
+    list.push(assignment.request.number);
+    pickupsByAgent.set(assignment.assignedToId, list);
+  }
   const runSeen = new Map(
     runActivity.map((row) => [row.agentId, row._max.updatedAt]),
   );
@@ -387,8 +419,31 @@ export async function loadFieldStaffRoster(
     taskActivity.map((row) => [row.runId, row._max.updatedAt]),
   );
 
+  const runsByAgent = new Map<string, typeof openRuns>();
+  for (const run of openRuns) {
+    const list = runsByAgent.get(run.agentId) ?? [];
+    list.push(run);
+    runsByAgent.set(run.agentId, list);
+  }
+
   return users.map((user) => {
     const run = runByAgent.get(user.id) ?? null;
+    const pickupNumbers = pickupsByAgent.get(user.id) ?? [];
+
+    // The refusal `deactivateFieldUser` will produce, computed from the
+    // same pure rule and the same facts, so the dialog can show it before
+    // the button is pressed. `field-staff.ts` says it in its own docblock:
+    // "a rule that lives only inside the action is a rule the button
+    // cannot preview".
+    const blockedFromDeactivation = canDeactivateFieldUser(user.name, {
+      runs: (runsByAgent.get(user.id) ?? []).map((open) => ({
+        number: open.number,
+        status: open.status,
+        stopsRemaining: open._count.tasks,
+      })),
+      pickups: pickupNumbers.map((number) => ({ number })),
+    });
+
     const lastActivityAt = latestActivity(
       runSeen.get(user.id) ?? null,
       pickupSeen.get(user.id) ?? null,
@@ -417,7 +472,11 @@ export async function loadFieldStaffRoster(
             codExpected: new Decimal(run.codExpected.toString()).toFixed(2),
           }
         : null,
-      openPickups: pickupCount.get(user.id) ?? 0,
+      openRunCount: openRunCount.get(user.id) ?? 0,
+      openPickups: pickupNumbers.length,
+      deactivationBlockedReason: blockedFromDeactivation.ok
+        ? null
+        : blockedFromDeactivation.reason,
       codInHand: new Decimal(
         codByAgent.get(user.id)?.toString() ?? 0,
       ).toFixed(2),

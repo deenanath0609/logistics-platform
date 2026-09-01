@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   Loader2,
   Check,
@@ -98,16 +99,32 @@ export function ReasonAction({
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<FinanceActionState>({});
   const [pending, startTransition] = useTransition();
+  const router = useRouter();
 
   const Icon = icon ? ICONS[icon] : null;
 
-  function submit(formData: FormData) {
+  /**
+   * `onSubmit` rather than `<form action={fn}>`, for the reason spelled out
+   * in `entity-form.tsx`: React 19 resets an uncontrolled form after the
+   * action resolves, including when it refused. A credit note carries an
+   * amount, a tax amount and a reason, and "credits already raised come to
+   * ₹X" emptied all three — so the second attempt started from nothing.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action({}, formData);
       setState(result);
       if (result.ok) {
         toast.success(result.message ?? "Done.");
         setOpen(false);
+        // Same contract as `EntityFormDialog`. Some of these actions
+        // remove the very record the page is rendering — a removed vendor
+        // would otherwise revalidate into a 404 on the user's screen with
+        // the success toast still fading.
+        if (result.redirectTo) router.push(result.redirectTo);
       }
     });
   }
@@ -135,7 +152,7 @@ export function ReasonAction({
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
 
-        <form action={submit} className="flex flex-col gap-4">
+        <form onSubmit={submit} className="flex flex-col gap-4">
           <input type="hidden" name={idField} value={id} />
           {Object.entries(hidden).map(([key, value]) => (
             <input key={key} type="hidden" name={key} value={value} />

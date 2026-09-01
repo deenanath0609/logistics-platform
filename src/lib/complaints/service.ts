@@ -3,6 +3,7 @@ import { nextNumber } from "@/lib/numbering/number-series";
 import { recordAudit } from "@/server/services/audit";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import type {
   ComplaintCategory,
   ComplaintPriority,
@@ -40,6 +41,34 @@ export type ComplaintResult<T> =
  * out at each call site.
  */
 export const CUSTOMER_VISIBLE = { isInternal: false } as const;
+
+// ────────────────────────────────────────────────────────────
+// Branch scope
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Whether this person may act on this complaint.
+ *
+ * The list at `/complaints` and the detail page both scope to the branches
+ * a user covers, with one deliberate exception: whoever owns a complaint
+ * can work it wherever it was raised. The write path had none of that —
+ * `addMessage` and `transitionComplaint` took an id and acted on it — so a
+ * Bombay branch manager could resolve, close, or send a customer-visible
+ * reply on a Jaipur complaint by pasting its id into the form. The same
+ * shape as the two sibling modules found this week with scoped lists and
+ * unscoped actions.
+ *
+ * Kept identical to the rule on the page on purpose: an action that can
+ * touch what its screen refuses to show is a hole, whichever way round.
+ */
+function mayAct(
+  actor: SessionUser,
+  complaint: { branchId: string | null; assignedToId: string | null },
+): boolean {
+  if (complaint.assignedToId === actor.id) return true;
+  if (!complaint.branchId) return true;
+  return coversBranch(actor, complaint.branchId);
+}
 
 /** Messages the customer is allowed to see, ordered oldest first. */
 export async function customerVisibleMessages(complaintId: string) {
@@ -99,6 +128,16 @@ export async function createComplaint(
   }
 
   branchId ??= actor.primaryBranch?.id ?? null;
+
+  if (input.assignedToId) {
+    const assignee = await prisma.user.findFirst({
+      where: { id: input.assignedToId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!assignee) {
+      return { ok: false, error: "That person is no longer active." };
+    }
+  }
 
   const raisedAt = new Date();
   const { respondBy, resolveBy } = deadlinesFrom(
@@ -183,6 +222,18 @@ export async function addMessage(
 
   const isInternal = input.isInternal ?? true;
 
+  // Read and scope-check before the write. A message that reaches a
+  // customer is the most visible thing this module does.
+  const subject = await prisma.complaint.findUnique({
+    where: { id: input.complaintId },
+    select: { id: true, branchId: true, assignedToId: true },
+  });
+
+  if (!subject) return { ok: false, error: "That complaint no longer exists." };
+  if (!mayAct(actor, subject)) {
+    return { ok: false, error: "That complaint belongs to another branch." };
+  }
+
   try {
     const result = await tenantTransaction(async (tx) => {
       const complaint = await tx.complaint.findUnique({
@@ -264,6 +315,9 @@ export async function transitionComplaint(
     },
   });
   if (!complaint) return { ok: false, error: "That complaint no longer exists." };
+  if (!mayAct(actor, complaint)) {
+    return { ok: false, error: "That complaint belongs to another branch." };
+  }
 
   const transition = findTransition(complaint.status, input.to);
   if (!transition) {
@@ -283,6 +337,19 @@ export async function transitionComplaint(
   }
   if (transition.requiresAssignee && !input.assignedToId) {
     return { ok: false, error: "Choose who owns this complaint." };
+  }
+
+  // Checked rather than connected blind: a stale id from a form that sat
+  // open through a leaver's last day would otherwise surface as "a
+  // referenced record is missing", which tells the person nothing.
+  if (input.assignedToId) {
+    const assignee = await prisma.user.findFirst({
+      where: { id: input.assignedToId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!assignee) {
+      return { ok: false, error: "That person is no longer active." };
+    }
   }
 
   const now = new Date();

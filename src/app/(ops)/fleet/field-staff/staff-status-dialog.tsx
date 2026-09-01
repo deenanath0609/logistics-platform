@@ -45,6 +45,7 @@ export function StaffStatusDialog({
   userName,
   branchLabel,
   codInHand,
+  blockedReason,
   action,
 }: {
   mode: keyof typeof MODE;
@@ -53,6 +54,19 @@ export function StaffStatusDialog({
   branchLabel: string;
   /** Rupees collected and not yet deposited. Formatted by the caller. */
   codInHand?: string;
+  /**
+   * The refusal `deactivateFieldUser` would produce right now, computed
+   * on the server from the same pure rule. Null when it would succeed.
+   *
+   * `field-staff.ts` puts it plainly: "a rule that lives only inside the
+   * action is a rule the button cannot preview, and a disabled-looking
+   * button that succeeds anyway is worse than no button." The rule refuses
+   * outright on open work, the row already renders the run number and the
+   * pickup count two cells away, and the dialog still asked "are you
+   * sure?" and then failed. It now says which documents are in the way,
+   * before anything is pressed.
+   */
+  blockedReason?: string | null;
   action: (prev: ActionState, formData: FormData) => Promise<ActionState>;
 }) {
   const [open, setOpen] = useState(false);
@@ -64,6 +78,7 @@ export function StaffStatusDialog({
   const Icon = config.icon;
   const deactivating = mode === "deactivate";
   const holdingCash = Boolean(codInHand && Number(codInHand) > 0);
+  const blocked = deactivating && Boolean(blockedReason);
 
   function submit(formData: FormData) {
     startTransition(async () => {
@@ -124,6 +139,12 @@ export function StaffStatusDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {blocked && (
+          <p className="rounded-md border border-bad/40 bg-bad-muted px-3 py-2 text-sm text-bad">
+            {blockedReason}
+          </p>
+        )}
+
         {deactivating && holdingCash && (
           <p className="rounded-md border border-warn/40 bg-warn-muted px-3 py-2 text-sm text-warn">
             {userName} is still holding ₹{codInHand} in undeposited COD.
@@ -158,7 +179,8 @@ export function StaffStatusDialog({
             type="submit"
             form={formId}
             variant={config.variant}
-            disabled={pending}
+            disabled={pending || blocked}
+            title={blocked ? (blockedReason ?? undefined) : undefined}
           >
             {pending && <Loader2 className="animate-spin" />}
             {config.confirm} {userName}

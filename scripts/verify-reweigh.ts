@@ -22,7 +22,9 @@ import {
   type TenantContext,
 } from "../src/lib/tenant";
 import type { SessionUser } from "../src/lib/auth/session";
+import Decimal from "decimal.js";
 import { createBooking } from "../src/lib/shipment/booking";
+import { cancelInvoice, generateInvoice, issueInvoice } from "../src/lib/billing/invoice";
 import { captureRevisedWeight } from "../src/lib/hub/weight";
 import { appendShipmentEvent } from "../src/lib/shipment/events";
 import { dispatchEvent } from "../src/lib/notifications/dispatch";
@@ -432,6 +434,289 @@ async function run() {
   );
 
   console.log(`\n  WEIGHT_CAPTURED events on the timeline: ${eventsNow}`);
+
+  // ── The other half: a reweigh after the invoice went out ──
+  //
+  // Everything above proves the uninvoiced case, where raising nothing is
+  // the right answer. It was never the case that mattered: an invoice that
+  // has left the building cannot be edited, so a weight that moves after it
+  // is billed has to leave the building too, on a supplementary document.
+  // Three outcomes have to be told apart — not invoiced, still a draft, and
+  // issued — and only the third raises a note.
+  console.log("\n  Reweighing a consignment that is already billed…\n");
+
+  const customer = await prisma.customer.findFirstOrThrow({
+    where: { code: "ACME01" },
+    select: { id: true, name: true },
+  });
+
+  const billed = await createBooking(
+    {
+      mode: "PTL",
+      serviceTypeId: service.id,
+      bookingBranchId: origin.id,
+      originBranchId: origin.id,
+      destinationBranchId: hub.id,
+      consignorId: customer.id,
+      consignorName: customer.name,
+      consignorPhone: "9811100022",
+      consignorAddress: "Plot 14, Udyog Vihar",
+      consignorCityId: gurugram.id,
+      consignorPincode: "122015",
+      consigneeName: "Reweigh Invoiced Receiver",
+      consigneePhone: "9811100023",
+      consigneeAddress: "22 Vaishali Nagar",
+      consigneeCityId: jaipur.id,
+      consigneePincode: "302013",
+      packageCount: 1,
+      actualWeight: 8,
+      goodsDescription: "Reweigh probe (invoiced) — auto-generated",
+      paymentType: "PAID",
+    },
+    actor,
+  );
+
+  check("a second consignment books, to be invoiced", billed.ok, billed.ok ? billed.lrNumber : billed.error);
+
+  if (billed.ok) {
+    for (const step of ["PICKUP_COMPLETED", "INBOUND_SCAN"] as const) {
+      await appendShipmentEvent(
+        { shipmentId: billed.shipmentId, eventType: step, branchId: origin.id },
+        actor,
+      );
+    }
+
+    const drafted = await generateInvoice(
+      {
+        customerId: customer.id,
+        branchId: origin.id,
+        shipmentIds: [billed.shipmentId],
+      },
+      actor,
+    );
+
+    check("it is drafted onto an invoice", drafted.ok, drafted.ok ? drafted.number : drafted.error);
+
+    if (drafted.ok) {
+      /*
+        While it is still a draft, correcting the document beats debiting
+        it — regenerating a draft costs nothing and leaves one clean invoice
+        rather than an invoice plus a correction.
+
+        Reweighed to 40 kg, not 12. The published tariff floors a shipment
+        at 10 chargeable kg and ₹420, so 8, 12 and even 30 kg all price to
+        the same figure — and a debit note that is not raised because the
+        price did not move proves nothing about drafts. 40 kg at the 20–100
+        band's ₹13 clears the floor, so the price genuinely moves and the
+        refusal has to be about the document's status.
+      */
+      const onDraft = await captureRevisedWeight(
+        { shipmentId: billed.shipmentId, branchId: hub.id, actualWeight: 40 },
+        actor,
+      );
+
+      check(
+        "the draft-stage reweigh actually moved the price",
+        onDraft.ok && onDraft.delta.greaterThan(0),
+        onDraft.ok ? `₹${onDraft.delta.toFixed(2)}` : onDraft.error,
+      );
+      check(
+        "reweighing while the invoice is a draft raises no debit note",
+        onDraft.ok && onDraft.debitNote.raised === false,
+        onDraft.ok
+          ? onDraft.debitNote.raised === false
+            ? onDraft.debitNote.reason
+            : "one was raised"
+          : onDraft.error,
+      );
+      check(
+        "and says to regenerate the draft rather than correct it",
+        onDraft.ok &&
+          onDraft.debitNote.raised === false &&
+          onDraft.debitNote.reason.toLowerCase().includes("draft"),
+        onDraft.ok && onDraft.debitNote.raised === false ? onDraft.debitNote.reason : "",
+      );
+
+      const draftUnchanged = await prisma.invoice.findUniqueOrThrow({
+        where: { id: drafted.invoiceId },
+        select: { status: true, total: true },
+      });
+      check(
+        "and the draft is still a draft",
+        draftUnchanged.status === "DRAFT",
+        draftUnchanged.status,
+      );
+
+      /*
+        "Regenerate it rather than debiting a document that has not left the
+        building" is advice, and advice is not a control. Nobody regenerated
+        the draft, it issued at the figure it was cut with, and the ₹117.60
+        the hub had just found was gone — no debit note, because the reweigh
+        had already decided none was due against a draft. Issuing now asks
+        the question the reweigh assumed somebody would.
+      */
+      const staleIssue = await issueInvoice(
+        {
+          invoiceId: drafted.invoiceId,
+          reason: "Probe — the draft is stale and this should be refused.",
+        },
+        actor,
+      );
+
+      check(
+        "issuing a draft whose consignment was re-rated is refused",
+        staleIssue.ok === false,
+        staleIssue.ok ? `it issued as ${staleIssue.number}` : staleIssue.error,
+      );
+      check(
+        "and the refusal names the consignment and both figures",
+        staleIssue.ok === false && staleIssue.error.includes(billed.lrNumber),
+        staleIssue.ok ? "" : staleIssue.error,
+      );
+
+      const afterRefusal = await prisma.invoice.findUniqueOrThrow({
+        where: { id: drafted.invoiceId },
+        select: { status: true, issuedAt: true },
+      });
+      check(
+        "the draft is still a draft, and was never issued",
+        afterRefusal.status === "DRAFT" && afterRefusal.issuedAt === null,
+        afterRefusal.status,
+      );
+
+      // The way out is the one the reweigh recommended: withdraw the stale
+      // draft and bill the consignment again at what it now weighs.
+      const withdrawn = await cancelInvoice(
+        { invoiceId: drafted.invoiceId, reason: "Re-rated after the draft was cut." },
+        actor,
+      );
+      check("the stale draft cancels", withdrawn.ok, withdrawn.ok ? withdrawn.number : withdrawn.error);
+
+      const redrafted = await generateInvoice(
+        {
+          customerId: customer.id,
+          branchId: origin.id,
+          shipmentIds: [billed.shipmentId],
+        },
+        actor,
+      );
+      check(
+        "and the consignment bills again, at the revised weight",
+        redrafted.ok,
+        redrafted.ok ? redrafted.number : redrafted.error,
+      );
+      if (!redrafted.ok) {
+        await prisma.$disconnect();
+        process.exit(1);
+      }
+
+      const liveInvoiceId = redrafted.invoiceId;
+
+      const issued = await issueInvoice(
+        {
+          invoiceId: liveInvoiceId,
+          reason: "Checked against the consignment note before the reweigh probe.",
+        },
+        actor,
+      );
+      check("the fresh invoice issues", issued.ok, issued.ok ? issued.number : issued.error);
+      const issuedNumber = issued.ok ? issued.number : redrafted.number;
+
+      const asIssued = await prisma.invoice.findUniqueOrThrow({
+        where: { id: liveInvoiceId },
+        select: { status: true, subtotal: true, taxAmount: true, total: true },
+      });
+      check(
+        "and it bills the revised figure, not the one the stale draft carried",
+        new Decimal(asIssued.subtotal.toString()).greaterThan(600),
+        `₹${asIssued.total}`,
+      );
+
+      // 150 kg: past the 100 kg band boundary, so the price moves well
+      // clear of the ₹420 floor and the delta is unambiguous.
+      const reweighed = await captureRevisedWeight(
+        { shipmentId: billed.shipmentId, branchId: hub.id, actualWeight: 150 },
+        actor,
+      );
+
+      check(
+        "reweighing an issued consignment is accepted",
+        reweighed.ok,
+        reweighed.ok ? `₹${reweighed.delta.toFixed(2)}` : reweighed.error,
+      );
+
+      if (reweighed.ok) {
+        check(
+          "and it raises a debit note for the difference",
+          reweighed.debitNote.raised === true,
+          reweighed.debitNote.raised
+            ? reweighed.debitNote.number
+            : reweighed.debitNote.reason,
+        );
+
+        if (reweighed.debitNote.raised) {
+          const note = await prisma.invoice.findUniqueOrThrow({
+            where: { id: reweighed.debitNote.debitNoteId },
+            select: { number: true, subtotal: true, total: true, notes: true },
+          });
+
+          check(
+            "the note is numbered from the debit-note series",
+            note.number.startsWith("DN/"),
+            note.number,
+          );
+          check(
+            "it bills the taxable delta and nothing else",
+            new Decimal(note.subtotal.toString())
+              .minus(reweighed.taxableDelta)
+              .abs()
+              .lessThanOrEqualTo("0.01"),
+            `note ₹${note.subtotal} vs delta ₹${reweighed.taxableDelta.toFixed(2)}`,
+          );
+          check(
+            "and it names the invoice it corrects",
+            (note.notes ?? "").includes(issuedNumber),
+            note.notes ?? "",
+          );
+        }
+
+        // The point of the whole exercise. The customer holds a document;
+        // it has to still say what it said.
+        const afterReweigh = await prisma.invoice.findUniqueOrThrow({
+          where: { id: liveInvoiceId },
+          select: { status: true, subtotal: true, taxAmount: true, total: true },
+        });
+
+        check(
+          "the issued invoice did not change underneath the customer",
+          afterReweigh.subtotal.toString() === asIssued.subtotal.toString() &&
+            afterReweigh.taxAmount.toString() === asIssued.taxAmount.toString() &&
+            afterReweigh.total.toString() === asIssued.total.toString(),
+          `₹${asIssued.total} → ₹${afterReweigh.total}`,
+        );
+
+        // Scoped to this consignment: the BOOKING row is the only evidence
+        // of what was quoted at the counter, and two INVOICE rows are the
+        // record of two weighings.
+        const calcs = await prisma.freightCalculation.findMany({
+          where: { shipmentId: billed.shipmentId },
+          orderBy: { createdAt: "asc" },
+          select: { stage: true, grandTotal: true },
+        });
+
+        check(
+          "the booking calculation survived both reweighs",
+          calcs.filter((c) => c.stage === "BOOKING").length === 1,
+          calcs.map((c) => `${c.stage}:₹${c.grandTotal}`).join(" "),
+        );
+        check(
+          "and each reweigh stored its own INVOICE-stage calculation",
+          calcs.filter((c) => c.stage === "INVOICE").length === 2,
+          `${calcs.filter((c) => c.stage === "INVOICE").length} INVOICE row(s)`,
+        );
+      }
+    }
+  }
 
   console.log(
     failures === 0

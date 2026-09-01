@@ -155,6 +155,13 @@ export const MODULES: Record<ModuleKey, ModuleDefinition> = {
       "expense.record",
       "expense.approve",
       "settlement.read",
+      // Preparing a payout is as much a billing capability as approving
+      // one. It was the only permission in the catalogue's `finance` module
+      // that no module here claimed, and an unclaimed permission is not
+      // narrowed out of the session at all — so `prepareSettlementAction`,
+      // which is gated on it, answered a carrier who never bought billing.
+      // The URL guard in `(ops)/layout.tsx` does not cover a server action.
+      "settlement.prepare",
       "settlement.approve",
       "report.financial",
     ],

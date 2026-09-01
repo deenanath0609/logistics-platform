@@ -12,6 +12,7 @@ import {
   runConsolidatedBilling,
 } from "@/lib/billing/invoice";
 import { createDebitNote } from "@/lib/billing/debit-note";
+import { endOfBusinessDay, startOfBusinessDay } from "@/lib/time/business-day";
 import type { FinanceActionState } from "../action-state";
 
 const PATH = "/finance/invoices";
@@ -33,11 +34,23 @@ function fieldErrors(error: z.ZodError): Record<string, string> {
   return out;
 }
 
-/** End of the chosen day, so a shipment booked at 18:40 is included. */
-function endOfDay(value: string): Date {
-  const date = new Date(value);
-  date.setHours(23, 59, 59, 999);
-  return date;
+/**
+ * The window a billing period actually covers.
+ *
+ * `bookedAt` is a full `DateTime`, and a period typed as two calendar days
+ * has to become the instants those days start and end *on the carrier's
+ * clock*. `new Date("2026-08-01")` is UTC midnight and `setHours` moved the
+ * *server's* local day, so on a UTC container the window ran 05:30 late at
+ * both ends: a consignment booked at 23:00 IST on the 31st fell out of
+ * August's bill run and into September's, and one booked at 02:00 IST on
+ * 1 September was billed in August. Nothing on either invoice would say so.
+ */
+function periodStart(value: string): Date {
+  return startOfBusinessDay(new Date(value));
+}
+
+function periodEnd(value: string): Date {
+  return endOfBusinessDay(new Date(value));
 }
 
 const generateSchema = z.object({
@@ -72,8 +85,8 @@ export async function generateInvoiceAction(
       return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
     }
 
-    const from = new Date(parsed.data.periodFrom);
-    const to = endOfDay(parsed.data.periodTo);
+    const from = periodStart(parsed.data.periodFrom);
+    const to = periodEnd(parsed.data.periodTo);
 
     if (to < from) {
       return { error: "The period ends before it starts.", fieldErrors: { periodTo: "After the start date" } };
@@ -152,8 +165,8 @@ export async function runBillingAction(
 
     const result = await runConsolidatedBilling(
       {
-        from: new Date(parsed.data.periodFrom),
-        to: endOfDay(parsed.data.periodTo),
+        from: periodStart(parsed.data.periodFrom),
+        to: periodEnd(parsed.data.periodTo),
         branchId: parsed.data.branchId,
         deliveredOnly: parsed.data.deliveredOnly,
         groupBy: parsed.data.perBranch ? "CUSTOMER_BRANCH" : "CUSTOMER",
@@ -246,11 +259,14 @@ export async function createCreditNoteAction(
     const actor = await authorize("invoice.cancel");
     const invoiceId = String(formData.get("id") ?? "");
     const reason = String(formData.get("reason") ?? "");
-    const amount = Number(formData.get("amount") ?? 0);
-    const taxAmount = Number(formData.get("taxAmount") ?? 0);
+    // The digits that were typed, not a double. `money(dec(...))` in the
+    // service takes a string exactly; `Number` is a lossy first step on a
+    // figure that ends up on a document the customer files.
+    const amount = String(formData.get("amount") ?? "").trim();
+    const taxAmount = String(formData.get("taxAmount") ?? "").trim();
 
     if (!invoiceId) return { error: "Nothing selected." };
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       return { error: "Enter the amount to credit.", fieldErrors: { amount: "More than zero" } };
     }
     if (!reason.trim()) {
@@ -258,7 +274,12 @@ export async function createCreditNoteAction(
     }
 
     const result = await createCreditNote(
-      { invoiceId, amount, taxAmount: Number.isFinite(taxAmount) ? taxAmount : 0, reason },
+      {
+        invoiceId,
+        amount,
+        taxAmount: Number.isFinite(Number(taxAmount)) ? taxAmount : "0",
+        reason,
+      },
       actor,
     );
     if (!result.ok) return { error: result.error };
@@ -285,12 +306,13 @@ export async function createDebitNoteAction(
     const actor = await authorize("invoice.create");
     const invoiceId = String(formData.get("id") ?? "");
     const reason = String(formData.get("reason") ?? "");
-    const amount = Number(formData.get("amount") ?? 0);
-    const taxAmount = Number(formData.get("taxAmount") ?? 0);
+    // As above: strings all the way to `Decimal`.
+    const amount = String(formData.get("amount") ?? "").trim();
+    const taxAmount = String(formData.get("taxAmount") ?? "").trim();
     const shipmentId = String(formData.get("shipmentId") ?? "").trim();
 
     if (!invoiceId) return { error: "Nothing selected." };
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       return {
         error: "Enter the additional taxable value.",
         fieldErrors: { amount: "More than zero — a reduction is a credit note." },
@@ -308,7 +330,7 @@ export async function createDebitNoteAction(
         againstInvoiceId: invoiceId,
         shipmentId: shipmentId || null,
         amount,
-        taxAmount: Number.isFinite(taxAmount) ? taxAmount : 0,
+        taxAmount: Number.isFinite(Number(taxAmount)) ? taxAmount : "0",
         reason,
       },
       actor,

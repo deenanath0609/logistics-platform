@@ -3,8 +3,9 @@ import { prisma, tenantTransaction } from "@/lib/prisma";
 import type { CodMode } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
-import { coversBranch, branchScope } from "@/server/repositories/scope";
+import { coversBranch } from "@/server/repositories/scope";
 import { enqueueOutbox } from "@/server/services/outbox";
+import { storedDate } from "./calendar";
 
 /**
  * Cash on delivery, from the door to the branch safe.
@@ -33,6 +34,8 @@ export type AgentCodPosition = {
   deposited: Decimal;
   /** What the branch has counted and accepted. */
   verified: Decimal;
+  /** How many of the day's deposits have actually been counted. */
+  countedDeposits: number;
   /** Collected minus deposited. Red on the day-end screen when non-zero. */
   shortfall: Decimal;
   collectionCount: number;
@@ -51,16 +54,30 @@ export async function agentCodPositions(
   date: Date,
   user: SessionUser,
 ): Promise<AgentCodPosition[]> {
+  // One branch's day end, and only if it is this person's branch. The page
+  // validates its query string, but this is an exported service and the
+  // guarantee has to live where the read is.
+  if (!coversBranch(user, branchId)) return [];
+
+  // `collectedAt` is a real instant, so its window is the *local* day —
+  // that is when the agent was at the doors. `depositDate` and `runDate`
+  // are `date` columns and are matched at UTC midnight; see `./calendar`.
   const dayStart = startOfDay(date);
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
+  const calendarDay = storedDate(date);
 
   const [collections, deposits, runs] = await Promise.all([
     prisma.codCollection.findMany({
       where: {
+        // No `...branchScope()` spread here. It returns `{ branchId: {...} }`,
+        // and spread after an explicit `branchId` it *replaced* it — so a
+        // manager covering two branches saw both branches' cash added up
+        // under whichever one the screen said it was showing, and the
+        // shortfall against a single branch's deposits was invented. The
+        // `coversBranch` guard above is the scope check; this is the filter.
         branchId,
         collectedAt: { gte: dayStart, lt: dayEnd },
-        ...branchScope(user, "branchId"),
       },
       select: {
         id: true,
@@ -72,7 +89,7 @@ export async function agentCodPositions(
       },
     }),
     prisma.codDeposit.findMany({
-      where: { branchId, depositDate: dayStart },
+      where: { branchId, depositDate: calendarDay },
       select: {
         agentId: true,
         amountDeclared: true,
@@ -81,7 +98,7 @@ export async function agentCodPositions(
       },
     }),
     prisma.deliveryRun.findMany({
-      where: { branchId, runDate: dayStart },
+      where: { branchId, runDate: calendarDay },
       select: { number: true, agentId: true, agent: { select: { name: true } } },
     }),
   ]);
@@ -100,6 +117,7 @@ export async function agentCodPositions(
       collected: new Decimal(0),
       deposited: new Decimal(0),
       verified: new Decimal(0),
+      countedDeposits: 0,
       shortfall: new Decimal(0),
       collectionCount: 0,
       undepositedIds: [],
@@ -121,11 +139,21 @@ export async function agentCodPositions(
     if (!collection.depositId) row.undepositedIds.push(collection.id);
   }
 
+  // Counted deposits are worth what the branch counted, not what the slip
+  // claimed. An uncounted one is worth what was declared — nobody has
+  // contradicted it yet.
   for (const deposit of deposits) {
     const row = seat(deposit.agentId, "Unnamed agent");
-    row.deposited = row.deposited.plus(deposit.amountDeclared.toString());
-    if (deposit.amountVerified) {
-      row.verified = row.verified.plus(deposit.amountVerified.toString());
+    const declared = new Decimal(deposit.amountDeclared.toString());
+    const counted =
+      deposit.amountVerified === null
+        ? null
+        : new Decimal(deposit.amountVerified.toString());
+
+    row.deposited = row.deposited.plus(counted ?? declared);
+    if (counted) {
+      row.verified = row.verified.plus(counted);
+      row.countedDeposits += 1;
     }
   }
 
@@ -195,7 +223,11 @@ export async function createCodDeposit(
     return { ok: false, error: "Enter the amount being handed over.", field: "amountDeclared" };
   }
 
-  const depositDate = startOfDay(input.depositDate);
+  // `@db.Date`. Local midnight files the handover under yesterday at IST,
+  // where the SLA shortfall detector — which matches this column at UTC
+  // midnight, correctly — would never find it and would open an exception
+  // against an agent who had handed in every rupee. See `./calendar`.
+  const depositDate = storedDate(input.depositDate);
 
   const collections = await prisma.codCollection.findMany({
     where: {
@@ -275,20 +307,46 @@ export async function createCodDeposit(
  *
  * A deposit that counts short is `DISPUTED`, not silently accepted, and its
  * collections stay where they are until somebody resolves it.
+ *
+ * ── The shortfall this measures ─────────────────────────────────────────
+ *
+ * `shortfall` is what is missing against **what the agent took at the
+ * doors** — never against what their own slip claimed. That distinction
+ * used to be lost here: `createCodDeposit` stored `collected − declared`
+ * and this function overwrote it with `declared − verified`. An agent who
+ * collected ₹1,000, declared ₹800 and had ₹800 counted therefore ended the
+ * day with a `shortfall` of ₹0, a `VERIFIED` deposit, and every one of the
+ * ₹1,000 of collections moved to `RECONCILED` — ₹200 of a customer's money
+ * marked settled and then invisible on every screen that reads the deposit.
+ *
+ * So the count is compared against the collections the deposit actually
+ * covers, and a deposit is only `VERIFIED` when nothing is missing. The
+ * `disputed` flag still means "the count disagrees with the slip", because
+ * that is a different conversation from "the agent is short".
+ * ────────────────────────────────────────────────────────────────────────
  */
 export async function verifyCodDeposit(
   depositId: string,
   amountVerified: number | string,
   actor: SessionUser,
   remarks?: string | null,
-): Promise<{ ok: true; shortfall: string; disputed: boolean } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; shortfall: string; disputed: boolean; miscount: string }
+  | { ok: false; error: string }
+> {
   if (!can(actor, "cod.reconcile")) {
     return { ok: false, error: "You do not have permission to reconcile COD." };
   }
 
   const deposit = await prisma.codDeposit.findUnique({
     where: { id: depositId },
-    select: { id: true, branchId: true, amountDeclared: true, status: true },
+    select: {
+      id: true,
+      branchId: true,
+      amountDeclared: true,
+      status: true,
+      collections: { select: { amountCollected: true } },
+    },
   });
 
   if (!deposit) return { ok: false, error: "That deposit does not exist." };
@@ -300,8 +358,17 @@ export async function verifyCodDeposit(
   }
 
   const verified = new Decimal(amountVerified || 0);
-  const shortfall = new Decimal(deposit.amountDeclared.toString()).minus(verified);
-  const disputed = !shortfall.isZero();
+  const declared = new Decimal(deposit.amountDeclared.toString());
+  const collected = deposit.collections.reduce(
+    (sum, row) => sum.plus(row.amountCollected.toString()),
+    new Decimal(0),
+  );
+
+  /** What was taken at the doors and has not reached the branch. */
+  const shortfall = collected.minus(verified);
+  /** What the count disagrees with the slip about. */
+  const miscount = declared.minus(verified);
+  const disputed = !shortfall.isZero() || !miscount.isZero();
 
   await tenantTransaction(async (tx) => {
     await tx.codDeposit.update({
@@ -324,7 +391,33 @@ export async function verifyCodDeposit(
     }
   });
 
-  return { ok: true, shortfall: shortfall.toFixed(2), disputed };
+  if (disputed) {
+    // §A.11: money counted short at the branch is the same same-day
+    // exception as money never handed in. Raised on the count as well as on
+    // the handover, because this is where a partial deposit is finally
+    // proved rather than merely declared.
+    await enqueueOutbox({
+      eventType: "cod.shortfall",
+      aggregate: "CodDeposit",
+      aggregateId: depositId,
+      payload: {
+        branchId: deposit.branchId,
+        stage: "VERIFIED",
+        collected: collected.toFixed(2),
+        declared: declared.toFixed(2),
+        verified: verified.toFixed(2),
+        shortfall: shortfall.toFixed(2),
+        miscount: miscount.toFixed(2),
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    shortfall: shortfall.toFixed(2),
+    disputed,
+    miscount: miscount.toFixed(2),
+  };
 }
 
 /** Local midnight — a deposit belongs to a day, not to an instant. */

@@ -5,7 +5,14 @@ import { TriangleAlert } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
-import { agentCodPositions, startOfDay } from "@/lib/delivery/cod";
+import { agentCodPositions } from "@/lib/delivery/cod";
+import {
+  fromStoredDate,
+  shiftStoredDay,
+  storedDayFromYmd,
+  storedIsoDay,
+  storedToday,
+} from "@/lib/delivery/calendar";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { DepositForm, VerifyForm } from "./deposit-form";
@@ -21,16 +28,15 @@ import {
 export const metadata: Metadata = { title: "COD day end" };
 export const dynamic = "force-dynamic";
 
-function localDay(value: string | undefined): Date {
-  if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split("-").map(Number);
-    return new Date(year, month - 1, day);
-  }
-  return startOfDay(new Date());
-}
-
-function isoDay(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+/**
+ * The day being counted, as `CodDeposit.depositDate` stores it.
+ *
+ * A `@db.Date` column keeps the UTC calendar day. Built from local midnight
+ * this page asked for the day before the one in its own heading, and — far
+ * worse — wrote deposits under it. See `lib/delivery/calendar.ts`.
+ */
+function calendarDay(value: string | undefined): Date {
+  return (value ? storedDayFromYmd(value) : null) ?? storedToday();
 }
 
 const rupees = (value: number) => `₹${value.toLocaleString("en-IN")}`;
@@ -53,7 +59,7 @@ export default async function CodDayEndPage({
   // Handing cash in and counting it are the separately-held permissions.
   const user = await requirePermission("delivery.read");
   const { date, branch } = await searchParams;
-  const day = localDay(date);
+  const day = calendarDay(date);
 
   const branches = await prisma.branch.findMany({
     where: { isActive: true, deletedAt: null, ...branchScope(user, "id") },
@@ -104,10 +110,8 @@ export default async function CodDayEndPage({
   const canDeposit = can(user, "cod.deposit");
   const canReconcile = can(user, "cod.reconcile");
 
-  const previous = new Date(day);
-  previous.setDate(previous.getDate() - 1);
-  const next = new Date(day);
-  next.setDate(next.getDate() + 1);
+  const previous = shiftStoredDay(day, -1);
+  const next = shiftStoredDay(day, 1);
 
   const totalShortfall = positions.reduce(
     (sum, row) => sum + Number(row.shortfall),
@@ -125,16 +129,16 @@ export default async function CodDayEndPage({
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1 rounded-lg border bg-card p-1">
           <Link
-            href={`/delivery/cod?date=${isoDay(previous)}&branch=${branchId}`}
+            href={`/delivery/cod?date=${storedIsoDay(previous)}&branch=${branchId}`}
             className="rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             ←
           </Link>
           <span className="px-2 font-mono text-xs font-medium tabular">
-            {format(day, "EEE dd MMM yyyy")}
+            {format(fromStoredDate(day), "EEE dd MMM yyyy")}
           </span>
           <Link
-            href={`/delivery/cod?date=${isoDay(next)}&branch=${branchId}`}
+            href={`/delivery/cod?date=${storedIsoDay(next)}&branch=${branchId}`}
             className="rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             →
@@ -146,7 +150,7 @@ export default async function CodDayEndPage({
             {branches.map((option) => (
               <Link
                 key={option.id}
-                href={`/delivery/cod?date=${isoDay(day)}&branch=${option.id}`}
+                href={`/delivery/cod?date=${storedIsoDay(day)}&branch=${option.id}`}
                 className={`rounded-md border px-2.5 py-1 font-mono text-xs ${
                   option.id === branchId
                     ? "border-primary bg-primary text-primary-foreground"
@@ -191,6 +195,7 @@ export default async function CodDayEndPage({
                 <TableHead className="text-right">Due</TableHead>
                 <TableHead className="text-right">Collected</TableHead>
                 <TableHead className="text-right">Deposited</TableHead>
+                <TableHead className="text-right">Counted</TableHead>
                 <TableHead className="text-right">Shortfall</TableHead>
                 <TableHead />
               </TableRow>
@@ -218,6 +223,14 @@ export default async function CodDayEndPage({
                     <TableCell className="text-right tabular">
                       {rupees(Number(row.deposited))}
                     </TableCell>
+                    {/* What the branch actually counted. It was computed and
+                        never shown, so a deposit counted short looked
+                        identical to one counted in full. */}
+                    <TableCell className="text-right tabular text-muted-foreground">
+                      {row.countedDeposits === 0
+                        ? "not counted"
+                        : rupees(Number(row.verified))}
+                    </TableCell>
                     <TableCell className="text-right">
                       {shortfall === 0 ? (
                         <span className="tabular text-ok">₹0</span>
@@ -233,7 +246,7 @@ export default async function CodDayEndPage({
                           branchId={branchId}
                           agentId={row.agentId}
                           agentName={row.agentName}
-                          depositDate={isoDay(day)}
+                          depositDate={storedIsoDay(day)}
                           collected={shortfall > 0 ? shortfall : collected}
                         />
                       )}

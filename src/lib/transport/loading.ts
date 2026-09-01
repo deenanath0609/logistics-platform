@@ -206,6 +206,14 @@ export async function scanToLoad(
     },
   });
 
+  // The only function in this module that checked the branch and not the
+  // permission. The action above it authorises, so nothing was reachable
+  // without it — but every sibling here defends itself, and a service that
+  // relies on exactly one caller remembering is one refactor from not
+  // being defended at all.
+  if (!can(actor, "loading.execute")) {
+    return { ok: false, error: "You do not have permission to load vehicles." };
+  }
   if (!sheet) return { ok: false, error: "That loading sheet does not exist." };
   if (sheet.status !== "OPEN") return { ok: false, error: "This sheet is closed." };
   if (!coversBranch(actor, sheet.branchId)) {

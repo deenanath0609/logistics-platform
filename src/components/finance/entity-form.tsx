@@ -131,7 +131,21 @@ export function EntityFormDialog({
 
   const Icon = trigger.icon ? ICONS[trigger.icon] : null;
 
-  function submit(formData: FormData) {
+  /**
+   * ── `onSubmit`, not `<form action={fn}>` ────────────────────────────────
+   *
+   * React 19 resets an uncontrolled form once the function passed to
+   * `action` resolves — success or failure, it does not ask. A slab has
+   * fourteen fields and a charge rule twelve, so one mistyped rate emptied
+   * the entire dialog while showing the field error against a box that was
+   * now blank. `onSubmit` with `preventDefault` keeps what was typed, which
+   * is the whole point of showing a field error at all.
+   * ──────────────────────────────────────────────────────────────────────
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action({}, formData);
       setState(result);
@@ -192,7 +206,7 @@ export function EntityFormDialog({
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
 
-        <form id={formId} action={submit} className="flex flex-col gap-4">
+        <form id={formId} onSubmit={submit} className="flex flex-col gap-4">
           {record?.id ? (
             <input type="hidden" name="id" value={String(record.id)} />
           ) : null}

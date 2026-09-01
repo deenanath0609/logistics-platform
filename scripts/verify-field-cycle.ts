@@ -135,10 +135,19 @@ async function loadActor(mobile: string): Promise<SessionUser> {
 }
 
 /** Local midnight — a run belongs to a day, not to an instant. */
+/**
+ * Today, as `DeliveryRun.runDate` stores it.
+ *
+ * The column is `@db.Date` and keeps the UTC calendar day, so local
+ * midnight files a run under yesterday at IST. `createDeliveryRun`
+ * normalises what it is given; this has to agree with it, because the
+ * reuse lookup below queries the column directly.
+ */
 function today(): Date {
-  const day = new Date();
-  day.setHours(0, 0, 0, 0);
-  return day;
+  const now = new Date();
+  return new Date(
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0),
+  );
 }
 
 async function run() {

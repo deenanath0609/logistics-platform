@@ -451,6 +451,35 @@ export async function saveSlab(
   const frozen = await assertDraft(input.versionId);
   if (frozen) return { ok: false, error: frozen };
 
+  /**
+   * ── The version the slab is already on ───────────────────────────────
+   *
+   * `assertDraft` above checks the version *posted with the form*. On an
+   * update that is not the same question: `data` sets `versionId`, so a
+   * slab id from an approved version plus a draft version id moved the row
+   * out of the frozen version and repriced it on the way — no error, and an
+   * approved tariff that invoices already reference quietly lost a slab.
+   *
+   * A slab does not change version. Editing one means editing the row where
+   * it is, and that row's own version has to be a draft.
+   * ────────────────────────────────────────────────────────────────────
+   */
+  if (input.id) {
+    const existing = await prisma.rateSlab.findUnique({
+      where: { id: input.id },
+      select: { versionId: true },
+    });
+    if (!existing) return { ok: false, error: "That slab no longer exists." };
+    if (existing.versionId !== input.versionId) {
+      return {
+        ok: false,
+        error: "A slab belongs to the version it was written on and cannot be moved.",
+      };
+    }
+    const source = await assertDraft(existing.versionId);
+    if (source) return { ok: false, error: source };
+  }
+
   if (
     input.weightFromKg !== null &&
     input.weightFromKg !== undefined &&
@@ -564,6 +593,27 @@ export async function saveChargeRule(
 
   const frozen = await assertDraft(input.versionId);
   if (frozen) return { ok: false, error: frozen };
+
+  // The same hole as `saveSlab` above, in the other editor: without this a
+  // charge rule on an approved version could be edited by posting its id
+  // alongside a draft's version id, and it left the frozen version as it
+  // went.
+  if (input.id) {
+    const existing = await prisma.chargeRule.findUnique({
+      where: { id: input.id },
+      select: { versionId: true },
+    });
+    if (!existing) return { ok: false, error: "That charge rule no longer exists." };
+    if (existing.versionId !== input.versionId) {
+      return {
+        ok: false,
+        error:
+          "A charge rule belongs to the version it was written on and cannot be moved.",
+      };
+    }
+    const source = await assertDraft(existing.versionId);
+    if (source) return { ok: false, error: source };
+  }
 
   const data = {
     versionId: input.versionId,

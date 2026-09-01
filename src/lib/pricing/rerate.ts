@@ -2,6 +2,7 @@ import Decimal from "decimal.js";
 import { prisma, tenantTransaction, type Db } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
+import { anyBranchScope, coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
 import type { FreightResult } from "./engine";
 import {
@@ -47,6 +48,13 @@ export async function reweighTolerancePercent(
   try {
     return new Decimal(String(raw));
   } catch {
+    // Falling back is right — a typo in a config row must not stop the hub
+    // weighing — but it is said out loud, because silently reverting to 10%
+    // when somebody meant to set 2% is a tolerance nobody can explain.
+    console.warn(
+      `[pricing/rerate] ${TOLERANCE_KEY} is not a number (${String(raw)}); ` +
+        `falling back to ${DEFAULT_REWEIGH_TOLERANCE_PERCENT}%.`,
+    );
     return new Decimal(DEFAULT_REWEIGH_TOLERANCE_PERCENT);
   }
 }
@@ -87,6 +95,11 @@ export async function rerateShipment(
     select: {
       ...SHIPMENT_PRICING_SELECT,
       orgId: true,
+      deletedAt: true,
+      cancelledAt: true,
+      originBranchId: true,
+      currentBranchId: true,
+      destinationBranchId: true,
       freightAmount: true,
       chargesTotal: true,
       taxAmount: true,
@@ -94,7 +107,31 @@ export async function rerateShipment(
     },
   });
 
-  if (!shipment) return { ok: false, error: "That shipment no longer exists." };
+  if (!shipment || shipment.deletedAt) {
+    return { ok: false, error: "That shipment no longer exists." };
+  }
+
+  // Every caller reaches this with a shipment id off a form, and the id is
+  // the only thing they send. `captureRevisedWeight` checks its own scope
+  // before calling in; the pricing desk's re-rate did not, so a branch-
+  // scoped user could reprice any consignment on the network by id alone.
+  if (
+    !coversBranch(actor, shipment.originBranchId) &&
+    !coversBranch(actor, shipment.destinationBranchId) &&
+    !(shipment.currentBranchId && coversBranch(actor, shipment.currentBranchId))
+  ) {
+    return {
+      ok: false,
+      error: `${shipment.lrNumber} has not been anywhere near your branches.`,
+    };
+  }
+
+  if (shipment.cancelledAt) {
+    return {
+      ok: false,
+      error: `${shipment.lrNumber} is cancelled. There is nothing left to price.`,
+    };
+  }
 
   const snapshot = await snapshotShipment(shipment);
 
@@ -232,6 +269,7 @@ export async function rerateShipment(
  */
 export async function coverageGaps(
   options: { orgId: string; from?: Date; to?: Date; take?: number },
+  user: SessionUser,
 ): Promise<
   Array<{
     shipmentId: string;
@@ -255,7 +293,20 @@ export async function coverageGaps(
             },
           }
         : {}),
-      shipment: { orgId: options.orgId, deletedAt: null },
+      // `ratecard.read` is in `allReads`, so every Branch Manager holds it
+      // and a Booking Executive is granted it outright — both branch-scoped.
+      // Without this the gap report answered a Gurugram clerk with Jaipur's
+      // LR numbers, consignors and lanes, which is the one thing Phase 1
+      // says must not happen through the UI or the API.
+      //
+      // Inside `AND`, never spread beside the rest: `anyBranchScope` returns
+      // `{ OR: [...] }` and a second `OR` in the same object literal wins
+      // silently. `src/server/repositories/scope.test.ts` reads this file.
+      shipment: {
+        orgId: options.orgId,
+        deletedAt: null,
+        AND: [anyBranchScope(user, ["originBranchId", "destinationBranchId"])],
+      },
     },
     orderBy: { createdAt: "desc" },
     take: options.take ?? 200,
@@ -276,12 +327,52 @@ export async function coverageGaps(
     },
   });
 
+  /**
+   * Lanes that have since been priced drop off.
+   *
+   * The query above finds every *unrated* calculation, which includes ones
+   * a consignment has since been re-rated past: price the lane, re-rate the
+   * consignment, and it stayed on the report forever. A worklist that never
+   * empties is a worklist nobody reads, which is exactly what this screen
+   * exists to prevent — so a shipment counts as a gap only while its
+   * **latest** calculation is still the unrated one.
+   *
+   * Bounded by the shipments the page is already showing, so this cannot
+   * become a trawl of the calculation table.
+   */
+  const shipmentIds = [...new Set(calculations.map((calc) => calc.shipment.id))];
+
+  const latest = await prisma.freightCalculation.findMany({
+    where: { shipmentId: { in: shipmentIds } },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, shipmentId: true, trace: true },
+  });
+
+  const latestByShipment = new Map<string, string>();
+  for (const calc of latest) {
+    // `findMany` came back newest first, so the first sighting wins.
+    if (!latestByShipment.has(calc.shipmentId)) {
+      latestByShipment.set(calc.shipmentId, calc.id);
+    }
+  }
+
+  const stillUnrated = new Set(
+    latest
+      .filter(
+        (calc) =>
+          latestByShipment.get(calc.shipmentId) === calc.id &&
+          (calc.trace as { unrated?: boolean } | null)?.unrated === true,
+      )
+      .map((calc) => calc.shipmentId),
+  );
+
   // One row per shipment: a lane re-priced three times is still one gap.
   const seen = new Set<string>();
   const rows = [];
 
   for (const calc of calculations) {
     if (seen.has(calc.shipment.id)) continue;
+    if (!stillUnrated.has(calc.shipment.id)) continue;
     seen.add(calc.shipment.id);
 
     const trace = calc.trace as { unratedReason?: string } | null;

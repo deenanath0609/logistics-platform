@@ -3,7 +3,9 @@ import { prisma, tenantTransaction, type Db } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma/client";
 import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import { recordAudit } from "@/server/services/audit";
+import { addDays, businessDay } from "@/lib/time/business-day";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { dec, money, type MoneyIn } from "./ageing";
 import { DEBIT_NOTE_PREFIX, isDebitNoteNumber } from "./default-series";
@@ -208,6 +210,12 @@ export async function createDebitNote(
   });
 
   if (!invoice) return { ok: false, error: "That invoice no longer exists." };
+  // A debit note is raised from the original's branch and inherits its
+  // number series. The screen that offers the control already refuses
+  // another branch's invoice; the server action does not pass that screen.
+  if (!coversBranch(actor, invoice.branchId)) {
+    return { ok: false, error: "That invoice belongs to another branch." };
+  }
   if (invoice.status === "CANCELLED") {
     return {
       ok: false,
@@ -237,9 +245,12 @@ export async function createDebitNote(
   };
   const totals = totalInvoice([line], invoice.isReverseCharge);
 
-  const issuedOn = input.issuedOn ?? new Date();
-  const dueDate = new Date(issuedOn);
-  dueDate.setDate(dueDate.getDate() + (invoice.customer.creditDays ?? 0));
+  // `invoiceDate` and `dueDate` are `@db.Date`, which keeps the UTC day of
+  // whatever it is handed, and `{FY}` in the DEBIT_NOTE pattern is read off
+  // the same value. See `businessDay` — a bare `new Date()` back-dated
+  // every document raised before 05:30 IST by one day.
+  const issuedOn = businessDay(input.issuedOn ?? new Date());
+  const dueDate = addDays(issuedOn, invoice.customer.creditDays ?? 0);
 
   const description =
     input.description?.trim() ||

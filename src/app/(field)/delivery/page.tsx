@@ -5,6 +5,11 @@ import { ChevronRight, MapPin, Phone } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
 import { deliveryRunScope } from "@/lib/delivery/runs";
+import {
+  fromStoredDate,
+  shiftStoredDay,
+  storedToday,
+} from "@/lib/delivery/calendar";
 import { TaskStatusPill } from "@/components/delivery/run-status-pill";
 import { RunControls } from "@/components/delivery/run-controls";
 
@@ -21,10 +26,10 @@ export const dynamic = "force-dynamic";
 export default async function FieldDeliveryPage() {
   const user = await requirePermission("delivery.read");
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const horizon = new Date(today);
-  horizon.setDate(horizon.getDate() - 1);
+  // `runDate` is `@db.Date` — a UTC calendar day. Built from local
+  // midnight, this window slid a day and an agent starting before 05:30 IST
+  // could be shown yesterday's run as today's. See lib/delivery/calendar.ts.
+  const horizon = shiftStoredDay(storedToday(), -1);
 
   const run = await prisma.deliveryRun.findFirst({
     // OWN scope resolves to "this agent's run". A wider role sees the
@@ -99,7 +104,7 @@ export default async function FieldDeliveryPage() {
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="font-mono text-[0.65rem] uppercase tracking-[0.14em] text-primary">
-              {run.branch.code} · {format(run.runDate, "EEE dd MMM")}
+              {run.branch.code} · {format(fromStoredDate(run.runDate), "EEE dd MMM")}
             </p>
             <p className="font-mono text-lg font-semibold tracking-tight">
               {run.number}

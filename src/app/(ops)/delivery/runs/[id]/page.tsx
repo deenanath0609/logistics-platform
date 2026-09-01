@@ -6,12 +6,14 @@ import { ChevronLeft, MapPin, Phone } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { coversBranch, branchScope } from "@/server/repositories/scope";
+import { fromStoredDate } from "@/lib/delivery/calendar";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame } from "@/components/data/data-shell";
 import { RunStatusPill, TaskStatusPill } from "@/components/delivery/run-status-pill";
 import { StatusPill } from "@/components/shipment/status-pill";
 import { AddStopsPanel } from "./add-stops";
 import { StopSequencer } from "./stop-sequencer";
+import { RemoveStopButton, RtoDialog } from "./stop-actions";
 import {
   Table,
   TableBody,
@@ -23,6 +25,19 @@ import {
 
 export const metadata: Metadata = { title: "Delivery run" };
 export const dynamic = "force-dynamic";
+
+/**
+ * Where a return may be started from.
+ *
+ * Mirrors the `RTO_INITIATED` rule in `lib/shipment/state-machine.ts`. The
+ * service refuses anything else; this only decides whether offering the
+ * button would be a lie.
+ */
+const RTO_FROM = new Set([
+  "RECEIVED_AT_HUB",
+  "ASSIGNED_FOR_DELIVERY",
+  "OUT_FOR_DELIVERY",
+]);
 
 export default async function DeliveryRunPage({
   params,
@@ -73,6 +88,7 @@ export default async function DeliveryRunPage({
               paymentType: true,
               codAmount: true,
               attemptCount: true,
+              serviceType: { select: { maxDeliveryAttempts: true } },
             },
           },
           attempts: {
@@ -97,6 +113,19 @@ export default async function DeliveryRunPage({
 
   const canAssign = can(user, "delivery.assign") && run.status === "PLANNED";
   const canReassign = can(user, "delivery.reassign");
+  const canRto = can(user, "delivery.rto");
+
+  // The end of the attempt ladder. `nextAction` proposes RTO once the
+  // allowance is spent and nothing in the product could take it — the
+  // action existed with no control on any screen. This is that control's
+  // reason list; operations owns the table, so it is read, never hard-coded.
+  const rtoReasons = canRto
+    ? await prisma.reasonCode.findMany({
+        where: { category: "RTO", isActive: true },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+        select: { id: true, code: true, name: true },
+      })
+    : [];
 
   // Everything physically at this branch and owed a delivery. A shipment
   // already on another run is filtered out inside `addShipmentsToRun` too —
@@ -145,7 +174,7 @@ export default async function DeliveryRunPage({
       </Link>
 
       <PageHeader
-        eyebrow={`${run.branch.code} · ${format(run.runDate, "EEE dd MMM yyyy")}`}
+        eyebrow={`${run.branch.code} · ${format(fromStoredDate(run.runDate), "EEE dd MMM yyyy")}`}
         title={run.number}
         description={`${run.agent.name} · ${run.agent.mobile}`}
         actions={<RunStatusPill status={run.status} className="text-[0.7rem]" />}
@@ -205,6 +234,7 @@ export default async function DeliveryRunPage({
                   <TableHead>Attempt</TableHead>
                   <TableHead>Stop</TableHead>
                   <TableHead>Shipment</TableHead>
+                  {(canReassign || canRto) && <TableHead className="text-right" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -263,6 +293,29 @@ export default async function DeliveryRunPage({
                     <TableCell>
                       <StatusPill status={task.shipment.currentStatus} />
                     </TableCell>
+                    {(canReassign || canRto) && (
+                      <TableCell className="whitespace-nowrap text-right">
+                        {canRto && RTO_FROM.has(task.shipment.currentStatus) && (
+                          <RtoDialog
+                            shipmentId={task.shipment.id}
+                            lrNumber={task.shipment.lrNumber}
+                            consigneeName={task.shipment.consigneeName}
+                            attemptCount={task.shipment.attemptCount}
+                            maxAttempts={
+                              task.shipment.serviceType.maxDeliveryAttempts
+                            }
+                            reasons={rtoReasons}
+                          />
+                        )}
+                        {canReassign && task.status === "PENDING" && (
+                          <RemoveStopButton
+                            taskId={task.id}
+                            runId={run.id}
+                            lrNumber={task.shipment.lrNumber}
+                          />
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>

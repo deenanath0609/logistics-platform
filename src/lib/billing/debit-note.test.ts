@@ -89,9 +89,19 @@ vi.mock("@/lib/prisma", () => {
 const { createDebitNote, raiseReweighDebitNote, isDebitNoteNumber } =
   await import("./debit-note");
 
-const ACTOR = { id: "user-1", orgId: "org-1" } as unknown as Parameters<
-  typeof createDebitNote
->[1];
+/** Network scope — `coversBranch` lets a null `branchIds` through. */
+const ACTOR = {
+  id: "user-1",
+  orgId: "org-1",
+  branchIds: null,
+} as unknown as Parameters<typeof createDebitNote>[1];
+
+/** Scoped to a branch that is not the invoice's `br-jai`. */
+const OTHER_BRANCH_ACTOR = {
+  id: "user-2",
+  orgId: "org-1",
+  branchIds: ["br-del"],
+} as unknown as Parameters<typeof createDebitNote>[1];
 
 beforeEach(() => {
   store.invoiceStatus = "ISSUED";
@@ -240,6 +250,29 @@ describe("createDebitNote", () => {
 
     expect(result.ok).toBe(false);
     expect(store.created).toHaveLength(0);
+  });
+
+  /**
+   * The invoice id arrives on a form, and a debit note is raised from the
+   * original's branch and numbered from its series. The detail screen
+   * already refuses another branch's invoice; a server action does not go
+   * through the screen, so the service has to ask as well — and the refusal
+   * has to leave the series and the ledger untouched.
+   */
+  it("refuses an invoice belonging to another branch, and writes nothing", async () => {
+    const result = await createDebitNote(
+      { againstInvoiceId: "inv-1", amount: "400", reason: "Reweighed." },
+      OTHER_BRANCH_ACTOR,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("another branch");
+    expect(store.created).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+    // A burnt number is a gap in a debit-note sequence, which every GST
+    // audit asks about.
+    expect(store.numbersIssued).toHaveLength(0);
   });
 
   it("audits the note with the reason it was raised for", async () => {

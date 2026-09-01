@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { requirePermission, can } from "@/lib/auth/session";
 import { coverageGaps } from "@/lib/pricing/rerate";
+import { endOfBusinessDay, startOfBusinessDay } from "@/lib/time/business-day";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { ReasonAction } from "@/components/finance/reason-action";
@@ -29,11 +30,17 @@ export default async function CoverageGapsPage({
   const canRerate = can(user, "ratecard.manage");
   const { from, to } = await searchParams;
 
-  const rows = await coverageGaps({
-    orgId: user.orgId,
-    from: from ? new Date(from) : undefined,
-    to: to ? new Date(to) : undefined,
-  });
+  const rows = await coverageGaps(
+    {
+      orgId: user.orgId,
+      // The bounds are calendar days off the query string, widened to the
+      // instants the business day actually covers — a UTC-truncated window
+      // loses the first five and a half hours of every Indian day.
+      from: from ? startOfBusinessDay(new Date(from)) : undefined,
+      to: to ? endOfBusinessDay(new Date(to)) : undefined,
+    },
+    user,
+  );
 
   // A lane appearing twenty times is one rate card to write, not twenty.
   const byLane = new Map<string, number>();

@@ -167,6 +167,18 @@ export async function addShipmentsToManifest(
       status: true,
       originBranchId: true,
       destinationBranchId: true,
+      totalWeight: true,
+      trip: {
+        select: {
+          number: true,
+          vehicle: {
+            select: {
+              registrationNumber: true,
+              vehicleType: { select: { capacityKg: true } },
+            },
+          },
+        },
+      },
     },
   });
 
@@ -198,6 +210,24 @@ export async function addShipmentsToManifest(
       currentBranch: { select: { code: true } },
     },
   });
+
+  // ── The rated payload is a refusal, not a colour ──────────────────────
+  //
+  // Utilisation was computed, banded, coloured and printed on four screens
+  // and never once stopped anything. An OVERLOADED bar is a driver at a
+  // weighbridge with a challan and a truck that does not move, so the
+  // number that produces the bar produces the refusal too — here, at the
+  // moment a box is added, where the load can still be composed
+  // differently, rather than at the gate when the truck is sealed.
+  //
+  // Only when a vehicle is attached and its class declares a capacity. A
+  // manifest with no truck yet has nothing to be over, and refusing on an
+  // unknown capacity would block loading on incomplete master data.
+  const capacityKg = manifest.trip?.vehicle.vehicleType.capacityKg
+    ? new Decimal(manifest.trip.vehicle.vehicleType.capacityKg.toString())
+    : null;
+  const vehicleLabel = manifest.trip?.vehicle.registrationNumber ?? "the vehicle";
+  let runningWeight = new Decimal(manifest.totalWeight.toString());
 
   const added: string[] = [];
   const rejected: AddToManifestResult["rejected"] = [];
@@ -253,6 +283,23 @@ export async function addShipmentsToManifest(
         continue;
       }
 
+      // Checked per consignment rather than on the batch total, so a
+      // dispatcher pasting forty LRs against a truck with room for
+      // thirty-eight loads the thirty-eight and is told which two would
+      // not fit — the same partial-success contract as every other rule
+      // here.
+      const weight = new Decimal(shipment.chargeableWeight.toString());
+      if (capacityKg && runningWeight.plus(weight).greaterThan(capacityKg)) {
+        rejected.push({
+          lrNumber: shipment.lrNumber,
+          reason:
+            `Would put ${vehicleLabel} over its rated payload — ` +
+            `${capacityKg.minus(runningWeight).toFixed(3)} kg of headroom left, ` +
+            `and this consignment is ${weight.toFixed(3)} kg`,
+        });
+        continue;
+      }
+
       // The event is what moves the status to MANIFESTED; the line is a
       // snapshot of what the dispatching branch says it is sending, which
       // is what the receiving hub reconciles against.
@@ -285,6 +332,7 @@ export async function addShipmentsToManifest(
         },
       });
 
+      runningWeight = runningWeight.plus(weight);
       added.push(shipment.lrNumber);
     }
 
@@ -416,7 +464,7 @@ export async function closeManifest(
   input: { manifestId: string },
   actor: SessionUser,
 ): Promise<
-  | { ok: true; number: string; load: Utilisation; overload: string }
+  | { ok: true; number: string; load: Utilisation }
   | { ok: false; error: string }
 > {
   if (!can(actor, "manifest.close")) {
@@ -445,16 +493,30 @@ export async function closeManifest(
     return { ok: false, error: "An empty manifest has nothing to dispatch." };
   }
 
+  // The last moment anybody looks at this load before it is somebody
+  // else's problem, so it is the last place the rated payload can be
+  // enforced. `addShipmentsToManifest` refuses the box that would tip a
+  // truck over, but a manifest can still end up overloaded the other way
+  // round — a smaller vehicle swapped onto it, or a class whose capacity
+  // was corrected downward after loading — and closing is what freezes
+  // the lines the receiving hub reconciles against. Both remedies are
+  // available from this screen: drop a line, or attach a bigger truck.
+  const load = await loadOnManifest(manifest.id);
+  const overload = overloadNote(load);
+
+  if (load.band === "OVERLOADED") {
+    return {
+      ok: false,
+      error:
+        `${manifest.number} is over the rated payload — ${overload} ` +
+        `Take a consignment off, or put it on a larger vehicle.`,
+    };
+  }
+
   await prisma.manifest.update({
     where: { id: manifest.id },
     data: { status: "CLOSED", closedAt: new Date(), closedById: actor.id },
   });
-
-  // The last moment anybody looks at this load before it is somebody
-  // else's problem. An overload is recorded rather than merely coloured,
-  // so "we did not know the truck was over" is not available later.
-  const load = await loadOnManifest(manifest.id);
-  const overload = overloadNote(load);
 
   await recordAudit({
     user: actor,
@@ -464,17 +526,14 @@ export async function closeManifest(
     entityRef: manifest.number,
     branchId: manifest.originBranchId,
     before: { status: "DRAFT" },
-    after: {
-      status: "CLOSED",
-      utilisationPercent: load.percent,
-      overloaded: load.band === "OVERLOADED",
-    },
-    reason: overload
-      ? `Closed for dispatch over the rated payload — ${overload}`
-      : "Closed for dispatch",
+    // The utilisation is written to the trail as well as shown, so a
+    // half-empty truck on a lane that is losing money is answerable
+    // afterwards and not only at the moment somebody happened to look.
+    after: { status: "CLOSED", utilisationPercent: load.percent },
+    reason: "Closed for dispatch",
   });
 
-  return { ok: true, number: manifest.number, load, overload };
+  return { ok: true, number: manifest.number, load };
 }
 
 /**

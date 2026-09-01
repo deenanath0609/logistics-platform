@@ -4,6 +4,7 @@ import { format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { anyBranchScope, branchScope } from "@/server/repositories/scope";
+import { FTL_BINDABLE_STATUSES } from "@/lib/transport/trip";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState, Pagination } from "@/components/data/data-shell";
 import {
@@ -127,7 +128,12 @@ export default async function TripsPage({
             where: {
               deletedAt: null,
               mode: "FTL",
-              currentStatus: { in: ["PROCESSED", "RECEIVED_AT_ORIGIN", "PICKED_UP"] },
+              isOnHold: false,
+              currentStatus: { in: [...FTL_BINDABLE_STATUSES] },
+              // Not already on a truck. Without this the picker keeps
+              // offering a consignment that is bound to an open trip, and
+              // the only thing that says so is the refusal after submit.
+              ftlTrips: { none: { status: { notIn: ["COMPLETED", "CANCELLED"] } } },
               ...branchScope(user, "currentBranchId"),
             },
             orderBy: { bookedAt: "asc" },
@@ -137,6 +143,7 @@ export default async function TripsPage({
               lrNumber: true,
               consigneeName: true,
               originBranchId: true,
+              currentBranchId: true,
               destinationBranchId: true,
             },
           })
@@ -170,7 +177,11 @@ export default async function TripsPage({
                 id: s.id,
                 lrNumber: s.lrNumber,
                 consigneeName: s.consigneeName,
-                originBranchId: s.originBranchId,
+                // Where the freight is standing, which is where the truck
+                // loads — not where it was booked. A full load that has
+                // already moved to a hub starts its trip from that hub,
+                // and `createTrip` refuses any other origin.
+                originBranchId: s.currentBranchId ?? s.originBranchId,
                 destinationBranchId: s.destinationBranchId,
               }))}
             />

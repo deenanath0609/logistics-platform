@@ -12,6 +12,25 @@ export type OrganizationSeed = {
   slug: string;
   /** The host this tenant is reached on. Resolution happens before any query. */
   subdomain: string;
+  /**
+   * The plan this carrier is on, by code from `plans.ts`.
+   *
+   * Null is a carrier mid-provisioning, which is a real state — and the
+   * state the development carrier was accidentally left in, because this
+   * field did not exist and the create wrote `planId: null` with a comment
+   * saying no plans were seeded. `seedPlans()` had since been added and runs
+   * first, so the comment was describing a database that no longer existed.
+   *
+   * The consequence was not visible on any developer's machine, where the
+   * plan had been set by hand at some point and stayed set. It was visible
+   * only on a database built from scratch — which is what CI does, and CI
+   * had been failing at the plan-gating step on every push for two days:
+   * with no plan the carrier holds `core` and nothing else, so the suite
+   * that proves "reaches what it bought, refused what it did not" had a
+   * carrier that had bought less than the one it was meant to out-reach,
+   * and correctly refused to draw any conclusion at all.
+   */
+  planCode: string | null;
   name: string;
   legalName: string;
   lrPrefix: string;
@@ -55,6 +74,10 @@ export const ORGANIZATIONS: OrganizationSeed[] = [
     // backfills existing rows with — a fresh database and a migrated one
     // must land on the same value.
     subdomain: DEFAULT_ORG_SLUG,
+    // The development carrier is the one every screen is built and
+    // demonstrated against, so it holds the whole catalogue. A second
+    // carrier on a narrower plan is what the gating suites reach for.
+    planCode: "ENTERPRISE",
     name: process.env.APP_NAME ?? "City Logistics",
     legalName: "City Logistics Private Limited",
     lrPrefix: process.env.LR_PREFIX ?? "CL",
@@ -89,6 +112,23 @@ export const ORGANIZATIONS: OrganizationSeed[] = [
 export async function seedOrganization(def: OrganizationSeed) {
   step(`organization ${def.slug}`);
 
+  // Resolved rather than assumed: `seedPlans()` runs before this, but a
+  // catalogue that has been edited should make the seed stop and say so
+  // rather than quietly create a carrier with nothing switched on.
+  let planId: string | null = null;
+  if (def.planCode) {
+    const plan = await db.tenantPlan.findUnique({
+      where: { code: def.planCode },
+      select: { id: true },
+    });
+    if (!plan) {
+      throw new Error(
+        `No plan "${def.planCode}" for ${def.slug}. Seed the plans first — prisma/seed/plans.ts.`,
+      );
+    }
+    planId = plan.id;
+  }
+
   const org = await db.organization.upsert({
     where: { slug: def.slug },
     create: {
@@ -97,9 +137,7 @@ export async function seedOrganization(def: OrganizationSeed) {
       slug: def.slug,
       subdomain: def.subdomain,
       status: "ACTIVE",
-      // No plan: TenantPlan is the operator's commercial catalogue and no
-      // plans are seeded, so pointing at one here would dangle.
-      planId: null,
+      planId,
       activatedAt: new Date(),
       lrPrefix: def.lrPrefix,
       city: def.city,
@@ -125,8 +163,21 @@ export async function seedOrganization(def: OrganizationSeed) {
     // Empty on purpose: branding, plan and status are operator-owned once
     // the tenant exists, and a re-seed must not reset a palette somebody
     // chose or re-activate a company that was suspended.
+    // Re-seeding never resets a carrier somebody has since configured.
     update: {},
   });
+
+  // The one exception, and it fills a blank rather than overwriting a
+  // choice: a carrier left with no plan holds `core` and nothing else, and
+  // every database seeded before `planCode` existed is in that state. An
+  // operator who has deliberately moved a carrier onto a narrower plan is
+  // not touched, because their `planId` is not null.
+  if (planId && org.planId === null) {
+    await db.organization.update({
+      where: { id: org.id },
+      data: { planId },
+    });
+  }
 
   done(org.name);
   return org;

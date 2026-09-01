@@ -6,6 +6,7 @@ import { can } from "@/lib/auth/session";
 import { coversBranch, assignmentScope, branchScope } from "@/server/repositories/scope";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { appendShipmentEvent } from "@/lib/shipment/events";
+import { storedDate } from "./calendar";
 
 /**
  * Building a delivery run.
@@ -36,7 +37,11 @@ export type CreateRunInput = {
   branchId: string;
   agentId: string;
   vehicleId?: string | null;
-  /** The day the run is for, at local midnight. */
+  /**
+   * The day the run is for. Any instant on that local day will do —
+   * `storedDate` normalises it to the UTC midnight `@db.Date` keeps, so a
+   * caller holding local midnight does not file the run under yesterday.
+   */
   runDate: Date;
 };
 
@@ -71,12 +76,18 @@ export async function createDeliveryRun(
 
   if (!branch) return { ok: false, error: "That branch does not exist." };
 
+  // `runDate` is `@db.Date`. See `./calendar` — local midnight lands on the
+  // previous calendar day at any positive offset, and both the duplicate
+  // check and the write have to agree with everything else that reads the
+  // column.
+  const runDate = storedDate(input.runDate);
+
   // One run per agent per day. A second one splits the COD accountability
   // in half, and day-end reconciliation stops adding up.
   const existing = await prisma.deliveryRun.findFirst({
     where: {
       agentId: input.agentId,
-      runDate: input.runDate,
+      runDate,
       status: { in: ["PLANNED", "STARTED"] },
     },
     select: { id: true, number: true },
@@ -103,7 +114,7 @@ export async function createDeliveryRun(
           branchId: input.branchId,
           agentId: input.agentId,
           vehicleId: input.vehicleId ?? undefined,
-          runDate: input.runDate,
+          runDate,
           createdById: actor.id,
         },
         select: { id: true, number: true },
@@ -411,13 +422,28 @@ export async function startRun(
   });
 
   if (!run) return { ok: false, error: "That run does not exist." };
-  if (actor.scope === "OWN" && run.agentId !== actor.id) {
-    return { ok: false, error: "That run belongs to another agent." };
+  if (actor.scope === "OWN") {
+    if (run.agentId !== actor.id) {
+      return { ok: false, error: "That run belongs to another agent." };
+    }
+  } else if (!coversBranch(actor, run.branchId)) {
+    // Branch scope on the write, not only on the list. A desk supervisor
+    // holding `delivery.execute` outside OWN scope could otherwise
+    // out-scan another branch's vehicle by id alone.
+    return { ok: false, error: "That run belongs to another branch." };
   }
   if (run.status === "COMPLETED" || run.status === "CANCELLED") {
     return { ok: false, error: "That run is closed." };
   }
+
+  // The out-scan is queued on the device like everything else, so it
+  // arrives twice whenever a phone syncs a retry it had already delivered.
+  // A started run with nothing left to out-scan is that replay, and it has
+  // to read as the success it is: reporting "there is nothing on this run"
+  // marks the queued action permanently rejected and puts a red bar in
+  // front of an agent whose run is perfectly fine.
   if (run.tasks.length === 0) {
+    if (run.status === "STARTED") return { ok: true, started: 0 };
     return { ok: false, error: "There is nothing on this run yet." };
   }
 
@@ -514,14 +540,28 @@ export async function completeRun(
     where: { id: runId },
     select: {
       agentId: true,
+      branchId: true,
+      status: true,
       tasks: { where: { status: { in: ["PENDING", "OUT_FOR_DELIVERY"] } }, select: { id: true } },
     },
   });
 
   if (!run) return { ok: false, error: "That run does not exist." };
-  if (actor.scope === "OWN" && run.agentId !== actor.id) {
-    return { ok: false, error: "That run belongs to another agent." };
+  if (actor.scope === "OWN") {
+    if (run.agentId !== actor.id) {
+      return { ok: false, error: "That run belongs to another agent." };
+    }
+  } else if (!coversBranch(actor, run.branchId)) {
+    return { ok: false, error: "That run belongs to another branch." };
   }
+
+  // Closing a run is queued too, so the replay must confirm rather than
+  // re-close. Nothing is written the second time.
+  if (run.status === "COMPLETED") return { ok: true };
+  if (run.status === "CANCELLED") {
+    return { ok: false, error: "That run was cancelled." };
+  }
+
   if (run.tasks.length > 0) {
     return {
       ok: false,

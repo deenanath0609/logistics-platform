@@ -2,7 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
+import { coversBranch } from "@/server/repositories/scope";
 import { authorize, PermissionError } from "@/lib/auth/session";
 import { recordAudit } from "@/server/services/audit";
 import { recordPayment, allocateOnAccount } from "@/lib/billing/receivables";
@@ -27,13 +29,35 @@ function fieldErrors(error: z.ZodError): Record<string, string> {
   return out;
 }
 
+/**
+ * Money off a form, kept as a string.
+ *
+ * Validated as a number so the field errors still read the way a person
+ * expects, then handed on as the digits that were typed. `Decimal` takes a
+ * string exactly; a `number` is a double first, and the moment two of them
+ * are added — which is exactly what the allocation below does with the
+ * amount and its TDS — the sum is not the figure on the cheque.
+ */
+const moneyField = (message: string) =>
+  z
+    .string()
+    .trim()
+    .refine((value) => value !== "" && Number.isFinite(Number(value)), message)
+    .refine((value) => Number(value) > 0, message);
+
+const optionalMoneyField = z.preprocess(
+  (v) => (v === "" || v === null || v === undefined ? "0" : v),
+  z
+    .string()
+    .trim()
+    .refine((value) => Number.isFinite(Number(value)), "Not a number")
+    .refine((value) => Number(value) >= 0, "Cannot be negative"),
+);
+
 const paymentSchema = z.object({
   customerId: z.string().min(1),
-  amount: z.preprocess((v) => Number(v), z.number().positive("Enter the amount received")),
-  tdsAmount: z.preprocess(
-    (v) => (v === "" || v === null || v === undefined ? 0 : Number(v)),
-    z.number().min(0),
-  ),
+  amount: moneyField("Enter the amount received"),
+  tdsAmount: optionalMoneyField,
   mode: z.enum(["CASH", "CHEQUE", "NEFT", "RTGS", "UPI", "CARD", "ADJUSTMENT"]),
   reference: z.preprocess(
     (v) => (typeof v === "string" && v.trim() === "" ? null : v),
@@ -75,7 +99,15 @@ export async function recordPaymentAction(
           ? [
               {
                 invoiceId: parsed.data.invoiceId,
-                amount: parsed.data.amount + parsed.data.tdsAmount,
+                // In `Decimal`, not `+`. Naming one invoice settles the cash
+                // *and* the tax the customer withheld against it, and adding
+                // two doubles to work out how much put ₹1000.30 on the
+                // ledger as 1000.3000000000001 — which then failed the
+                // "more than is still open on this invoice" guard by a
+                // ten-thousandth of a paisa on a receipt that balanced.
+                amount: new Decimal(parsed.data.amount)
+                  .plus(new Decimal(parsed.data.tdsAmount))
+                  .toFixed(2),
               },
             ]
           : undefined,
@@ -107,10 +139,12 @@ export async function allocateOnAccountAction(
     const actor = await authorize("payment.record");
     const paymentId = String(formData.get("id") ?? "");
     const invoiceId = String(formData.get("invoiceId") ?? "");
-    const amount = Number(formData.get("amount") ?? 0);
+    // Passed on as the digits that were typed. `money(dec(...))` in the
+    // service rounds it; going through a double first would not.
+    const amount = String(formData.get("amount") ?? "").trim();
 
     if (!paymentId || !invoiceId) return { error: "Pick a payment and an invoice." };
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       return { error: "Enter an amount.", fieldErrors: { amount: "More than zero" } };
     }
 
@@ -181,6 +215,14 @@ export async function setCreditTermsAction(
       },
     });
     if (!before) return { error: "That customer no longer exists." };
+    // The account's branch was read and never checked. This is the control
+    // that decides how much of the company's money a customer may hold, and
+    // the customer id arrives on a form — so a branch-scoped clerk could
+    // raise another branch's credit limit, or unblock an account somebody
+    // else had stopped, by posting the id.
+    if (before.branchId && !coversBranch(actor, before.branchId)) {
+      return { error: "That account belongs to another branch." };
+    }
 
     await prisma.customer.update({
       where: { id: parsed.data.customerId },

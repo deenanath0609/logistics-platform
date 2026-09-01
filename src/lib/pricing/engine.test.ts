@@ -1040,4 +1040,33 @@ describe("isEffectiveOn", () => {
   it("treats a null end date as open", () => {
     expect(isEffectiveOn(new Date("2030-01-01"), "2026-04-01", null)).toBe(true);
   });
+
+  /**
+   * The pricing date is the carrier's day, not the server's.
+   *
+   * `effectiveFrom` comes out of a `@db.Date` column as UTC midnight, but
+   * `context.at` is an instant — and a booking taken at 01:00 IST on
+   * 1 April is 19:30 UTC on 31 March. Truncated in UTC it priced against
+   * the tariff that expired the night before, and the trace said the new
+   * version "was not in force on the pricing date" while the contract said
+   * it was. Asserted on fixed instants so the answer does not depend on
+   * where this test runs.
+   */
+  it("prices a booking taken after midnight IST on the day it was taken", () => {
+    const oneInTheMorningOnTheFirst = new Date("2026-03-31T19:30:00.000Z");
+
+    expect(isEffectiveOn(oneInTheMorningOnTheFirst, "2026-04-01", null)).toBe(true);
+    // And the version that closed the night before is correctly finished.
+    expect(
+      isEffectiveOn(oneInTheMorningOnTheFirst, "2025-04-01", "2026-03-31"),
+    ).toBe(false);
+  });
+
+  it("still ends a version at the last moment of its final Indian day", () => {
+    // 23:00 IST on 31 March: the old card is still the one in force.
+    const lateOnTheLastDay = new Date("2026-03-31T17:30:00.000Z");
+
+    expect(isEffectiveOn(lateOnTheLastDay, "2025-04-01", "2026-03-31")).toBe(true);
+    expect(isEffectiveOn(lateOnTheLastDay, "2026-04-01", null)).toBe(false);
+  });
 });

@@ -67,8 +67,52 @@ export function formatDate(value: Date | string | null | undefined): string {
   });
 }
 
-/** `yyyy-mm-dd`, for date inputs and query strings. */
+/**
+ * The business day these screens work on.
+ *
+ * `Organization.timezone` is the authority and defaults to this; a
+ * per-tenant value cannot be threaded through here, because `isoDate` is
+ * called from client components where reading the environment or the
+ * database is not available. Every carrier on the product today runs on
+ * IST, and being right for them beats being wrong for everybody.
+ */
+const BUSINESS_TIMEZONE = "Asia/Kolkata";
+
+/**
+ * `yyyy-mm-dd` on the business calendar, for date inputs and query
+ * strings.
+ *
+ * ── Not `toISOString()` ──────────────────────────────────────────────────
+ *
+ * This was `date.toISOString().slice(0, 10)`, which is the **UTC** day.
+ * Nothing pins `process.env.TZ`, so on a UTC container every one of these
+ * pre-filled fields — Bill date, Effective from, Paid on — read
+ * *yesterday* between 00:00 and 05:30 IST. Those columns are `@db.Date`,
+ * a bare calendar day with no zone to correct it later, so a bill raised
+ * at one in the morning was dated to the previous day, took its
+ * `dueDate` back with it, and landed in the previous day's
+ * `VENDOR_BILL` number-series bucket. Nobody would ever see why.
+ *
+ * Assembled from `formatToParts` rather than an `en-CA` pattern, for the
+ * reason spelled out in `src/components/documents/format.ts`: a Node
+ * build with small ICU carries every time zone but only `en-US` locale
+ * data, so a locale chosen for its ordering can silently give a different
+ * one. The parts are the same in any locale.
+ * ────────────────────────────────────────────────────────────────────────
+ */
 export function isoDate(value: Date | string): string {
   const date = value instanceof Date ? value : new Date(value);
-  return date.toISOString().slice(0, 10);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: BUSINESS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
 }

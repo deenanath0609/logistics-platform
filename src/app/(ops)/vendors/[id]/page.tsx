@@ -4,7 +4,7 @@ import { TriangleAlert } from "lucide-react";
 import Decimal from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
-import { anyBranchScope } from "@/server/repositories/scope";
+import { anyBranchScope, branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { EntityFormDialog, type EntityField } from "@/components/finance/entity-form";
@@ -27,7 +27,10 @@ import {
 import { VENDOR_FIELDS } from "../page";
 import {
   updateVendorAction,
+  setVendorStatusAction,
+  deleteVendorAction,
   saveBankAccountAction,
+  removeBankAccountAction,
   createRateContractAction,
   saveRateLineAction,
   createVendorBillAction,
@@ -38,6 +41,36 @@ import {
 
 export const metadata: Metadata = { title: "Vendor" };
 export const dynamic = "force-dynamic";
+
+/**
+ * Two switches and a reason, deliberately in one dialog.
+ *
+ * Blocking and retiring are different decisions with the same consequence
+ * — `createVendorBill` refuses on either — and an operator who has decided
+ * to stop working with a transporter should not have to guess which of two
+ * buttons expresses it. The reason is demanded by the action whenever the
+ * change stops work, and written to the trail.
+ */
+const STATUS_FIELDS: EntityField[] = [
+  {
+    type: "switch",
+    name: "isActive",
+    label: "Working with this vendor",
+    help: "Turn off to retire a transporter you no longer use. Their history keeps their name.",
+  },
+  {
+    type: "switch",
+    name: "isBlocked",
+    label: "Block new bills",
+    help: "For a live dispute or an open claim. Lifts again from here.",
+  },
+  {
+    type: "text",
+    name: "reason",
+    label: "Reason",
+    help: "Required when you are standing them down. Written to the audit trail.",
+  },
+];
 
 const BANK_FIELDS: EntityField[] = [
   { type: "text", name: "accountName", label: "Account name", required: true },
@@ -87,9 +120,15 @@ export default async function VendorDetailPage({
 
   if (!vendor || vendor.deletedAt || vendor.orgId !== user.orgId) notFound();
 
-  const [branches, vehicleTypes, trips] = await Promise.all([
+  const [branches, vehicleTypes, trips, openBills] = await Promise.all([
+    // Scoped, like the identical query on `/fleet/field-staff`. These
+    // options feed the lane-rate form, which writes what the company pays
+    // to run a lane; offering the whole network to a branch-scoped user
+    // was an invitation the action now refuses. Both ends of the rule are
+    // needed: the query so the option is not there, the check in
+    // `saveRateLineAction` so a hand-made post cannot put it back.
     prisma.branch.findMany({
-      where: { isActive: true, deletedAt: null },
+      where: { isActive: true, deletedAt: null, ...branchScope(user, "id") },
       orderBy: { code: "asc" },
       select: { id: true, code: true, name: true },
     }),
@@ -110,20 +149,35 @@ export default async function VendorDetailPage({
         plannedDepartureAt: true,
       },
     }),
+    // Aggregated over every open bill, not over the forty most recent that
+    // `vendor.bills` carries. A vendor with more than forty under-reported
+    // its own payable against the figure on the list — the same number,
+    // computed two ways, disagreeing. Same status set as the list.
+    prisma.vendorBill.aggregate({
+      where: {
+        vendorId: id,
+        status: { in: ["SUBMITTED", "APPROVED", "PARTIALLY_PAID", "DISPUTED"] },
+      },
+      _sum: { amountDue: true },
+      _count: { _all: true },
+    }),
   ]);
+
+  const flaggedCount = await prisma.vendorBill.count({
+    where: {
+      vendorId: id,
+      status: { in: ["SUBMITTED", "APPROVED", "PARTIALLY_PAID", "DISPUTED"] },
+      varianceAmount: { not: null },
+      NOT: { varianceAmount: 0 },
+    },
+  });
 
   const branchOptions = branches.map((b) => ({ value: b.id, label: `${b.code} — ${b.name}` }));
   const vehicleOptions = vehicleTypes.map((t) => ({ value: t.id, label: `${t.code} — ${t.name}` }));
   const branchCode = new Map(branches.map((b) => [b.id, b.code]));
   const vehicleCode = new Map(vehicleTypes.map((t) => [t.id, t.code]));
 
-  const payable = vendor.bills.reduce(
-    (sum, bill) => sum.plus(new Decimal(bill.amountDue.toString())),
-    new Decimal(0),
-  );
-  const flagged = vendor.bills.filter(
-    (bill) => bill.varianceAmount !== null && Number(bill.varianceAmount) !== 0,
-  );
+  const payable = new Decimal(openBills._sum.amountDue?.toString() ?? 0);
 
   const billFields: EntityField[] = [
     {
@@ -189,6 +243,25 @@ export default async function VendorDetailPage({
                 trigger={{ label: "Edit", icon: "pencil", variant: "outline" }}
               />
             )}
+            {canEdit && (
+              <EntityFormDialog
+                title={`Stand ${vendor.code} down, or bring it back`}
+                description="Blocked stops new bills while a claim or a dispute is open, and lifts again in one act. Inactive retires a transporter you no longer work with. Both refuse a new bill; the difference is what you mean by it."
+                fields={STATUS_FIELDS}
+                record={{
+                  isActive: String(vendor.isActive),
+                  isBlocked: String(vendor.isBlocked),
+                }}
+                hidden={{ id: vendor.id }}
+                action={setVendorStatusAction}
+                submitLabel="Save"
+                trigger={{
+                  label: vendor.isBlocked ? "Blocked" : vendor.isActive ? "Working" : "Retired",
+                  icon: "pencil",
+                  variant: vendor.isBlocked ? "destructive" : "outline",
+                }}
+              />
+            )}
             {canBill && (
               <EntityFormDialog
                 title="New vendor bill"
@@ -197,7 +270,31 @@ export default async function VendorDetailPage({
                 hidden={{ vendorId: vendor.id }}
                 action={createVendorBillAction}
                 submitLabel="Raise bill"
-                trigger={{ label: "New bill", icon: "plus" }}
+                trigger={{
+                  label: "New bill",
+                  icon: "plus",
+                  // The page prints "cannot be billed" and then offered
+                  // the dialog anyway; the refusal arrived only after the
+                  // amount, the trip and the notes had been typed. The
+                  // button now says what the paragraph above it says.
+                  disabled: vendor.isBlocked || !vendor.isActive,
+                  disabledReason: vendor.isBlocked
+                    ? `${vendor.name} is blocked. Lift the block before raising a bill.`
+                    : `${vendor.name} is retired. Reactivate them before raising a bill.`,
+                }}
+              />
+            )}
+            {canEdit && (
+              <ReasonAction
+                id={vendor.id}
+                title={`Remove ${vendor.name}?`}
+                description="The vendor drops off the list. Their bills, payments, trips and attached vehicles keep pointing at the record — nothing is erased. Refused while any bill is unsettled or any trip is still running."
+                reasonLabel="Why"
+                reasonPlaceholder="Stopped operating; contract terminated 30 Aug."
+                confirmLabel="Remove"
+                icon="cancel"
+                variant="ghost"
+                action={deleteVendorAction}
               />
             )}
           </div>
@@ -215,8 +312,8 @@ export default async function VendorDetailPage({
           { label: "Payable", value: formatMoney(payable.toFixed(2)), tone: payable.greaterThan(0) ? "warn" : "ok" },
           {
             label: "Bills with variance",
-            value: String(flagged.length),
-            tone: flagged.length > 0 ? "bad" : "ok",
+            value: String(flaggedCount),
+            tone: flaggedCount > 0 ? "bad" : "ok",
           },
           { label: "Trips run", value: String(vendor._count.trips) },
           { label: "Vehicles attached", value: String(vendor._count.vehicles) },
@@ -610,6 +707,7 @@ export default async function VendorDetailPage({
                     <TableHead>Number</TableHead>
                     <TableHead>IFSC</TableHead>
                     <TableHead>Primary</TableHead>
+                    {canApprove && <TableHead className="text-right">Actions</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -623,6 +721,52 @@ export default async function VendorDetailPage({
                       <TableCell className="text-xs">
                         {account.isPrimary ? "Yes" : "—"}
                       </TableCell>
+                      {canApprove && (
+                        <TableCell>
+                          {/* Correcting and removing, which this screen
+                              could do neither of: a typed-wrong IFSC could
+                              only ever be superseded by adding a second
+                              primary account, and a wrong non-primary row
+                              could not even be demoted. */}
+                          <div className="flex items-center justify-end gap-1">
+                            <EntityFormDialog
+                              title="Correct these bank details"
+                              description="The change is audited against your name, with the number that was on file before it."
+                              fields={BANK_FIELDS}
+                              record={{
+                                accountName: account.accountName,
+                                accountNumber: account.accountNumber,
+                                ifsc: account.ifsc,
+                                bankName: account.bankName ?? "",
+                                isPrimary: String(account.isPrimary),
+                              }}
+                              hidden={{ vendorId: vendor.id, id: account.id }}
+                              action={saveBankAccountAction}
+                              submitLabel="Save"
+                              trigger={{
+                                label: `Edit account ending ${account.accountNumber.slice(-4)}`,
+                                icon: "pencil",
+                                variant: "ghost",
+                                size: "icon-xs",
+                                iconOnly: true,
+                              }}
+                            />
+                            <ReasonAction
+                              id={account.id}
+                              title={`Remove the account ending ${account.accountNumber.slice(-4)}?`}
+                              description="Payments can no longer be sent here. The number is written to the audit trail in full so a later query can say what was on file."
+                              reasonLabel="Why"
+                              reasonPlaceholder="Account closed; the vendor sent new details on letterhead."
+                              confirmLabel="Remove"
+                              icon="cancel"
+                              size="xs"
+                              variant="ghost"
+                              hidden={{ vendorId: vendor.id }}
+                              action={removeBankAccountAction}
+                            />
+                          </div>
+                        </TableCell>
+                      )}
                     </TableRow>
                   ))}
                 </TableBody>

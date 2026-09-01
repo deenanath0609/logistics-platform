@@ -106,7 +106,21 @@ export default async function VendorsPage({
       : {}),
   };
 
-  const [rows, total, payable, flagged] = await Promise.all([
+  // ── One definition of "open", used by every figure on this screen ─────
+  //
+  // The tile summed two statuses, the row summed four, and the detail
+  // page summed whatever fitted in `take: 40`, so a vendor could be
+  // reported three different amounts of payable in three places. What is
+  // owed is what is not yet settled, which is every status a bill can sit
+  // in before it is paid or cancelled.
+  const OPEN_BILL_STATUSES = [
+    "SUBMITTED",
+    "APPROVED",
+    "PARTIALLY_PAID",
+    "DISPUTED",
+  ] as const;
+
+  const [rows, total, payable, flagged, activeCount] = await Promise.all([
     prisma.vendor.findMany({
       where,
       orderBy: [{ isActive: "desc" }, { name: "asc" }],
@@ -115,26 +129,38 @@ export default async function VendorsPage({
       include: {
         _count: { select: { rateContracts: true, trips: true, vehicles: true } },
         bills: {
-          where: { status: { in: ["SUBMITTED", "APPROVED", "PARTIALLY_PAID", "DISPUTED"] } },
+          where: { status: { in: [...OPEN_BILL_STATUSES] } },
           select: { amountDue: true, varianceAmount: true, status: true },
         },
       },
     }),
     prisma.vendor.count({ where }),
+    // Scoped to the vendors the search is showing, so this tile answers
+    // the same question as the "Vendors" tile beside it. It summed the
+    // whole network regardless of `q`, which made searching one
+    // transporter print the network's payables against their name.
     prisma.vendorBill.aggregate({
-      where: { orgId: user.orgId, status: { in: ["APPROVED", "PARTIALLY_PAID"] } },
+      where: { status: { in: [...OPEN_BILL_STATUSES] }, vendor: where },
       _sum: { amountDue: true },
     }),
+    // `null` means "never checked against a contract"; `0.00` means
+    // "checked, and it matched". `createVendorBill` writes the zero, so
+    // `NOT: { varianceAmount: null }` counted every bill that agreed with
+    // its contract exactly — the opposite of what the tile says. The row
+    // badge and the detail page already tested `!== 0`; now all three do.
     prisma.vendorBill.count({
       where: {
-        orgId: user.orgId,
-        status: { in: ["SUBMITTED", "DISPUTED"] },
-        NOT: { varianceAmount: null },
+        status: { in: [...OPEN_BILL_STATUSES] },
+        vendor: where,
+        varianceAmount: { not: null },
+        NOT: { varianceAmount: 0 },
       },
     }),
+    // Counted over the whole filtered set, not over one page. With a
+    // hundred vendors and `take: 25` the header read "Vendors 100 ·
+    // Active 25".
+    prisma.vendor.count({ where: { ...where, isActive: true, isBlocked: false } }),
   ]);
-
-  const activeCount = rows.filter((vendor) => vendor.isActive).length;
 
   return (
     <>
@@ -162,17 +188,22 @@ export default async function VendorsPage({
       <StatTiles
         items={[
           { label: "Vendors", value: String(total) },
-          { label: "Active", value: String(activeCount) },
+          {
+            label: "Working",
+            value: String(activeCount),
+            hint: "Active and not blocked",
+          },
           {
             label: "Payable",
             value: formatMoneyShort(payable._sum.amountDue?.toString() ?? 0),
             tone: "warn",
+            hint: "Everything raised and not yet settled",
           },
           {
             label: "Bills with variance",
             value: String(flagged),
             tone: flagged > 0 ? "bad" : "ok",
-            hint: "Checked against the contract",
+            hint: "Checked against the contract and disagreeing with it",
           },
         ]}
       />

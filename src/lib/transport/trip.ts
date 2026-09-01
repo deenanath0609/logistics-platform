@@ -7,6 +7,46 @@ import { nextNumber } from "@/lib/numbering/number-series";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import { recordAudit } from "@/server/services/audit";
 import { canAssignDriver, canAssignVehicle } from "@/lib/fleet/availability";
+import type {
+  DriverStatus,
+  ShipmentStatus,
+  VehicleStatus,
+} from "@/generated/prisma/client";
+
+/**
+ * Statuses that mean "committed to a trip today", as opposed to "off the
+ * road". Planning is allowed to look past the first kind and never past
+ * the second, so they are named here rather than pinned to AVAILABLE
+ * wholesale — pinning would also erase MAINTENANCE, INACTIVE and
+ * SUSPENDED, which are the refusals that matter most.
+ */
+const VEHICLE_BUSY_ON_TRIP: readonly VehicleStatus[] = [
+  "ASSIGNED",
+  "LOADING",
+  "DISPATCHED",
+  "IN_TRANSIT",
+  "AT_HUB",
+  "UNLOADING",
+] as const;
+
+function neutraliseBusy(status: VehicleStatus): VehicleStatus {
+  return VEHICLE_BUSY_ON_TRIP.includes(status) ? "AVAILABLE" : status;
+}
+
+function neutraliseDriverBusy(status: DriverStatus): DriverStatus {
+  return status === "ON_TRIP" ? "AVAILABLE" : status;
+}
+
+/**
+ * Where a full-truck consignment may be in its life when a truck is bound
+ * to it. Kept beside the trip rules and imported by the trip screen, so
+ * the picker and the refusal cannot drift apart.
+ */
+export const FTL_BINDABLE_STATUSES: readonly ShipmentStatus[] = [
+  "PICKED_UP",
+  "RECEIVED_AT_ORIGIN",
+  "PROCESSED",
+] as const;
 
 /**
  * The trip: a vehicle physically moving between two branches.
@@ -87,13 +127,16 @@ export async function createTrip(
   // on a trip. This is the same rule, and the same wording, the fleet
   // screens show — planning must not be the one place with a softer rule.
   //
-  // `canAssignVehicle` is asked with the vehicle pinned to AVAILABLE
-  // deliberately: its "already assigned" branch answers "is this truck free
-  // right now", and a trip may legitimately be planned for tomorrow against
-  // a truck that is out today. Being *on the road* is checked below, against
-  // trips rather than against a status column that a stale trip can strand.
+  // Only the *busy on a trip* statuses are neutralised before the question
+  // is asked, never the off-road ones. `canAssignVehicle` reads one status
+  // column for two different questions — "is this truck free right now" and
+  // "is this truck roadworthy at all" — and a trip may legitimately be
+  // planned for tomorrow against a truck that is out today. Being on the
+  // road is answered below against open trips, which a stale status column
+  // cannot strand. MAINTENANCE and INACTIVE are refused above and reach
+  // this call unchanged, so nothing off the road slips through.
   const paperwork = canAssignVehicle(
-    { ...vehicle, status: "AVAILABLE" },
+    { ...vehicle, status: neutraliseBusy(vehicle.status) },
     vehicle.documents,
     asOf,
   );
@@ -141,9 +184,13 @@ export async function createTrip(
     }
 
     // Licence, suspension and deactivation, in the same words the driver
-    // list uses. Status is pinned for the same reason as the vehicle above:
-    // "on a trip today" must not stop tomorrow's trip being planned.
-    const licence = canAssignDriver({ ...driver, status: "AVAILABLE" }, asOf);
+    // list uses. Only ON_TRIP is neutralised, for the same reason as the
+    // vehicle above: "out on a trip today" must not stop tomorrow's trip
+    // being planned, while SUSPENDED and INACTIVE must still refuse.
+    const licence = canAssignDriver(
+      { ...driver, status: neutraliseDriverBusy(driver.status) },
+      asOf,
+    );
     if (!licence.ok) {
       return { ok: false, error: `${driver.name}: ${licence.reason}`, field: "driverId" };
     }
@@ -174,6 +221,7 @@ export async function createTrip(
         lrNumber: true,
         mode: true,
         currentStatus: true,
+        isOnHold: true,
         deletedAt: true,
         originBranchId: true,
         currentBranchId: true,
@@ -190,6 +238,26 @@ export async function createTrip(
       return {
         ok: false,
         error: `${shipment.lrNumber} is a ${shipment.mode} consignment. Put it on a manifest instead of binding a whole truck to it.`,
+        field: "ftlShipmentId",
+      };
+    }
+
+    // A consignment already on a truck, delivered, or cancelled has no
+    // business being bound to a second one. The trip screen offers exactly
+    // these three statuses; this is the same rule where the form cannot
+    // reach it. FTL skips sortation, so PROCESSED is not required — a full
+    // load is not broken down and re-sorted.
+    if (!FTL_BINDABLE_STATUSES.includes(shipment.currentStatus)) {
+      return {
+        ok: false,
+        error: `${shipment.lrNumber} is ${shipment.currentStatus.replace(/_/g, " ").toLowerCase()} and cannot be put on a truck.`,
+        field: "ftlShipmentId",
+      };
+    }
+    if (shipment.isOnHold) {
+      return {
+        ok: false,
+        error: `${shipment.lrNumber} is on hold. Release the hold before dispatching it.`,
         field: "ftlShipmentId",
       };
     }
@@ -573,6 +641,7 @@ export async function gateIn(
       vehicleId: true,
       startOdometerKm: true,
       destinationBranchId: true,
+      vehicle: { select: { status: true } },
     },
   });
 
@@ -658,6 +727,7 @@ export async function gateIn(
       data: {
         orgId: actor.orgId,
         vehicleId: trip.vehicleId,
+        fromStatus: trip.vehicle.status,
         toStatus: "AT_HUB",
         tripId: trip.id,
         branchId: input.branchId,
@@ -702,11 +772,24 @@ export async function closeTrip(
       number: true,
       status: true,
       vehicleId: true,
+      driverId: true,
+      originBranchId: true,
       destinationBranchId: true,
+      vehicle: { select: { status: true } },
     },
   });
 
   if (!trip) return { ok: false, error: "That trip does not exist." };
+  // Either end of the leg may settle it — the receiving branch normally
+  // does, but a trip that turned back is closed by the branch it returned
+  // to. Anybody covering neither end has no business closing it, and this
+  // was the one gate mutation with no scope check at all.
+  if (
+    !coversBranch(actor, trip.destinationBranchId) &&
+    !coversBranch(actor, trip.originBranchId)
+  ) {
+    return { ok: false, error: "That trip belongs to another branch." };
+  }
   if (trip.status === "COMPLETED") return { ok: false, error: `${trip.number} is already closed.` };
   if (trip.status !== "ARRIVED" && trip.status !== "UNLOADING") {
     return { ok: false, error: `${trip.number} has not arrived yet.` };
@@ -753,6 +836,7 @@ export async function closeTrip(
       data: {
         orgId: actor.orgId,
         vehicleId: trip.vehicleId,
+        fromStatus: trip.vehicle.status,
         toStatus: "AVAILABLE",
         tripId: trip.id,
         branchId: trip.destinationBranchId,
@@ -760,6 +844,19 @@ export async function closeTrip(
         remarks: `${trip.number} closed`,
       },
     });
+
+    // The driver comes off the road too. Gate-out puts them ON_TRIP, and
+    // without this nothing ever takes them off it: the roster reads every
+    // driver as permanently out, `canAssignDriver` refuses all of them,
+    // and the next trip is planned with no driver at all. Guarded on
+    // ON_TRIP so a driver suspended or sent on leave while the truck was
+    // running is not silently made available again by an unrelated act.
+    if (trip.driverId) {
+      await tx.driver.updateMany({
+        where: { id: trip.driverId, status: "ON_TRIP" },
+        data: { status: "AVAILABLE" },
+      });
+    }
   });
 
   await recordAudit({
@@ -788,7 +885,14 @@ export async function markVehicleReported(
 
   const trip = await prisma.trip.findUnique({
     where: { id: input.tripId },
-    select: { id: true, number: true, status: true, originBranchId: true, vehicleId: true },
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      originBranchId: true,
+      vehicleId: true,
+      vehicle: { select: { status: true } },
+    },
   });
 
   if (!trip) return { ok: false, error: "That trip does not exist." };
@@ -816,6 +920,22 @@ export async function markVehicleReported(
     await tx.vehicle.update({
       where: { id: trip.vehicleId },
       data: { status: "ASSIGNED" },
+    });
+    // Every other status move a trip makes writes this log; this one did
+    // not, so the vehicle history skipped straight from AVAILABLE to
+    // DISPATCHED and the time the truck spent standing at the gate was
+    // invisible.
+    await tx.vehicleStatusLog.create({
+      data: {
+        orgId: actor.orgId,
+        vehicleId: trip.vehicleId,
+        fromStatus: trip.vehicle.status,
+        toStatus: "ASSIGNED",
+        tripId: trip.id,
+        branchId: trip.originBranchId,
+        userId: actor.id,
+        remarks: `Reported at the gate for ${trip.number}`,
+      },
     });
   });
 

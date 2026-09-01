@@ -29,6 +29,11 @@
  *   --owner-name      defaults to "Owner"
  *   --owner-mobile    defaults to 9000000001
  *   --owner-email     optional
+ *   --owner-password  set the owner's password instead of generating one.
+ *                     For a carrier a script has to sign into afterwards —
+ *                     CI, a fixture, a demonstration. A password given here
+ *                     was not handed out by us, so first sign-in does not
+ *                     force a change. Leave it off for a real carrier.
  *   --template        slug or id of the carrier to copy from; defaults to
  *                     the oldest, which is what the console defaults to
  *   --branch-code     defaults to HO
@@ -168,6 +173,7 @@ async function main() {
         name: args["owner-name"] ?? "Owner",
         mobile: args["owner-mobile"] ?? "9000000001",
         email: args["owner-email"] ?? null,
+        password: args["owner-password"] ?? null,
       },
     },
     // No operator is signed in at a terminal, and the audit row says so
@@ -197,7 +203,11 @@ async function main() {
   console.log(`     Until it exists, sign-in appears to work and no session survives.`);
   console.log(`  3. Sign in at https://${data.subdomain}.<platform>/login`);
   console.log(`     ${args["owner-mobile"] ?? "9000000001"} / ${data.ownerPassword}`);
-  console.log(`     Shown once. It is not stored anywhere but the hash on the user row.`);
+  console.log(
+    args["owner-password"]
+      ? `     The password you supplied. No change is forced at first sign-in.`
+      : `     Shown once. It is not stored anywhere but the hash on the user row.`,
+  );
   console.log(`  4. Start DLT sender registration — it is the long pole.`);
   console.log(`  5. Load rate cards; nothing can be billed without them.`);
   console.log(`  6. Set status to ACTIVE once the blocking tasks are done.\n`);

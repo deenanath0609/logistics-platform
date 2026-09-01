@@ -51,6 +51,20 @@ export type ProvisionOwnerInput = {
   name: string;
   mobile: string;
   email: string | null;
+  /**
+   * A password chosen by the caller instead of generated here.
+   *
+   * Only the command-line provisioner passes this, and only for building a
+   * carrier a script has to sign into afterwards — a CI run, a fixture, a
+   * demonstration. It is not offered in the operator console, where a
+   * generated secret shown once is the right behaviour.
+   *
+   * A password the caller chose was never handed out by us, so the forced
+   * change on first sign-in does not apply to it: the flag exists to make
+   * somebody replace a secret that travelled to them in the clear, and
+   * there is nobody here for it to have travelled to.
+   */
+  password?: string | null;
 };
 
 export type ProvisionInput = {
@@ -452,7 +466,8 @@ export async function provisionTenant(
   }
 
   const meta = await requestMeta();
-  const ownerPassword = generateTemporaryPassword();
+  const chosenPassword = input.owner.password?.trim() || null;
+  const ownerPassword = chosenPassword ?? generateTemporaryPassword();
   const ownerPasswordHash = await hashPassword(ownerPassword);
 
   try {
@@ -577,7 +592,10 @@ export async function provisionTenant(
           email: input.owner.email?.trim() || null,
           passwordHash: ownerPasswordHash,
           primaryBranchId: branch.id,
-          mustChangePassword: true,
+          // See `ProvisionOwnerInput.password`: a generated secret has been
+          // read by whoever ran this and must be replaced; one the caller
+          // chose has not travelled anywhere.
+          mustChangePassword: chosenPassword === null,
         },
         select: { id: true },
       });

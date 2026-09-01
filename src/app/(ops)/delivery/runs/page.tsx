@@ -5,6 +5,13 @@ import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
 import { deliveryRunScope } from "@/lib/delivery/runs";
+import {
+  fromStoredDate,
+  shiftStoredDay,
+  storedDayFromYmd,
+  storedIsoDay,
+  storedToday,
+} from "@/lib/delivery/calendar";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { RunStatusPill } from "@/components/delivery/run-status-pill";
@@ -21,18 +28,15 @@ import {
 export const metadata: Metadata = { title: "Delivery runs" };
 export const dynamic = "force-dynamic";
 
-function localDay(value: string | undefined): Date {
-  if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split("-").map(Number);
-    return new Date(year, month - 1, day);
-  }
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return today;
-}
-
-function isoDay(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+/**
+ * The day being looked at, as `DeliveryRun.runDate` stores it.
+ *
+ * `runDate` is `@db.Date` and keeps the UTC calendar day, so the query,
+ * the pager links and the label all have to be built at UTC midnight —
+ * `lib/delivery/calendar.ts` says why.
+ */
+function calendarDay(value: string | undefined): Date {
+  return (value ? storedDayFromYmd(value) : null) ?? storedToday();
 }
 
 export default async function DeliveryRunsPage({
@@ -42,7 +46,7 @@ export default async function DeliveryRunsPage({
 }) {
   const user = await requirePermission("delivery.read");
   const { date } = await searchParams;
-  const runDate = localDay(date);
+  const runDate = calendarDay(date);
   const canAssign = can(user, "delivery.assign");
 
   const [runs, waiting] = await Promise.all([
@@ -100,10 +104,8 @@ export default async function DeliveryRunsPage({
       ])
     : [[], [], []];
 
-  const previous = new Date(runDate);
-  previous.setDate(previous.getDate() - 1);
-  const next = new Date(runDate);
-  next.setDate(next.getDate() + 1);
+  const previous = shiftStoredDay(runDate, -1);
+  const next = shiftStoredDay(runDate, 1);
 
   return (
     <>
@@ -118,7 +120,7 @@ export default async function DeliveryRunsPage({
               agents={agents.map((a) => ({ id: a.id, label: a.name, hint: a.mobile }))}
               vehicles={vehicles.map((v) => ({ id: v.id, label: v.registrationNumber }))}
               defaultBranchId={user.primaryBranch?.id ?? branches[0]?.id ?? ""}
-              defaultDate={isoDay(runDate)}
+              defaultDate={storedIsoDay(runDate)}
             />
           ) : undefined
         }
@@ -127,16 +129,16 @@ export default async function DeliveryRunsPage({
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1 rounded-lg border bg-card p-1">
           <Link
-            href={`/delivery/runs?date=${isoDay(previous)}`}
+            href={`/delivery/runs?date=${storedIsoDay(previous)}`}
             className="rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             ←
           </Link>
           <span className="px-2 font-mono text-xs font-medium tabular">
-            {format(runDate, "EEE dd MMM yyyy")}
+            {format(fromStoredDate(runDate), "EEE dd MMM yyyy")}
           </span>
           <Link
-            href={`/delivery/runs?date=${isoDay(next)}`}
+            href={`/delivery/runs?date=${storedIsoDay(next)}`}
             className="rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             →

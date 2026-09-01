@@ -92,6 +92,58 @@ export async function rolesBeyondActor(
     .filter((entry) => entry.codes.length > 0);
 }
 
+/**
+ * The active roles the actor may actually hand out, in one query.
+ *
+ * The counterpart of `rolesBeyondActor` for the *form* rather than the
+ * submit: the field-staff screen offered every active role in the
+ * organisation, so a branch administrator creating a delivery boy was
+ * shown ACCOUNTS and Super Admin, picked one, and learned only on submit
+ * that it was refused. The refusal is correct and stays; a picker whose
+ * options are mostly traps is not.
+ *
+ * The actor's own roles are always included even when they somehow confer
+ * something the actor's own permission set does not — you can always pass
+ * on what you hold.
+ */
+export async function grantableRoles<T extends { id: string }>(
+  actor: SessionUser,
+  roles: readonly T[],
+): Promise<T[]> {
+  if (roles.length === 0) return [];
+
+  const beyond = await rolesBeyondArray(
+    actor,
+    roles.map((role) => role.id),
+  );
+  return roles.filter((role) => !beyond.has(role.id));
+}
+
+/** `rolesBeyondActor`, keyed by id, for filtering rather than reporting. */
+async function rolesBeyondArray(
+  actor: SessionUser,
+  roleIds: string[],
+): Promise<Set<string>> {
+  const [held, roles] = await Promise.all([
+    permissionsHeldBy(actor),
+    prisma.role.findMany({
+      where: { id: { in: roleIds } },
+      select: {
+        id: true,
+        permissions: { select: { permission: { select: { code: true } } } },
+      },
+    }),
+  ]);
+
+  const beyond = new Set<string>();
+  for (const role of roles) {
+    if (role.permissions.some((rp) => !held.has(rp.permission.code))) {
+      beyond.add(role.id);
+    }
+  }
+  return beyond;
+}
+
 /** How many offending codes to name before summarising the rest. */
 const LISTED = 4;
 

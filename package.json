@@ -45,10 +45,13 @@
     "verify:help": "tsx scripts/verify-help.ts",
     "verify:field-login": "tsx scripts/verify-field-login.ts",
     "verify:branch-flow": "tsx scripts/verify-branch-flow.ts",
+    "verify:lastmile": "tsx scripts/verify-lastmile.ts",
     "verify:core": "tsx scripts/verify-core.ts",
     "verify:tracking-sla": "tsx scripts/verify-tracking-sla.ts",
     "verify:hub": "tsx scripts/verify-hub.ts",
+    "verify:dispatch": "tsx scripts/verify-dispatch.ts",
     "verify:portal": "tsx scripts/verify-portal.ts",
+    "verify:billing": "tsx scripts/verify-billing.ts",
     "seed:branch-logins": "tsx scripts/seed-branch-logins.ts"
   },
   "dependencies": {

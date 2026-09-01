@@ -29,16 +29,64 @@ export const dynamic = "force-dynamic";
 
 export default async function SettlementsPage() {
   const user = await requirePermission("settlement.read");
-  const canPrepare = can(user, "expense.record");
+  // `settlement.prepare`, not `expense.record`. The permission moved when
+  // it turned out a driver holds `expense.record` so they can log fuel —
+  // and could therefore raise the document that pays them. The action was
+  // re-gated; this button was not, so it was offered to people the action
+  // then refused.
+  const canPrepare = can(user, "settlement.prepare");
   const canApprove = can(user, "settlement.approve");
   const canPay = can(user, "payment.record");
 
-  const settlements = await prisma.driverSettlement.findMany({
+  /**
+   * The settled list, scoped to the reader's branches.
+   *
+   * `settlement.read` rides in on `allReads`, which every branch-scoped
+   * Branch Manager holds, and this list carried the whole network's driver
+   * payouts — driver, trip and net payable. The pending queue below was
+   * branch-scoped from the start; the settled list above it was not.
+   *
+   * Scoped in two steps rather than in the `where`, because
+   * `DriverSettlement.tripId` is a bare column with no Prisma relation on
+   * it, so there is nothing to filter through. The second query is bounded
+   * by the ids the first returned, which is what keeps this from becoming
+   * a trawl of every trip the branch ever ran.
+   */
+  const recent = await prisma.driverSettlement.findMany({
     where: { orgId: user.orgId },
     orderBy: { createdAt: "desc" },
-    take: 100,
+    take: user.branchIds === null ? 100 : 300,
     include: { driver: { select: { code: true, name: true } } },
   });
+
+  const visibleTripIds =
+    user.branchIds === null
+      ? null
+      : new Set(
+          (
+            await prisma.trip.findMany({
+              where: {
+                id: {
+                  in: recent
+                    .map((settlement) => settlement.tripId)
+                    .filter((id): id is string => Boolean(id)),
+                },
+                AND: [anyBranchScope(user, ["originBranchId", "destinationBranchId"])],
+              },
+              select: { id: true },
+            })
+          ).map((trip) => trip.id),
+        );
+
+  const settlements = (
+    visibleTripIds === null
+      ? recent
+      : // A settlement with no trip on it belongs to no branch, so a
+        // branch-scoped reader is not the person to see it.
+        recent.filter(
+          (settlement) => settlement.tripId && visibleTripIds.has(settlement.tripId),
+        )
+  ).slice(0, 100);
 
   const settledTripIds = new Set(
     settlements

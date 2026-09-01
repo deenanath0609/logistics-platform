@@ -51,7 +51,14 @@ export function DepositForm({
   const [mode, setMode] = useState("CASH");
   const [pending, startTransition] = useTransition();
 
-  function submit(formData: FormData) {
+  // `onSubmit` + `preventDefault`, not `<form action={fn}>`: React 19 resets
+  // an uncontrolled form after an action, and a refused deposit wiped the
+  // reference and the remarks — the two fields a disputed handover most
+  // needs to keep — while the dialog stayed open.
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result: CodActionState = await depositAction({}, formData);
       if (result.message) {
@@ -73,7 +80,7 @@ export function DepositForm({
       </DialogTrigger>
 
       <DialogContent className="sm:max-w-md">
-        <form action={submit}>
+        <form onSubmit={handleSubmit}>
           <input type="hidden" name="branchId" value={branchId} />
           <input type="hidden" name="agentId" value={agentId} />
           <input type="hidden" name="depositDate" value={depositDate} />
@@ -82,8 +89,8 @@ export function DepositForm({
           <DialogHeader>
             <DialogTitle>Deposit from {agentName}</DialogTitle>
             <DialogDescription>
-              ₹{collected.toLocaleString("en-IN")} was collected at the doors
-              today.
+              ₹{collected.toLocaleString("en-IN")} is outstanding against what
+              this agent took at the doors today.
             </DialogDescription>
           </DialogHeader>
 
@@ -165,7 +172,10 @@ export function VerifyForm({
   const [amount, setAmount] = useState(String(declared));
   const [pending, startTransition] = useTransition();
 
-  function submit(formData: FormData) {
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result: CodActionState = await verifyDepositAction({}, formData);
       if (result.message) {
@@ -187,7 +197,7 @@ export function VerifyForm({
       </DialogTrigger>
 
       <DialogContent className="sm:max-w-sm">
-        <form action={submit}>
+        <form onSubmit={handleSubmit}>
           <input type="hidden" name="depositId" value={depositId} />
 
           <DialogHeader>

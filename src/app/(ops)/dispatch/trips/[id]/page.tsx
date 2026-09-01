@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import { UtilisationBar } from "../../manifests/utilisation-bar";
 import { TripGateActions } from "./gate-actions";
+import { AttachManifest } from "./attach-manifest";
 
 export const metadata: Metadata = { title: "Trip" };
 export const dynamic = "force-dynamic";
@@ -120,7 +121,16 @@ export default async function TripDetailPage({
     notFound();
   }
 
-  const [openSheet, receipt] = await Promise.all([
+  const isFtl = Boolean(trip.ftlShipment);
+  const canAttach =
+    !isFtl &&
+    can(user, "manifest.update") &&
+    coversBranch(user, trip.originBranchId) &&
+    (trip.status === "PLANNED" ||
+      trip.status === "VEHICLE_REPORTED" ||
+      trip.status === "LOADING");
+
+  const [openSheet, receipt, attachable] = await Promise.all([
     prisma.loadingSheet.findFirst({
       where: { tripId: trip.id, status: "OPEN" },
       select: { id: true },
@@ -130,9 +140,27 @@ export default async function TripDetailPage({
       orderBy: { openedAt: "desc" },
       select: { id: true, status: true },
     }),
+    // Exactly what `setManifestTrip` will accept from this side: same leg,
+    // still editable, and not already promised to another truck.
+    canAttach
+      ? prisma.manifest.findMany({
+          where: {
+            tripId: null,
+            status: { in: ["DRAFT", "CLOSED"] },
+            originBranchId: trip.originBranchId,
+            destinationBranchId: trip.destinationBranchId,
+          },
+          orderBy: { createdAt: "asc" },
+          take: 50,
+          select: {
+            id: true,
+            number: true,
+            totalShipments: true,
+            totalWeight: true,
+          },
+        })
+      : [],
   ]);
-
-  const isFtl = Boolean(trip.ftlShipment);
 
   // FTL weight comes from the single consignment; PTL from its manifests.
   const totalWeight = isFtl
@@ -235,9 +263,27 @@ export default async function TripDetailPage({
 
           {/* Load */}
           <section className="flex flex-col gap-3">
-            <h2 className="font-mono text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
-              {isFtl ? "Consignment" : `Manifests — ${trip.manifests.length}`}
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-mono text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
+                {isFtl ? "Consignment" : `Manifests — ${trip.manifests.length}`}
+              </h2>
+              {canAttach && (
+                <AttachManifest
+                  tripId={trip.id}
+                  capacityKg={Number(trip.vehicle.vehicleType.capacityKg) || null}
+                  loadedKg={totalWeight}
+                  available={attachable.map((manifest) => ({
+                    id: manifest.id,
+                    number: manifest.number,
+                    totalShipments: manifest.totalShipments,
+                    weightKg: Number(manifest.totalWeight),
+                  }))}
+                  attached={trip.manifests
+                    .filter((manifest) => manifest.status === "DRAFT" || manifest.status === "CLOSED")
+                    .map((manifest) => ({ id: manifest.id, number: manifest.number }))}
+                />
+              )}
+            </div>
 
             <TableFrame>
               {isFtl ? (

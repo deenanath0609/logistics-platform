@@ -1,7 +1,8 @@
 "use client";
 
-import { useActionState, useMemo, useState } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { Loader2, Plus } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -71,7 +72,29 @@ export function CreateTripDialog({
     defaultOriginId ?? originBranches[0]?.id ?? "",
   );
   const [destinationId, setDestinationId] = useState("");
-  const [state, formAction, pending] = useActionState(createTripAction, IDLE);
+  const [state, setState] = useState<TripState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  /**
+   * `onSubmit` with `preventDefault`, not `<form action={…}>`: React 19
+   * resets an uncontrolled form the moment a form action returns, and this
+   * one is ten fields deep. A trip refused because the truck's fitness
+   * certificate has lapsed used to take the seal number, both planned
+   * times and the remarks down with it, so the second attempt started from
+   * an empty form — and the whole point of the refusal is that everything
+   * except the vehicle was right.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      const result = await createTripAction(IDLE, formData);
+      setState(result);
+      // A successful create redirects, so there is nothing to close.
+      if (result.error) toast.error(result.error, { duration: 8000 });
+    });
+  }
 
   const selectedFtl = useMemo(
     () => ftlShipments.find((s) => s.id === ftlShipmentId) ?? null,
@@ -99,7 +122,7 @@ export function CreateTripDialog({
         }
       />
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <form action={formAction}>
+        <form onSubmit={submit}>
           <input type="hidden" name="originBranchId" value={effectiveOrigin} />
           <input type="hidden" name="destinationBranchId" value={effectiveDestination} />
           {mode === "FTL" && (

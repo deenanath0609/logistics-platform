@@ -1,8 +1,14 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { authorize, PermissionError } from "@/lib/auth/session";
+import Decimal from "decimal.js";
+import { prisma } from "@/lib/prisma";
+import { authorize, can, PermissionError } from "@/lib/auth/session";
 import { rerateShipment } from "@/lib/pricing/rerate";
+import {
+  liveInvoiceForShipment,
+  raiseReweighDebitNote,
+} from "@/lib/billing/debit-note";
 import type { FinanceActionState } from "../action-state";
 
 /**
@@ -42,6 +48,36 @@ export async function rerateShipmentAction(
 
     const revisedWeight = formData.get("revisedChargeableWeight");
 
+    /**
+     * What the consignment was charged before, and where that figure has
+     * already gone.
+     *
+     * Read *before* the re-rate, because `rerateShipment` applies the new
+     * figures to the shipment and afterwards there is nothing to compare
+     * to. `chargesTotal` rather than `grandTotal`: a debit note bills the
+     * taxable value, with the tax stated beside it.
+     */
+    const before = await prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { id: true, lrNumber: true, chargesTotal: true },
+    });
+    if (!before) return { error: "That consignment no longer exists." };
+
+    const linkBefore = await liveInvoiceForShipment(shipmentId);
+
+    // A document that has left the building cannot be edited, and repricing
+    // the consignment underneath it is the same thing done quietly. Raising
+    // one needs the authority to raise an invoice, which `ratecard.manage`
+    // is not — so the re-rate is refused rather than half-done.
+    if (linkBefore?.isIssued && !can(actor, "invoice.create")) {
+      return {
+        error:
+          `${before.lrNumber} is already billed on ${linkBefore.number}. Re-pricing it now ` +
+          `raises a debit note against that invoice, which needs the permission to raise ` +
+          `invoices. Nothing was changed.`,
+      };
+    }
+
     const result = await rerateShipment(
       {
         shipmentId,
@@ -68,6 +104,51 @@ export async function rerateShipmentAction(
       };
     }
 
+    /**
+     * The correction, when the consignment was already on a live invoice.
+     *
+     * Without this the pricing desk's re-rate moved `shipment.grandTotal`
+     * and left the issued invoice stating the old figure, with nothing
+     * billed for the difference and nothing on the account to say the
+     * consignment had been repriced. The hub's reweigh path has raised the
+     * note since it was written; this one is the same event arriving from
+     * a different desk, and owes the customer the same document.
+     *
+     * `raiseReweighDebitNote` decides for itself: nothing on an uninvoiced
+     * consignment, nothing on a draft — regenerate that instead — and
+     * nothing when the price went down, which is a credit note and a
+     * conversation.
+     */
+    const taxableDelta = result.result.chargesTotal.minus(
+      new Decimal(before.chargesTotal.toString()),
+    );
+
+    const statedTax = result.result.taxes.reduce(
+      (sum, tax) => sum.plus(tax.amount),
+      new Decimal(0),
+    );
+    const taxableBase = result.result.taxes.reduce(
+      (sum, tax) => sum.plus(tax.taxableValue),
+      new Decimal(0),
+    );
+    const effectiveTaxPercent = taxableBase.greaterThan(0)
+      ? statedTax.times(100).dividedBy(taxableBase)
+      : new Decimal(0);
+
+    const debitNote = await raiseReweighDebitNote(
+      {
+        shipmentId,
+        delta: taxableDelta.toDecimalPlaces(2),
+        taxDelta: taxableDelta
+          .times(effectiveTaxPercent)
+          .dividedBy(100)
+          .toDecimalPlaces(2),
+        taxPercent: effectiveTaxPercent,
+        reason: `Re-priced from the coverage-gap report. ${reason.trim()}`,
+      },
+      actor,
+    );
+
     const direction = result.delta.greaterThanOrEqualTo(0) ? "up" : "down";
 
     return {
@@ -75,6 +156,11 @@ export async function rerateShipmentAction(
       message:
         `Re-rated to ₹${result.newTotal.toFixed(2)} — ${direction} ` +
         `₹${result.delta.abs().toFixed(2)} (${result.deltaPercent.toFixed(2)}%).` +
+        (debitNote.raised
+          ? ` Debit note ${debitNote.number} raised against ${linkBefore?.number ?? "the invoice"}.`
+          : linkBefore
+            ? ` ${debitNote.reason}`
+            : "") +
         (result.exceedsTolerance
           ? ` That is beyond the ${result.tolerancePercent.toFixed(2)}% tolerance — tell the customer before billing.`
           : ""),

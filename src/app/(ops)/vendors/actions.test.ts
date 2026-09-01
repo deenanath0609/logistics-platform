@@ -18,7 +18,10 @@ const store = vi.hoisted(() => ({
   created: [] as Array<Record<string, unknown>>,
   /** `vendorBankAccount.updateMany` payloads — the primary demotion. */
   demotions: [] as Array<Record<string, unknown>>,
+  /** `vendorBankAccount.update` payloads — a correction to an existing row. */
+  updated: [] as Array<Record<string, unknown>>,
   audits: [] as Array<Record<string, unknown>>,
+  vendors: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath: () => {} }));
@@ -56,8 +59,25 @@ vi.mock("@/lib/prisma", () => {
         store.created.push(data);
         return { id: "bank-new", accountNumber: data.accountNumber };
       },
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        store.accounts.find((row) => row.id === where.id) ?? null,
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        store.updated.push({ id: where.id, ...data });
+        return { id: where.id, accountNumber: data.accountNumber };
+      },
     },
-    vendor: { findUnique: async () => null, create: async () => ({}), update: async () => ({}) },
+    vendor: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        store.vendors.find((row) => row.id === where.id) ?? null,
+      create: async () => ({}),
+      update: async () => ({}),
+    },
   };
 
   return {
@@ -132,7 +152,12 @@ beforeEach(() => {
   store.accounts.length = 0;
   store.created.length = 0;
   store.demotions.length = 0;
+  store.updated.length = 0;
   store.audits.length = 0;
+  store.vendors.length = 0;
+
+  store.vendors.push({ id: "v-1", code: "SHARMA", deletedAt: null });
+  store.vendors.push({ id: "v-2", code: "OTHER", deletedAt: null });
 
   store.accounts.push({
     id: "bank-old",
@@ -188,5 +213,61 @@ describe("saveBankAccountAction", () => {
     expect(audit.after.accountNumber).toBe("50100234567890");
     expect(audit.after.ifsc).toBe("HDFC0001234");
     expect(audit.before?.previousPrimary?.accountNumber).toBe("911020001111");
+  });
+
+  /**
+   * The vendor id travels in a hidden input and used to be written
+   * straight onto the row. Within one organisation that is enough to
+   * land a payee instruction on somebody else's transporter, and every
+   * future payout to them would follow it.
+   */
+  it("refuses a vendor id that does not resolve", async () => {
+    const { saveBankAccountAction } = await import("./actions");
+    actor = staff(ACCOUNTS);
+
+    const result = await saveBankAccountAction(
+      {},
+      bankForm({ vendorId: "v-does-not-exist" }),
+    );
+
+    expect(result.error).toContain("no longer exists");
+    expect(store.created).toHaveLength(0);
+    expect(store.demotions).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  /**
+   * A typed-wrong IFSC could only ever be answered by adding a second
+   * primary account, because this action only ever `create`d.
+   */
+  it("corrects an existing account rather than adding another", async () => {
+    const { saveBankAccountAction } = await import("./actions");
+    actor = staff(ACCOUNTS);
+
+    const result = await saveBankAccountAction(
+      {},
+      bankForm({ id: "bank-old", ifsc: "HDFC0009999" }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(store.created).toHaveLength(0);
+    expect(store.updated).toHaveLength(1);
+    expect(store.updated[0].id).toBe("bank-old");
+    expect(store.updated[0].ifsc).toBe("HDFC0009999");
+  });
+
+  it("refuses to correct an account belonging to another vendor", async () => {
+    const { saveBankAccountAction } = await import("./actions");
+    actor = staff(ACCOUNTS);
+
+    const result = await saveBankAccountAction(
+      {},
+      bankForm({ id: "bank-old", vendorId: "v-2" }),
+    );
+
+    expect(result.error).toContain("not on this vendor");
+    expect(store.created).toHaveLength(0);
+    expect(store.updated).toHaveLength(0);
+    expect(store.demotions).toHaveLength(0);
   });
 });

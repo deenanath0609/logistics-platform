@@ -101,6 +101,35 @@ async function loadTask(
   return { ok: true, task: task as TaskForExecution };
 }
 
+/** Stop states that mean the visit is over and the outcome is on the record. */
+const SETTLED_TASK_STATUSES = new Set(["DELIVERED", "FAILED", "RETURNED", "CANCELLED"]);
+
+/**
+ * Why a settled stop refuses a second outcome.
+ *
+ * The queue on the phone is durable and the branch keeps working while the
+ * phone is out of signal, so a submission can arrive for a stop that has
+ * already been closed out from somewhere else — an RTO raised at the desk,
+ * a stop cancelled, or the agent recording a failure and then a delivery
+ * against the same visit. Every caller checks its own replay key *first*,
+ * so a genuine retry still confirms; this only catches the second, different
+ * outcome, which the unique indexes would otherwise refuse with a raw
+ * Postgres message after the evidence had already been written.
+ */
+function settledRefusal(task: TaskForExecution): string | null {
+  if (!SETTLED_TASK_STATUSES.has(task.status)) return null;
+  if (task.status === "DELIVERED") {
+    return "This stop is already recorded as delivered.";
+  }
+  if (task.status === "RETURNED") {
+    return "This consignment has been sent back to the sender. Call the branch.";
+  }
+  if (task.status === "CANCELLED") {
+    return "This stop was taken off your run. Call the branch.";
+  }
+  return "An outcome has already been recorded for this stop. A correction is a new visit, never an edit.";
+}
+
 // ────────────────────────────────────────────────────────────
 // OTP at the door
 // ────────────────────────────────────────────────────────────
@@ -211,6 +240,11 @@ export async function recordDelivery(
     select: { id: true },
   });
   if (existing) return { ok: true, podId: existing.id, duplicate: true };
+
+  // Not a replay, then — so the stop must still be open. Checked before a
+  // single byte of evidence is stored, so a refusal leaves nothing behind.
+  const settled = settledRefusal(task);
+  if (settled) return { ok: false, error: settled };
 
   if (!input.receiverName.trim()) {
     return { ok: false, error: "Who received it?", field: "receiverName" };
@@ -589,6 +623,11 @@ export async function recordFailedAttempt(
     };
   }
 
+  // Not a replay, so the stop must still be open. Before the photo is
+  // stored, so a refused attempt writes nothing at all.
+  const settled = settledRefusal(task);
+  if (settled) return { ok: false, error: settled };
+
   // ── Evidence the reason row demands ────────────────────────
   let photoAssetId: string | null = null;
   if (input.photoDataUrl) {
@@ -768,12 +807,59 @@ export async function initiateRto(
     return { ok: false, error: "You do not have permission to return a shipment." };
   }
 
+  if (!reasonCodeId) {
+    return { ok: false, error: "A return needs a reason." };
+  }
+
+  // Branch scope on the write. `/delivery/runs` and `/shipments` are both
+  // scoped lists, but this took a bare id and turned a consignment around
+  // wherever it was — the same shape as the two sibling modules found with
+  // scoped lists and unscoped actions.
+  //
+  // Deliberately *not* `anyBranchScope`'s three columns. A return is taken
+  // where the goods physically are, or by the branch that owes the delivery
+  // — the origin has an interest in the outcome and no business making the
+  // decision. Including it would let the consignor's own branch turn a
+  // parcel around from four hundred miles away, and nobody at the branch
+  // holding it would have agreed.
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: shipmentId },
+    select: {
+      id: true,
+      deletedAt: true,
+      currentBranchId: true,
+      destinationBranchId: true,
+    },
+  });
+
+  if (!shipment || shipment.deletedAt) {
+    return { ok: false, error: "That consignment does not exist." };
+  }
+
+  const reachable = [
+    shipment.currentBranchId,
+    shipment.destinationBranchId,
+  ].filter((id): id is string => Boolean(id));
+
+  if (!reachable.some((id) => coversBranch(actor, id))) {
+    return { ok: false, error: "That consignment is outside your scope." };
+  }
+
+  const reason = await prisma.reasonCode.findUnique({
+    where: { id: reasonCodeId },
+    select: { id: true, isActive: true, category: true },
+  });
+
+  if (!reason || !reason.isActive || reason.category !== "RTO") {
+    return { ok: false, error: "Choose a return-to-origin reason." };
+  }
+
   const event = await appendShipmentEvent({
     shipmentId,
     eventType: "RTO_INITIATED",
     reasonCodeId,
     remarks,
-    branchId: actor.primaryBranch?.id ?? null,
+    branchId: shipment.currentBranchId ?? actor.primaryBranch?.id ?? null,
     idempotencyKey: crypto.randomUUID(),
   }, actor);
 

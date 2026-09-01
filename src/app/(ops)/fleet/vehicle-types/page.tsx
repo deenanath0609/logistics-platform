@@ -71,6 +71,14 @@ const FIELDS: FieldDef[] = [
   },
   {
     type: "number",
+    name: "maxSpeedKmph",
+    label: "Overspeed above (km/h)",
+    half: true,
+    step: "1",
+    help: "Raises an overspeed alert on this class. Blank switches the check off for it.",
+  },
+  {
+    type: "number",
     name: "sortOrder",
     label: "Sort order",
     half: true,
@@ -184,11 +192,24 @@ export default async function VehicleTypesPage() {
                             iconOnly: true,
                           }}
                         />
+                        {/* Turning a class off removes it from the
+                            rate-line picker, which filters on
+                            `isActive: true` — so a class with forty
+                            lorries still running it could be switched off
+                            in silence and no payable rate could then be
+                            expressed for any of them. The count is
+                            already on the row; the button now reads it. */}
                         <ToggleActive
                           id={row.id}
                           isActive={row.isActive}
                           label={row.code}
                           action={setVehicleTypeActive}
+                          disabled={row.isActive && row._count.vehicles > 0}
+                          disabledReason={
+                            row.isActive && row._count.vehicles > 0
+                              ? `${row._count.vehicles} vehicle${row._count.vehicles === 1 ? " is" : "s are"} still on ${row.code}. Move or retire ${row._count.vehicles === 1 ? "it" : "them"} first — deactivating now would leave no rate expressible for a class the fleet is running.`
+                              : undefined
+                          }
                         />
                       </div>
                     </TableCell>

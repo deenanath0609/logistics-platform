@@ -97,11 +97,20 @@ jobs:
 
       # The second carrier. Every isolation probe needs someone to try to
       # reach, and every gating probe needs a plan that withholds something.
+      #
+      # The owner's mobile and password are both given rather than left to
+      # their defaults. The gating suite signs in on *both* hosts with the
+      # same credentials, and provisioning otherwise invents a password and
+      # prints it once, which nothing here can catch — so that sign-in could
+      # never have succeeded. It is the second of the two reasons this job
+      # failed on every push for two days; the first was that the seeded
+      # carrier had no plan at all, so there was nothing to out-reach.
       - name: Provision the second carrier
         run: |
           npx tsx scripts/provision-tenant.ts \
             --slug acme-freight --name "Acme Freight" --subdomain acme \
-            --owner-mobile 9800000001 --owner-name "Priya Rao"
+            --owner-mobile 9999999999 --owner-name "Priya Rao" \
+            --owner-password 'Admin@123'
 
       # A carrier mid-provisioning has no plan, and no plan means every module
       # except core is withheld. That is correct behaviour and useless as a

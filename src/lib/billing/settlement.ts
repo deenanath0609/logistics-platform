@@ -262,6 +262,43 @@ export async function createSettlement(
   }
 }
 
+
+/**
+ * The branches a settlement belongs to, through the trip it settles.
+ *
+ * `DriverSettlement.tripId` is a bare column with no Prisma relation, so
+ * this is two queries rather than an `include` — and it is why the check
+ * has to be spelled out at each call site rather than living in a `where`.
+ *
+ * `createSettlement` has asked this since it was written, through
+ * `draftSettlement`. Approving, paying and cancelling did not: a settlement
+ * id off a form was enough, so a branch-scoped approver holding
+ * `settlement.approve` could release a payout on a trip between two
+ * branches they have never seen. Only network-scoped roles hold that
+ * permission today, which is why nothing has gone wrong — a custom role is
+ * one screen away from changing that.
+ */
+async function coversSettlement(
+  actor: SessionUser,
+  tripId: string | null,
+): Promise<boolean> {
+  if (actor.branchIds === null) return true;
+  // No trip means no branch to check against, and a branch-scoped user is
+  // not the person to act on a payout that belongs to nowhere.
+  if (!tripId) return false;
+
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    select: { originBranchId: true, destinationBranchId: true },
+  });
+  if (!trip) return false;
+
+  return (
+    coversBranch(actor, trip.originBranchId) ||
+    coversBranch(actor, trip.destinationBranchId)
+  );
+}
+
 /**
  * Approves a settlement for payout.
  *
@@ -288,11 +325,15 @@ export async function approveSettlement(
       status: true,
       netPayable: true,
       createdById: true,
+      tripId: true,
       driver: { select: { name: true } },
     },
   });
 
   if (!settlement) return { ok: false, error: "That settlement no longer exists." };
+  if (!(await coversSettlement(actor, settlement.tripId))) {
+    return { ok: false, error: "That settlement is outside your branch scope." };
+  }
   if (settlement.status !== "DRAFT") {
     return { ok: false, error: `That settlement is already ${settlement.status.toLowerCase()}.` };
   }
@@ -339,10 +380,13 @@ export async function markSettlementPaid(
 
   const settlement = await prisma.driverSettlement.findUnique({
     where: { id: input.settlementId },
-    select: { id: true, number: true, status: true, netPayable: true },
+    select: { id: true, number: true, status: true, netPayable: true, tripId: true },
   });
 
   if (!settlement) return { ok: false, error: "That settlement no longer exists." };
+  if (!(await coversSettlement(actor, settlement.tripId))) {
+    return { ok: false, error: "That settlement is outside your branch scope." };
+  }
   if (settlement.status !== "APPROVED") {
     return { ok: false, error: "Only an approved settlement can be paid out." };
   }
@@ -383,10 +427,13 @@ export async function cancelSettlement(
 
   const settlement = await prisma.driverSettlement.findUnique({
     where: { id: input.settlementId },
-    select: { id: true, number: true, status: true },
+    select: { id: true, number: true, status: true, tripId: true },
   });
 
   if (!settlement) return { ok: false, error: "That settlement no longer exists." };
+  if (!(await coversSettlement(actor, settlement.tripId))) {
+    return { ok: false, error: "That settlement is outside your branch scope." };
+  }
   if (settlement.status === "PAID") {
     return { ok: false, error: "That settlement has already been paid out." };
   }

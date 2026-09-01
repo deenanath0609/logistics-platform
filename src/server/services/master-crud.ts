@@ -1,7 +1,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { authorize, PermissionError, type SessionUser } from "@/lib/auth/session";
+import { authorize, can, PermissionError, type SessionUser } from "@/lib/auth/session";
 import {
   assertWithinLimit,
   isPlanLimitError,
@@ -106,6 +106,14 @@ export type MasterCrudOptions<S extends z.ZodObject<z.ZodRawShape>> = {
   refField: string;
   /** Human label for messages, e.g. "Service type". */
   label: string;
+  /**
+   * The permission that lets somebody see this master at all.
+   *
+   * Declared here and, until now, never read: `create`, `update` and
+   * `setActive` all authorised on `writePermission` alone, so this line
+   * read like a guard and was decoration. It is now enforced alongside the
+   * write — see `authorizeWrite`.
+   */
   readPermission: string;
   writePermission: string;
   schema: S;
@@ -125,6 +133,17 @@ export type MasterCrudOptions<S extends z.ZodObject<z.ZodRawShape>> = {
    * the unit, so the option is absent and no plan is consulted at all.
    */
   planLimit?: LimitKey;
+  /**
+   * Refuses a deactivation, in words to show the operator.
+   *
+   * Some masters are load-bearing while something still points at them —
+   * a vehicle class with lorries on it disappears from the rate-line
+   * picker the moment it is switched off, so no payable rate can be
+   * expressed for a class the fleet is still running. The screen disables
+   * the button from the same fact; this is what makes the rule hold when
+   * the button is bypassed. Return `null` to allow it.
+   */
+  blockDeactivate?: (id: string) => Promise<string | null>;
 };
 
 /**
@@ -156,12 +175,30 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
 ) {
   const table = () => delegate(options.model);
 
+  /**
+   * Both permissions, not just the write.
+   *
+   * Every shipped role that can write a master can also read it, so this
+   * changes nothing for them — which is the point: `readPermission` was
+   * declared on every one of these screens and consulted on none, and a
+   * hand-built role granting `vehicle.create` without `vehicle.read` could
+   * create and deactivate vehicle classes it was never allowed to see.
+   * A field that reads like a guard has to be one or be deleted.
+   */
+  async function authorizeWrite(): Promise<SessionUser> {
+    const user = await authorize(options.writePermission);
+    if (!can(user, options.readPermission)) {
+      throw new PermissionError(options.readPermission);
+    }
+    return user;
+  }
+
   async function create(
     _prev: ActionState,
     formData: FormData,
   ): Promise<ActionState> {
     try {
-      const user = await authorize(options.writePermission);
+      const user = await authorizeWrite();
 
       const parsed = options.schema.safeParse(
         Object.fromEntries(formData.entries()),
@@ -200,7 +237,7 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
     formData: FormData,
   ): Promise<ActionState> {
     try {
-      const user = await authorize(options.writePermission);
+      const user = await authorizeWrite();
 
       const id = String(formData.get("id") ?? "");
       if (!id) return { error: "Nothing selected to update." };
@@ -246,7 +283,7 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
     formData: FormData,
   ): Promise<ActionState> {
     try {
-      const user = await authorize(options.writePermission);
+      const user = await authorizeWrite();
 
       const id = String(formData.get("id") ?? "");
       const isActive = formData.get("isActive") === "true";
@@ -261,6 +298,11 @@ export function createMasterCrud<S extends z.ZodObject<z.ZodRawShape>>(
       // old one to sit at eleven.
       if (options.planLimit && isActive && before.isActive !== true) {
         await assertWithinLimit(options.planLimit);
+      }
+
+      if (!isActive && before.isActive === true && options.blockDeactivate) {
+        const refusal = await options.blockDeactivate(id);
+        if (refusal) return { error: refusal };
       }
 
       const after = await table().update({ where: { id }, data: { isActive } });

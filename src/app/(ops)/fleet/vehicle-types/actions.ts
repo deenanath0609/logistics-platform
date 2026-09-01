@@ -1,6 +1,7 @@
 "use server";
 
 import { z } from "zod";
+import { prisma } from "@/lib/prisma";
 import {
   createMasterCrud,
   zBool,
@@ -31,6 +32,14 @@ const schema = z.object({
   widthFt: zOptionalDecimal(0, 9999),
   heightFt: zOptionalDecimal(0, 9999),
   axles: zOptionalInt(1, 12),
+  // The overspeed threshold. The column existed, the tracking detector
+  // reads it, and no form or schema could ever set it — so it was null on
+  // every class and, in the schema's own words, "a detector with no
+  // threshold is worse than none, because it looks like it is watching".
+  // Bounded at a walking pace and at something no Indian goods vehicle
+  // legally does, so a fat-fingered `8` or `800` is refused rather than
+  // silently disabling or silently spamming the alert.
+  maxSpeedKmph: zOptionalInt(5, 200),
   sortOrder: z.preprocess(
     (v) => (v === "" || v === null || v === undefined ? 0 : Number(v)),
     z.number().int().min(0).max(9999),
@@ -47,6 +56,26 @@ const crud = createMasterCrud({
   writePermission: "vehicle.create",
   schema,
   path: "/fleet/vehicle-types",
+  /**
+   * Deactivating a class the fleet is still running used to succeed in
+   * silence. The class then vanished from the rate-line picker, which
+   * filters `isActive: true`, so no payable rate could be expressed for
+   * forty lorries that were still on the road — and nothing said why.
+   * The button on the screen is disabled from the same count, so the
+   * refusal is previewed rather than discovered.
+   */
+  blockDeactivate: async (id) => {
+    const attached = await prisma.vehicle.count({
+      where: { vehicleTypeId: id, deletedAt: null },
+    });
+    if (attached === 0) return null;
+    return (
+      `${attached} vehicle${attached === 1 ? " is" : "s are"} still on this class. ` +
+      `Move ${attached === 1 ? "it" : "them"} to another class or retire ` +
+      `${attached === 1 ? "it" : "them"} first — deactivating now would leave no rate ` +
+      `expressible for a class the fleet is running.`
+    );
+  },
 });
 
 export const createVehicleType = crud.create;

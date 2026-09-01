@@ -30,6 +30,14 @@ const store = vi.hoisted(() => ({
     consigneeCityId: "city-jai",
     consignorPincode: "110001",
     consigneePincode: "302001",
+    deletedAt: null,
+    cancelledAt: null,
+    // The three branches `rerateShipment` will accept an actor on. A
+    // re-rate reaches the service with nothing but a shipment id, so the
+    // scope check has to happen there.
+    originBranchId: "br-del",
+    currentBranchId: "br-del",
+    destinationBranchId: "br-jai",
     packageCount: 4,
     // Booked on the customer's word: 100 kg at ₹10/kg.
     actualWeight: "100.000",
@@ -191,10 +199,21 @@ const ACTOR = {
   id: "user-1",
   orgId: "org-1",
   name: "Hub clerk",
+  /** Network scope: `coversBranch` lets a null through unconditionally. */
+  branchIds: null,
+} as unknown as Parameters<typeof rerateShipment>[1];
+
+/** A branch-scoped clerk at a branch this consignment never touched. */
+const OTHER_BRANCH_ACTOR = {
+  id: "user-2",
+  orgId: "org-1",
+  name: "Ahmedabad clerk",
+  branchIds: ["br-amd"],
 } as unknown as Parameters<typeof rerateShipment>[1];
 
 function reset() {
   Object.assign(store.shipment, {
+    cancelledAt: null,
     actualWeight: "100.000",
     volumetricWeight: "0.000",
     chargeableWeight: "100.000",
@@ -356,6 +375,56 @@ describe("rerateShipment", () => {
     // 40% is now inside tolerance.
     expect(result.tolerancePercent.toFixed(0)).toBe("50");
     expect(result.exceedsTolerance).toBe(false);
+  });
+
+  /**
+   * The service takes a shipment id and nothing else, so it is the only
+   * place the question can be asked. `captureRevisedWeight` checks its own
+   * scope on the way in; the pricing desk's re-rate did not, which meant a
+   * branch-scoped clerk could reprice any consignment on the network — and
+   * the refusals below have to write nothing at all, or a refused re-rate
+   * would still be a re-rate.
+   */
+  it("refuses a clerk whose branches the consignment never touched", async () => {
+    const result = await rerateShipment(
+      { shipmentId: "shp-1", revisedChargeableWeight: 140 },
+      OTHER_BRANCH_ACTOR,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.calculations).toHaveLength(0);
+    expect(store.updates).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("accepts a clerk at the destination branch", async () => {
+    const destinationActor = {
+      id: "user-3",
+      orgId: "org-1",
+      name: "Jaipur clerk",
+      branchIds: ["br-jai"],
+    } as unknown as Parameters<typeof rerateShipment>[1];
+
+    const result = await rerateShipment(
+      { shipmentId: "shp-1", revisedChargeableWeight: 140 },
+      destinationActor,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(store.calculations).toHaveLength(1);
+  });
+
+  it("refuses a cancelled consignment, and writes nothing", async () => {
+    store.shipment.cancelledAt = new Date("2026-08-30T00:00:00.000Z");
+
+    const result = await rerateShipment(
+      { shipmentId: "shp-1", revisedChargeableWeight: 140 },
+      ACTOR,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.calculations).toHaveLength(0);
+    expect(store.updates).toHaveLength(0);
   });
 });
 

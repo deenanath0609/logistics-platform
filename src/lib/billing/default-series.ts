@@ -89,10 +89,34 @@ export const CREDIT_NOTE_SERIES: DefaultSeries = {
   description: "Credit note against an issued invoice.",
 };
 
+/**
+ * The vendor-bill series, which had the same hole.
+ *
+ * `VENDOR_BILL` is in the `SeriesDocument` enum and `createVendorBill`
+ * has always called `nextNumber({ document: "VENDOR_BILL" })`, and nothing
+ * ever seeded a row for it — so on a fresh database the first bill a
+ * transporter sent in could not be raised at all. The screen reports "No
+ * vendor-bill number series is configured. Set one up under Masters",
+ * which is at least honest, but it is a dead end on day one of a new
+ * carrier and there is no reason for the default to be missing.
+ *
+ * `VB` rather than `VBL`: it is an internal document, not one anybody
+ * outside the company reads, and it sits beside `VPY` in every ledger.
+ */
+export const VENDOR_BILL_SERIES: DefaultSeries = {
+  document: "VENDOR_BILL",
+  pattern: "VB/{FY}/{SEQ}",
+  prefix: "VB",
+  padding: 6,
+  resetPolicy: "FINANCIAL_YEAR",
+  description: "Bill received from a transporter, broker or attached-vehicle owner.",
+};
+
 /** Everything this module would have seeded, in one list. */
 export const BILLING_NUMBER_SERIES: readonly DefaultSeries[] = [
   ...FINANCE_NUMBER_SERIES,
   CREDIT_NOTE_SERIES,
+  VENDOR_BILL_SERIES,
 ] as const;
 
 /**

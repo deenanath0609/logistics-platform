@@ -44,7 +44,16 @@ export function NewRunForm({
   // A transition rather than `useActionState`: closing on success belongs
   // at the call site, not in an effect that fires an extra render every
   // time the action returns.
-  function submit(formData: FormData) {
+  //
+  // And `onSubmit` with `preventDefault` rather than `<form action={fn}>`:
+  // React 19 resets an uncontrolled form once an action returns, so a
+  // refused run — a missing number series is the common one — emptied the
+  // branch, the agent and the date the dispatcher had just chosen while
+  // leaving the dialog open in front of them.
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await createRunAction({}, formData);
       setState(result);
@@ -69,7 +78,7 @@ export function NewRunForm({
       </DialogTrigger>
 
       <DialogContent className="sm:max-w-md">
-        <form action={submit}>
+        <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>Build a delivery run</DialogTitle>
             <DialogDescription>

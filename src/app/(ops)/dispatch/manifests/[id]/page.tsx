@@ -22,6 +22,7 @@ import { UtilisationBar } from "../utilisation-bar";
 import { AddShipments, type CandidateShipment } from "./add-shipments";
 import { ManifestActions } from "./manifest-actions";
 import { RemoveLineButton } from "./remove-line";
+import { AssignTrip } from "./assign-trip";
 
 export const metadata: Metadata = { title: "Manifest" };
 export const dynamic = "force-dynamic";
@@ -153,18 +154,25 @@ export default async function ManifestDetailPage({
       }))
     : [];
 
+  // Exactly what `setManifestTrip` will accept: not departed, not an FTL
+  // trip, starting at this origin *and* ending at this destination. The
+  // destination clause is the one the picker used to be missing, so every
+  // trip running a different lane out of the same branch was offered and
+  // then refused.
   const availableTrips = canEdit
     ? await prisma.trip.findMany({
         where: {
           status: { in: ["PLANNED", "VEHICLE_REPORTED", "LOADING"] },
           ftlShipmentId: null,
           originBranchId: manifest.originBranchId,
+          destinationBranchId: manifest.destinationBranchId,
         },
         orderBy: { plannedDepartureAt: "asc" },
         take: 50,
         select: {
           id: true,
           number: true,
+          plannedDepartureAt: true,
           vehicle: {
             select: {
               registrationNumber: true,
@@ -386,9 +394,30 @@ export default async function ManifestDetailPage({
               </dl>
             ) : (
               <p className="text-sm text-muted-foreground">
-                No vehicle attached. Utilisation cannot be judged until there
-                is one.
+                No vehicle attached. Utilisation cannot be judged, and the
+                load cannot gate out, until there is one.
               </p>
+            )}
+
+            {canEdit && (
+              <AssignTrip
+                manifestId={manifest.id}
+                currentTripNumber={manifest.trip?.number ?? null}
+                weightKg={Number(manifest.totalWeight)}
+                trips={availableTrips
+                  .filter((trip) => trip.id !== manifest.trip?.id)
+                  .map((trip) => ({
+                    id: trip.id,
+                    number: trip.number,
+                    registrationNumber: trip.vehicle.registrationNumber,
+                    capacityKg: trip.vehicle.vehicleType.capacityKg
+                      ? Number(trip.vehicle.vehicleType.capacityKg)
+                      : null,
+                    plannedDeparture: trip.plannedDepartureAt
+                      ? format(trip.plannedDepartureAt, "dd MMM HH:mm")
+                      : null,
+                  }))}
+              />
             )}
           </section>
 
@@ -419,14 +448,6 @@ export default async function ManifestDetailPage({
             </p>
           )}
 
-          {canEdit && availableTrips.length > 0 && (
-            <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
-              {availableTrips.length} planned trip
-              {availableTrips.length === 1 ? "" : "s"} leave{availableTrips.length === 1 ? "s" : ""}{" "}
-              {manifest.originBranch.code}. Attach one from the trip screen to
-              see utilisation here.
-            </p>
-          )}
         </aside>
       </div>
     </>

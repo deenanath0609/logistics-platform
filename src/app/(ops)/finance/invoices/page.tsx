@@ -34,9 +34,16 @@ const STATUSES = [
   "CANCELLED",
 ] as const;
 
+/**
+ * The 1st of the current month, on the carrier's calendar.
+ *
+ * Derived from `isoDate` rather than from `new Date(y, m, 1)`, which reads
+ * the *server's* local month: on a UTC container at 01:00 IST on the 1st
+ * the local month is still the previous one, so the bill-run dialog opened
+ * pre-filled with last month's start against this month's end.
+ */
 function monthStart(): string {
-  const now = new Date();
-  return isoDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  return `${isoDate(new Date()).slice(0, 7)}-01`;
 }
 
 function generateFields(
