@@ -221,6 +221,7 @@ type ScanRow = {
   deliveredAt: Date | null;
   statusUpdatedAt: Date;
   attemptCount: number;
+  deletedAt: Date | null;
   sla: {
     state: SlaState;
     policyId: string | null;
@@ -248,6 +249,7 @@ const SELECT = {
   deliveredAt: true,
   statusUpdatedAt: true,
   attemptCount: true,
+  deletedAt: true,
   sla: {
     select: {
       state: true,
@@ -355,6 +357,19 @@ async function processBatch(
   for (const row of rows) {
     result.scanned++;
 
+    // The sweep filters these out in SQL; the single-shipment recompute
+    // cannot, because it is handed an id. `shipment.cancelled` is one of
+    // the events that triggers it, so this path was reached on every
+    // cancellation — and a consignment cancelled after its promised date
+    // has no `deliveredAt`, no RTO, and therefore no settlement, so the
+    // clock read straight through to BREACHED and opened an SLA exception
+    // against freight that is no longer moving.
+    if (isOutOfScope(row)) {
+      result.notApplicable++;
+      await retireOutOfScope(row);
+      continue;
+    }
+
     const lane: LaneKey = {
       serviceTypeId: row.serviceTypeId,
       originCityId: row.consignorCityId,
@@ -385,6 +400,63 @@ async function processBatch(
     result.scheduled++;
     await applyPlan(row, plan, now, result);
   }
+}
+
+/** Nothing is owed on a consignment that is cancelled, lost or deleted. */
+function isOutOfScope(row: ScanRow): boolean {
+  return row.deletedAt !== null || OUT_OF_SCOPE.includes(row.currentStatus);
+}
+
+/**
+ * Stops the clock on a consignment that is no longer freight.
+ *
+ * `settledAt` is what retires it: the sweep only looks at rows whose
+ * settlement is null, so this is what stops a cancelled consignment being
+ * re-examined forever, and it is why a stale `ON_TIME` row does not sit in
+ * the on-time figures for a shipment nobody is carrying.
+ *
+ * A shipment that had already breached keeps its breach. The promise was
+ * broken while the goods were still ours to move, and cancelling it
+ * afterwards does not unbreak it — the same reasoning as
+ * `writeNotApplicable`, and the reason both stop short of rewriting
+ * history.
+ */
+async function retireOutOfScope(row: ScanRow): Promise<void> {
+  const reason =
+    row.deletedAt !== null
+      ? "Consignment deleted — nothing left to measure"
+      : row.currentStatus === "CANCELLED"
+        ? "Consignment cancelled — no promise left to keep"
+        : "Consignment lost — measured as a loss, not as a late delivery";
+
+  if (row.sla?.state === "BREACHED") {
+    await prisma.shipmentSla.updateMany({
+      where: { shipmentId: row.id, settledAt: null },
+      data: { settledAt: row.statusUpdatedAt },
+    });
+    return;
+  }
+
+  await prisma.shipmentSla.upsert({
+    where: { shipmentId: row.id },
+    create: {
+      orgId: row.orgId,
+      shipmentId: row.id,
+      state: "NOT_APPLICABLE",
+      startedAt: row.pickedUpAt ?? row.bookedAt,
+      dueAt: row.pickedUpAt ?? row.bookedAt,
+      settledAt: row.statusUpdatedAt,
+      breachReason: reason,
+    },
+    update: {
+      state: "NOT_APPLICABLE",
+      policyId: null,
+      atRiskAt: null,
+      settledAt: row.statusUpdatedAt,
+      varianceMinutes: null,
+      breachReason: reason,
+    },
+  });
 }
 
 /**

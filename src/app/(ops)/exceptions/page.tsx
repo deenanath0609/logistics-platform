@@ -143,6 +143,8 @@ export default async function ExceptionsPage({
         resolvedAt: true,
         escalationLevel: true,
         source: true,
+        branchId: true,
+        ownerBranchId: true,
         branch: { select: { code: true } },
         assignedTo: { select: { name: true } },
         shipment: { select: { id: true, lrNumber: true } },
@@ -161,6 +163,28 @@ export default async function ExceptionsPage({
   ]);
 
   const now = new Date();
+
+  // `branch` is the relation on `branchId` — where the problem was
+  // *noticed* — and the column headed "Owner branch" was rendering it.
+  // For everything the hub raises those two are deliberately different:
+  // Delhi finds the shortage, Gurugram owes for it. Showing the finder
+  // under "Owner" points the whole tower at the wrong branch, which is
+  // the one thing the attribution exists to get right. There is no
+  // relation on `ownerBranchId`, so the codes are looked up by id.
+  const ownerIds = [
+    ...new Set(
+      rows
+        .map((row) => row.ownerBranchId)
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ];
+  const ownerBranches = ownerIds.length
+    ? await prisma.branch.findMany({
+        where: { id: { in: ownerIds } },
+        select: { id: true, code: true },
+      })
+    : [];
+  const ownerCode = new Map(ownerBranches.map((b) => [b.id, b.code]));
 
   return (
     <>
@@ -273,7 +297,21 @@ export default async function ExceptionsPage({
                     </TableCell>
 
                     <TableCell className="align-top font-mono text-xs">
-                      {row.branch?.code ?? "—"}
+                      {row.ownerBranchId
+                        ? (ownerCode.get(row.ownerBranchId) ?? "—")
+                        : (row.branch?.code ?? "—")}
+                      {/*
+                        Where it was found, when that is somebody else.
+                        A duty manager reading "GGN owns it, DEL found it"
+                        knows who to ring and who to ask what happened.
+                      */}
+                      {row.branch?.code &&
+                        row.ownerBranchId &&
+                        row.ownerBranchId !== row.branchId && (
+                          <span className="block text-[0.6rem] font-normal text-muted-foreground">
+                            found at {row.branch.code}
+                          </span>
+                        )}
                     </TableCell>
 
                     <TableCell className="align-top text-xs">

@@ -31,6 +31,20 @@ export function branchScope(
 /**
  * Scoping for models reachable through several branch columns — a shipment
  * is visible to its origin, its current location, and its destination.
+ *
+ * ── Never spread this beside another `OR` ────────────────────────────────
+ *
+ * It returns `{ OR: [...] }`. Spread into a `where` literal that also
+ * spreads a search's `{ OR: [...] }`, the later key silently replaces this
+ * one and the branch filter is gone — with no type error, no warning, and a
+ * screen that looks right until somebody types in the search box. That is
+ * exactly how `/shipments` came to answer a Gurugram clerk with Jaipur's
+ * freight, and `/hub/weigh` still has the same shape.
+ *
+ * Put it in an `AND` array with anything else that produces an `OR`:
+ *
+ *     where: { deletedAt: null, AND: [anyBranchScope(user, fields), search] }
+ * ────────────────────────────────────────────────────────────────────────
  */
 export function anyBranchScope(
   user: SessionUser,

@@ -24,7 +24,7 @@ type Cached<T> = { value: T; expiresAt: number };
 const globalForCache = globalThis as unknown as {
   trackingFenceCache: Cached<FenceDefinition[]> | undefined;
   trackingBranchCache: Cached<BranchPoint[]> | undefined;
-  trackingRouteCache: Map<string, Cached<LatLng[]>> | undefined;
+  trackingRouteCache: Map<string, Cached<PlannedRoute>> | undefined;
 };
 
 export type BranchPoint = {
@@ -217,19 +217,20 @@ export type PlannedRoute = {
 export async function plannedRouteForTrip(trip: TripContext): Promise<PlannedRoute> {
   const cache = (globalForCache.trackingRouteCache ??= new Map());
   const cached = cache.get(trip.id);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { points: cached.value, quality: qualityOf(cached.value) };
-  }
+  // The quality is cached with the points, never re-derived from them. It
+  // records *where the path came from* — decoded polylines, the branches a
+  // route connects, or a straight line between two ends — and the point
+  // count cannot tell those apart: a two-hop lane resolved from branch
+  // coordinates has exactly two points and would read back as a straight
+  // line, which switches route-deviation detection off entirely. A short
+  // decoded polyline would read back as "branches" and get a threshold ten
+  // times too wide. Both faults appeared only after the first cache hit,
+  // which is the hardest kind of fault to see.
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   const resolved = await resolveRoute(trip);
-  cache.set(trip.id, { value: resolved.points, expiresAt: Date.now() + ROUTE_TTL_MS });
+  cache.set(trip.id, { value: resolved, expiresAt: Date.now() + ROUTE_TTL_MS });
   return resolved;
-}
-
-function qualityOf(points: LatLng[]): PlannedRoute["quality"] {
-  if (points.length === 0) return "none";
-  if (points.length === 2) return "straight-line";
-  return points.length > 8 ? "polyline" : "branches";
 }
 
 async function resolveRoute(trip: TripContext): Promise<PlannedRoute> {

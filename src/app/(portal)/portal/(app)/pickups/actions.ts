@@ -78,16 +78,22 @@ export async function requestPickup(
     // A collection cannot be asked for in the past.
     //
     // `requestedDate` arrives from `<input type="date">` as `YYYY-MM-DD`,
-    // which JavaScript parses at UTC midnight — and that is what the
-    // `@db.Date` column stores. The floor has to be built the same way or
-    // the two are not comparable: `new Date(); setHours(0,0,0,0)` is
-    // *local* midnight, which at IST's +5:30 is 18:30 UTC on the previous
-    // day. Between midnight and half past five in the morning the form's
-    // own default date sat below that floor and every collection asked for
-    // "today" was refused with "Choose today or a later date."
+    // which JavaScript parses at UTC midnight — and UTC midnight is what
+    // the `@db.Date` column stores. The floor has to be built the same
+    // way, which is what `storedToday` does and what
+    // `new Date(); setHours(0,0,0,0)` does not: that is *local* midnight,
+    // an instant that only happens to sort correctly against a stored date
+    // because this deployment runs at or east of UTC. On a box behind UTC
+    // it lands after the stored date for the same day and refuses today.
     //
-    // `asStoredDate` in `lib/pickup/execute.ts` is the same trick and
-    // explains it at length.
+    // The half of this that was actually failing was the form, not the
+    // floor — see the note on `today` in `pickup-form.tsx`, where the
+    // default value was the UTC calendar day and so read as yesterday all
+    // night in IST. Both sides are now built from the same local day, and
+    // the point of writing the floor this way is that the two can be
+    // compared at all.
+    //
+    // `asStoredDate` in `lib/pickup/execute.ts` is the same trick.
     if (parsed.data.requestedDate < storedToday()) {
       return {
         error: "Choose today or a later date.",

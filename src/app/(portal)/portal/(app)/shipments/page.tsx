@@ -15,9 +15,23 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
+/**
+ * The filter chips, and they now cover every status a consignment can
+ * hold.
+ *
+ * Two were missing. `inNetwork` — collected, at the origin branch, sorted,
+ * manifested — had no chip at all, so four statuses were reachable only
+ * under "All"; that is where a consignment sits for most of the day after
+ * it is picked up, which is exactly when a customer looks. And `inFlight`,
+ * the overview's own headline number, had no chip either, so the tile
+ * linked to `moving` and opened a shorter list than the number it was
+ * clicked on.
+ */
 const GROUPS = [
   { value: undefined, label: "All" },
+  { value: "inFlight", label: "In flight" },
   { value: "pending", label: "Awaiting pickup" },
+  { value: "inNetwork", label: "With us" },
   { value: "moving", label: "In transit" },
   { value: "lastMile", label: "Last mile" },
   { value: "done", label: "Delivered" },

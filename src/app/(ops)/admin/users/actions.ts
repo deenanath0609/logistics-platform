@@ -123,6 +123,104 @@ async function ungrantableRoles(
   };
 }
 
+/**
+ * ── The branches a BRANCH_SET role actually reaches ──────────────────────
+ *
+ * `UserBranchScope` is read in two places — `loadTenantUser` and the
+ * partner-API guard — and until now was written in none. There was no
+ * screen, no action and no seed row, so the table was permanently empty and
+ * the `BRANCH_SET` arm of `loadTenantUser` collapsed to
+ * `[primaryBranch.id]`: exactly what plain `BRANCH` produces.
+ *
+ * That made one shipped role a lie. Dispatch Manager is the product's only
+ * `BRANCH_SET` role, `/admin/roles` prints its scope as "Assigned
+ * branches", the user dialog says "sees assigned branches" beside its
+ * checkbox, and every one of those sentences described a reach the person
+ * did not have. A dispatch manager covering Delhi and Gurugram could build
+ * a manifest for one of them.
+ *
+ * The two honest endings were to write the table or to delete the scope.
+ * Deleting it throws away the only mechanism the product has for the ordinary
+ * case of somebody responsible for two or three branches, and would have to
+ * demote Dispatch Manager to `BRANCH` — so: a writer.
+ *
+ * Three rules, all enforced here rather than in the form:
+ *
+ *  - Extra branches are only recorded for somebody who holds a `BRANCH_SET`
+ *    role. Rows against a `BRANCH` user would sit in the table doing
+ *    nothing, ready to widen that person silently the day somebody ticks a
+ *    dispatch role onto them.
+ *  - Every branch must be one the *actor* covers. Otherwise `user.manage`
+ *    plus a `BRANCH_SET` role is a self-service route to the whole network:
+ *    grant yourself the role, list every branch, sign in again.
+ *  - The primary branch is dropped. `loadTenantUser` unions it in already,
+ *    and a duplicate row would only be a second place to keep in step.
+ */
+async function resolveBranchScopes(
+  actor: SessionUser,
+  formData: FormData,
+  roleIds: string[],
+  primaryBranchId: string,
+  /** What the person already has, for the form that does not ask. */
+  current: string[] = [],
+): Promise<
+  { ok: true; branchIds: string[] } | { ok: false; refusal: ActionState }
+> {
+  const holdsBranchSet = await prisma.role.count({
+    where: { id: { in: roleIds }, scope: "BRANCH_SET" },
+  });
+
+  // Not an error: unticking the last dispatch role is a de-escalation, and
+  // dropping the rows with it is what that should mean. Rows left behind
+  // would widen this person again the day somebody ticks the role back on.
+  if (holdsBranchSet === 0) return { ok: true, branchIds: [] };
+
+  // The field-staff roster opens the same dialog and never renders the
+  // branch list, so an empty answer from it is silence rather than "none".
+  // The marker is how the two are told apart — without it, editing a
+  // dispatch manager's phone number from another screen would quietly strip
+  // every branch they cover.
+  if (formData.get("branchScopesEdited") !== "true") {
+    return { ok: true, branchIds: current.filter((id) => id !== primaryBranchId) };
+  }
+
+  const submitted = [
+    ...new Set(formData.getAll("branchScopeIds").map(String).filter(Boolean)),
+  ].filter((id) => id !== primaryBranchId);
+
+  if (submitted.length === 0) return { ok: true, branchIds: [] };
+
+  const outside = submitted.filter((id) => !coversBranch(actor, id));
+  if (outside.length > 0) {
+    return {
+      ok: false,
+      refusal: {
+        error:
+          "You can only extend someone's reach to branches you cover yourself.",
+        fieldErrors: { branchScopeIds: "Outside your own scope" },
+      },
+    };
+  }
+
+  // A branch that has been closed or removed must not silently widen
+  // somebody: the id would still satisfy `coversBranch` for a network actor.
+  const live = await prisma.branch.findMany({
+    where: { id: { in: submitted }, isActive: true, deletedAt: null },
+    select: { id: true },
+  });
+  if (live.length !== submitted.length) {
+    return {
+      ok: false,
+      refusal: {
+        error: "One of those branches is no longer active.",
+        fieldErrors: { branchScopeIds: "Not an active branch" },
+      },
+    };
+  }
+
+  return { ok: true, branchIds: submitted };
+}
+
 export async function createUser(
   _prev: ActionState,
   formData: FormData,
@@ -159,6 +257,14 @@ export async function createUser(
     const refusal = await ungrantableRoles(actor, roleIds);
     if (refusal) return refusal;
 
+    const scopes = await resolveBranchScopes(
+      actor,
+      formData,
+      roleIds,
+      data.primaryBranchId,
+    );
+    if (!scopes.ok) return scopes.refusal;
+
     // The seat is checked here, after the form has been found valid and
     // before anything is written: the eleventh user on a ten-user plan is
     // refused at creation, told which plan and which number, rather than
@@ -185,6 +291,12 @@ export async function createUser(
             assignedBy: actor.id,
           })),
         },
+        branchScopes: {
+          create: scopes.branchIds.map((branchId) => ({
+            orgId: actor.orgId,
+            branchId,
+          })),
+        },
       },
     });
 
@@ -195,7 +307,7 @@ export async function createUser(
       entityId: created.id,
       entityRef: created.mobile,
       branchId: created.primaryBranchId,
-      after: { ...created, roleIds },
+      after: { ...created, roleIds, branchScopeIds: scopes.branchIds },
     });
 
     revalidateUserViews();
@@ -236,7 +348,10 @@ export async function updateUser(
 
     const before = await prisma.user.findUnique({
       where: { id },
-      include: { roles: { select: { roleId: true } } },
+      include: {
+        roles: { select: { roleId: true } },
+        branchScopes: { select: { branchId: true } },
+      },
     });
     if (!before) return { error: "That user no longer exists." };
     if (!coversBranch(actor, before.primaryBranchId ?? "")) {
@@ -258,6 +373,18 @@ export async function updateUser(
     );
     if (refusal) return refusal;
 
+    const scopes = await resolveBranchScopes(
+      actor,
+      formData,
+      roleIds,
+      parsed.data.primaryBranchId,
+      before.branchScopes.map((s) => s.branchId),
+    );
+    if (!scopes.ok) return scopes.refusal;
+
+    // Refused before anything is written, so a rejected widening does not
+    // leave a half-applied edit behind — the person's name and branch would
+    // have been saved while the reach they were being given was not.
     const after = await prisma.user.update({
       where: { id },
       data: parsed.data,
@@ -267,29 +394,50 @@ export async function updateUser(
     const rolesChanged =
       JSON.stringify(beforeRoles) !== JSON.stringify([...roleIds].sort());
 
-    if (rolesChanged) {
+    const beforeScopes = before.branchScopes.map((s) => s.branchId).sort();
+    const nextScopes = [...scopes.branchIds].sort();
+    const scopesChanged =
+      JSON.stringify(beforeScopes) !== JSON.stringify(nextScopes);
+
+    if (rolesChanged || scopesChanged) {
       await tenantTransaction(async (tx) => {
-        await tx.userRole.deleteMany({ where: { userId: id } });
-        await tx.userRole.createMany({
-          data: roleIds.map((roleId) => ({
-            orgId: actor.orgId,
-            userId: id,
-            roleId,
-            assignedBy: actor.id,
-          })),
-        });
+        if (rolesChanged) {
+          await tx.userRole.deleteMany({ where: { userId: id } });
+          await tx.userRole.createMany({
+            data: roleIds.map((roleId) => ({
+              orgId: actor.orgId,
+              userId: id,
+              roleId,
+              assignedBy: actor.id,
+            })),
+          });
+        }
+        if (scopesChanged) {
+          await tx.userBranchScope.deleteMany({ where: { userId: id } });
+          if (nextScopes.length > 0) {
+            await tx.userBranchScope.createMany({
+              data: nextScopes.map((branchId) => ({
+                orgId: actor.orgId,
+                userId: id,
+                branchId,
+              })),
+            });
+          }
+        }
       });
 
       // Role changes get their own audit row: a permission grant is a
-      // different kind of event from a phone-number correction.
+      // different kind of event from a phone-number correction. Widening
+      // somebody's branch reach is the same kind of event — it changes what
+      // they can see, not what they are called — so it goes in the same row.
       await recordAudit({
         user: actor,
         action: "PERMISSION_CHANGE",
         entity: "User",
         entityId: id,
         entityRef: after.mobile,
-        before: { roleIds: beforeRoles },
-        after: { roleIds },
+        before: { roleIds: beforeRoles, branchScopeIds: beforeScopes },
+        after: { roleIds, branchScopeIds: nextScopes },
       });
     }
 

@@ -2,9 +2,10 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ChevronRight, Lock } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { requirePermission } from "@/lib/auth/session";
+import { requirePermission, can } from "@/lib/auth/session";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
+import { MasterFormDialog, type FieldDef } from "@/components/data/master-form";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -14,6 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { createRole } from "./actions";
 
 export const metadata: Metadata = { title: "Roles & permissions" };
 export const dynamic = "force-dynamic";
@@ -25,6 +27,68 @@ const SCOPE_LABEL: Record<string, string> = {
   NETWORK: "Whole network",
 };
 
+const SCOPE_OPTIONS = [
+  { value: "OWN", label: "Own records only — a field agent's own tasks" },
+  { value: "BRANCH", label: "Their branch — one counter or hub" },
+  { value: "BRANCH_SET", label: "Assigned branches — home branch plus any ticked on the user" },
+  { value: "NETWORK", label: "Whole network — every branch" },
+];
+
+/**
+ * The fields of a role itself, as opposed to what it may do. Shared by the
+ * create dialog here and the edit dialog on the role's own page, so the two
+ * cannot describe the same thing differently.
+ *
+ * `code` only exists on creation: it is what the seed, the audit trail and
+ * `SUPER_ADMIN`'s special case key on, so it is chosen once.
+ */
+export function roleFields(creating: boolean): FieldDef[] {
+  return [
+    ...(creating
+      ? ([
+          {
+            type: "text",
+            name: "code",
+            label: "Code",
+            required: true,
+            half: true,
+            mono: true,
+            placeholder: "REGIONAL_SUPERVISOR",
+            help: "Permanent. It is what the audit trail records.",
+          },
+        ] as FieldDef[])
+      : []),
+    {
+      type: "text",
+      name: "name",
+      label: "Name",
+      required: true,
+      half: !creating,
+      placeholder: "Regional Supervisor",
+    },
+    {
+      type: "select",
+      name: "scope",
+      label: "Data scope",
+      required: true,
+      options: SCOPE_OPTIONS,
+      help: "How far every permission in this role reaches. Enforced in the data layer, not the menu.",
+    },
+    {
+      type: "textarea",
+      name: "description",
+      label: "Description",
+      placeholder: "Runs the four branches in the western cluster.",
+    },
+    {
+      type: "switch",
+      name: "isActive",
+      label: "Active",
+      help: "An inactive role grants nothing, on the next request, without being unassigned from anyone.",
+    },
+  ];
+}
+
 const SCOPE_TONE: Record<string, string> = {
   OWN: "bg-muted text-muted-foreground",
   BRANCH: "bg-accent text-accent-foreground",
@@ -33,7 +97,8 @@ const SCOPE_TONE: Record<string, string> = {
 };
 
 export default async function RolesPage() {
-  await requirePermission("user.read");
+  const user = await requirePermission("user.read");
+  const editable = can(user, "role.manage");
 
   const [roles, totalPermissions] = await Promise.all([
     prisma.role.findMany({
@@ -51,6 +116,18 @@ export default async function RolesPage() {
         eyebrow="Administration"
         title="Roles & permissions"
         description="A role bundles permissions; its scope decides how much data those permissions reach. Both are checked in the data layer, so a missing menu item is convenience — not the boundary."
+        actions={
+          editable && (
+            <MasterFormDialog
+              title="New role"
+              description="A role starts with no permissions. Create it, then open it and tick what it may do."
+              fields={roleFields(true)}
+              action={createRole}
+              submitLabel="Create role"
+              trigger={{ label: "New role", icon: "plus" }}
+            />
+          )
+        }
       />
 
       <TableFrame>

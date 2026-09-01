@@ -278,7 +278,15 @@ async function loadTenantUser(userId: string): Promise<SessionUser | null> {
  * ────────────────────────────────────────────────────────────────────────
  */
 async function impersonatedUser(grant: LiveGrant): Promise<SessionUser | null> {
-  if (grant.asUserId) return loadTenantUser(grant.asUserId);
+  if (grant.asUserId) {
+    const adopted = await loadTenantUser(grant.asUserId);
+    // The forced password change is the adopted person's to do, not the
+    // operator's. Left set, `requireUser` would pin the whole support
+    // session on `/password` — a screen whose write the read-only
+    // impersonation context refuses anyway, so the operator would be stuck
+    // on a form that cannot succeed and cannot be left.
+    return adopted ? { ...adopted, mustChangePassword: false } : null;
+  }
   return tenantWideSupportUser(grant);
 }
 
@@ -345,13 +353,49 @@ async function tenantWideSupportUser(grant: LiveGrant): Promise<SessionUser> {
   };
 }
 
-/** Server-component guard: sends anonymous visitors to the login page. */
-export async function requireUser(returnTo?: string): Promise<SessionUser> {
+/** Where a staff member is sent while their password is still somebody else's. */
+export const STAFF_PASSWORD_PATH = "/password";
+
+/**
+ * Server-component guard: sends anonymous visitors to the login page, and
+ * anybody still carrying a handed-out password to the screen that replaces
+ * it.
+ *
+ * ── Why the forced change lives here ─────────────────────────────────────
+ *
+ * `createUser` sets `mustChangePassword` for every office account it gives
+ * a password to, `resetPassword` sets it again and tells the administrator
+ * "They must change it at next sign-in", and nothing on the tenant side
+ * read the flag. There was no screen either: `/platform/password` belongs
+ * to the operator console, on another host and another session. So the
+ * temporary password an administrator typed into a dialog and read down a
+ * telephone stayed that account's real password indefinitely, and the
+ * message on the dialog was simply false.
+ *
+ * Put on `requireUser` rather than on the ops layout because both shells go
+ * through it — a delivery agent whose password was reset is bounced the
+ * same way — and because `requirePermission` calls it, so a page that
+ * guards on a permission gets the check without restating it. Server
+ * actions and route handlers go through `authorize`, which does not
+ * redirect: an action must refuse, not navigate. They are unreachable in
+ * practice because the screen that would post to them redirects first.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+export async function requireUser(options?: {
+  returnTo?: string;
+  /** Set only by the password screen itself, or it would redirect to itself. */
+  allowPasswordChange?: boolean;
+}): Promise<SessionUser> {
   const user = await getCurrentUser();
   if (!user) {
     redirect(
-      returnTo ? `/login?next=${encodeURIComponent(returnTo)}` : "/login",
+      options?.returnTo
+        ? `/login?next=${encodeURIComponent(options.returnTo)}`
+        : "/login",
     );
+  }
+  if (user.mustChangePassword && !options?.allowPasswordChange) {
+    redirect(STAFF_PASSWORD_PATH);
   }
   return user;
 }

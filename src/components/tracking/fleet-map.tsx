@@ -337,7 +337,7 @@ export function FleetMap({
         <VehiclePanel
           vehicle={selected}
           asOf={fleet.asOf}
-          branches={fleet.branches}
+          branches={fleet.recordableBranches}
           canReplay={canReplay}
           canRecordManual={canRecordManual}
           canRecordMovement={canRecordMovement}
@@ -678,16 +678,23 @@ function VehiclePanel({
           )}
         </div>
         {vehicle.eta ? (
-          <p className="mt-1.5">
-            {new Date(vehicle.eta.at).toLocaleString()}
-            {vehicle.eta.delayMinutes !== null && vehicle.eta.delayMinutes > 0 && (
-              <span className="ml-2 text-bad">{vehicle.eta.delayMinutes} min late</span>
+          <>
+            <p className="mt-1.5">
+              {new Date(vehicle.eta.at).toLocaleString()}
+              {vehicle.eta.delayMinutes !== null && vehicle.eta.delayMinutes > 0 && (
+                <span className="ml-2 text-bad">{vehicle.eta.delayMinutes} min late</span>
+              )}
+            </p>
+            {vehicle.eta.method === "schedule" && (
+              <p className="mt-1 text-[0.7rem] text-muted-foreground">
+                This is the trip&apos;s planned arrival, not a measured one —
+                nothing has been observed to estimate from yet.
+              </p>
             )}
-          </p>
+          </>
         ) : (
           <p className="mt-1.5 text-muted-foreground">
-            No estimate. A stationary vehicle, a lane with no planned route, or
-            too little history — the number is withheld rather than guessed.
+            No estimate, and no planned arrival on the trip to fall back on.
           </p>
         )}
       </div>

@@ -28,11 +28,13 @@ const SLOTS = [
 export function PickupForm({ addresses }: { addresses: PickupAddress[] }) {
   const [state, action, pending] = useActionState(requestPickup, EMPTY);
 
-  // The *local* calendar day, not `toISOString().slice(0, 10)`, which is
-  // the UTC one. In IST the two disagree between midnight and 05:30, and
-  // the value this field defaults to is the value the server compares
-  // against its own floor — so a mismatch here is a form that refuses its
-  // own default first thing in the morning. See `requestPickup`.
+  // The *local* calendar day. This was `toISOString().slice(0, 10)`, which
+  // is the UTC one: in IST the two disagree between midnight and 05:30, so
+  // anyone opening this form in that window got a date field defaulting to
+  // — and floored at — **yesterday**. Submitting it unchanged was refused
+  // with "Choose today or a later date", and the customer had no way to
+  // see why, because the field showed a date the form itself had put there.
+  // See the floor in `requestPickup`, which is built from the same day.
   const now = new Date();
   const today = [
     now.getFullYear(),

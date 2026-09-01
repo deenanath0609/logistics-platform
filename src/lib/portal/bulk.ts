@@ -629,13 +629,13 @@ export async function commitPortalBatch(
 }
 
 /**
- * Welds the account onto consignments this batch booked.
+ * Welds an account onto consignments a bulk commit booked.
  *
  * `commitBatch` is shared with the branch counter and takes no account —
  * a clerk's file books walk-in consignors, so `Shipment.consignorId` is
- * left null there by design. The portal must set it: it is the column
- * `customerShipmentFilter` pins on, so an unstamped consignment would be
- * invisible to the very customer who booked it.
+ * left null there by design. Anything booked out of a *customer's* file
+ * must set it: it is the column `customerShipmentFilter` pins on, so an
+ * unstamped consignment is invisible to the very customer who booked it.
  *
  * Three properties make the after-the-fact stamp safe:
  *
@@ -643,20 +643,31 @@ export async function commitPortalBatch(
  *  2. `consignorId: null` is in the WHERE clause, so it can only ever fill
  *     a blank — it cannot move a consignment from one account to another,
  *     including one booked at a counter and matched by a guessed id.
- *  3. It is re-run on every read of the batch, so a process that died
- *     between the booking and the stamp leaves a gap measured in seconds.
+ *  3. It is idempotent, so it can be re-run on every read of the batch and
+ *     a process that died between the booking and the stamp leaves a gap
+ *     measured in seconds.
  *
  * `currentStatus` is not touched. Attribution is not a state change, and
  * anything that is goes through `appendShipmentEvent`.
+ *
+ * Exported because there are two callers and there must not be two
+ * copies. The portal's own commit is one; the other is the ops screen at
+ * `/shipments/bulk`, where a clerk books a customer's file over the
+ * telephone — that path had no stamp at all, so the consignments came out
+ * with no consignor and the customer's portal showed them nothing until
+ * somebody happened to open the batch page and trip the repair-on-read
+ * below. `customerUserId` is null there: no portal login did it.
  */
-async function stampConsignor(
-  session: CustomerSession,
-  shipmentIds: readonly string[],
-): Promise<number> {
-  if (shipmentIds.length === 0) return 0;
+export async function stampBulkConsignor(input: {
+  customerId: string;
+  /** The portal login who committed, when one did. */
+  customerUserId?: string | null;
+  shipmentIds: readonly string[];
+}): Promise<number> {
+  const consignorId = input.customerId?.trim();
+  if (!consignorId || input.shipmentIds.length === 0) return 0;
 
-  const { consignorId, bookedByCustomerUserId } = consignorForSession(session);
-  const ids = [...new Set(shipmentIds)];
+  const ids = [...new Set(input.shipmentIds)];
 
   // Chunked so a five-thousand row batch does not become one statement
   // with a five-thousand element `IN` list every time somebody opens the
@@ -667,10 +678,32 @@ async function stampConsignor(
   for (let i = 0; i < ids.length; i += CHUNK) {
     const result = await prisma.shipment.updateMany({
       where: { id: { in: ids.slice(i, i + CHUNK) }, consignorId: null },
-      data: { consignorId, bookedByCustomerUserId },
+      data: {
+        consignorId,
+        // Absent rather than null when there is no portal login, so a
+        // counter commit cannot blank an author a portal commit set.
+        ...(input.customerUserId
+          ? { bookedByCustomerUserId: input.customerUserId }
+          : {}),
+      },
     });
     stamped += result.count;
   }
 
   return stamped;
+}
+
+/** The portal's own call site — the account comes from the session. */
+async function stampConsignor(
+  session: CustomerSession,
+  shipmentIds: readonly string[],
+): Promise<number> {
+  if (shipmentIds.length === 0) return 0;
+
+  const { consignorId, bookedByCustomerUserId } = consignorForSession(session);
+  return stampBulkConsignor({
+    customerId: consignorId,
+    customerUserId: bookedByCustomerUserId,
+    shipmentIds,
+  });
 }

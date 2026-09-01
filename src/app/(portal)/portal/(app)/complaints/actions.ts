@@ -122,6 +122,19 @@ export async function replyToComplaint(
   try {
     const session = await authorizeCustomer();
 
+    // The same line `raiseComplaint` draws, and it was missing here. A
+    // reply is a message operations reads and acts on, attributed to the
+    // account — which is acting, and a VIEWER login may look but not act
+    // (see `nav.ts`). `getPortalComplaint` returns `canReply: true`
+    // unconditionally because it knows nothing about roles, so the reply
+    // box was rendered to a VIEWER and this action accepted the post.
+    if (!canWrite(session)) {
+      return {
+        error:
+          "Your login can follow this complaint but not add to it. Ask your account owner.",
+      };
+    }
+
     const complaintId = String(formData.get("complaintId") ?? "");
     if (!complaintId) return { error: "That complaint could not be identified." };
 

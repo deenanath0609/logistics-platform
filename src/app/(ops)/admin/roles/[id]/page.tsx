@@ -5,7 +5,10 @@ import { ChevronLeft, Lock } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
 import { PageHeader } from "@/components/shell/page-header";
+import { MasterFormDialog } from "@/components/data/master-form";
 import { PermissionMatrix } from "./permission-matrix";
+import { updateRole } from "../actions";
+import { roleFields } from "../page";
 
 export const metadata: Metadata = { title: "Role" };
 export const dynamic = "force-dynamic";
@@ -65,6 +68,28 @@ export default async function RoleDetailPage({
         eyebrow="Role"
         title={role.name}
         description={role.description ?? undefined}
+        actions={
+          editable && (
+            <MasterFormDialog
+              title={`Edit ${role.code}`}
+              description={
+                role.isSystem
+                  ? "A system role can be renamed, described and retired. Its data scope is fixed — create a role of your own if you need a different reach."
+                  : "The name and description are read by whoever assigns this role. The scope decides how much data every permission in it reaches."
+              }
+              fields={roleFields(false)}
+              action={updateRole}
+              record={{
+                id: role.id,
+                name: role.name,
+                description: role.description,
+                scope: role.scope,
+                isActive: role.isActive,
+              }}
+              trigger={{ label: "Edit role", icon: "pencil", variant: "outline" }}
+            />
+          )
+        }
       />
 
       <div className="mb-6 flex flex-wrap gap-3">

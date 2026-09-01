@@ -55,7 +55,25 @@ export async function seedUsers(orgId: string, branchIds: Map<string, string>) {
         passwordHash,
         isFieldUser: u.field,
         primaryBranchId: branchIds.get(u.branch),
-        mustChangePassword: true,
+        /**
+         * False, as `scripts/seed-branch-logins.ts` has always had it.
+         *
+         * `mustChangePassword` means "somebody else chose this password and
+         * handed it to you", and `requireUser` now enforces it: every page
+         * redirects to `/password` until it is replaced. That is right for
+         * the account an administrator creates on `/admin/users`, and wrong
+         * for these — twelve fixtures sharing one password printed in this
+         * file and in every set of run instructions, whose entire purpose is
+         * to be signed into and driven. Left true, the first page of the
+         * development environment would be a password form, and every
+         * script that signs in over HTTP would land on it instead of the
+         * screen it came to check.
+         *
+         * The forced change is exercised where it actually matters, against
+         * an account created the way a real one is — see
+         * `scripts/verify-core.ts`.
+         */
+        mustChangePassword: false,
       },
     });
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { format, subDays } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
+import { getEnv } from "@/lib/env";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button } from "@/components/ui/button";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
@@ -35,6 +36,9 @@ const ACTIVITY_DAYS = 7;
 export default async function GeofencesPage() {
   const user = await requirePermission("geofence.manage");
   const since = subDays(new Date(), ACTIVITY_DAYS);
+  // The floor on how often anything is pulled, which is what turns a
+  // debounce count into a latency the person tuning it can feel.
+  const pollSeconds = getEnv().GPS_POLL_INTERVAL_SECONDS;
 
   const [fences, branches, crossings] = await Promise.all([
     prisma.geofence.findMany({
@@ -85,6 +89,7 @@ export default async function GeofencesPage() {
               Live map
             </Button>
             <GeofenceDialog
+              pollSeconds={pollSeconds}
               branches={branches.map((branch) => ({
                 id: branch.id,
                 code: branch.code,
@@ -187,6 +192,7 @@ export default async function GeofencesPage() {
                     <TableCell className="text-right">
                       {fence.type === "CIRCLE" ? (
                         <GeofenceDialog
+                          pollSeconds={pollSeconds}
                           fence={{
                             id: fence.id,
                             name: fence.name,

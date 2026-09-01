@@ -268,6 +268,28 @@ export async function recordScan(
     return fail(barcode, "You cannot scan at that branch.");
   }
 
+  // ── The bin is a place on this floor ──────────────────────
+  // The console only offers bins belonging to the dock the operator
+  // picked, but the bin id arrives from the client and nothing checked
+  // it. A sort scan naming another branch's bin wrote a PackageLocation
+  // saying the box is in Jaipur lane 4 while the same call moved the
+  // package to Delhi — and the floor's answer to "where is it?" is that
+  // row. Refused rather than silently dropped: an operator whose scan
+  // did not put the box where they said it went has to know.
+  if (input.binId) {
+    const bin = await prisma.sortBin.findUnique({
+      where: { id: input.binId },
+      select: { branchId: true, code: true, isActive: true },
+    });
+
+    if (!bin || !bin.isActive) {
+      return fail(barcode, "That bin does not exist here.");
+    }
+    if (bin.branchId !== input.branchId) {
+      return fail(barcode, `Bin ${bin.code} belongs to another branch.`);
+    }
+  }
+
   // ── Idempotency ───────────────────────────────────────────
   // Checked before anything is written so a retried offline batch replays
   // as a series of no-ops rather than a series of duplicate boxes.

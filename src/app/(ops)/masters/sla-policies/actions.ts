@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
+import { hasModule } from "@/lib/modules/tenant-modules";
 import { recordAudit } from "@/server/services/audit";
 import { runSlaScan } from "@/lib/sla/scanner";
 import {
@@ -237,6 +238,16 @@ async function zonesForCity(cityId: string): Promise<string[]> {
 export async function testLane(formData: FormData): Promise<LaneTestResult> {
   try {
     const user = await authorize("master.read");
+
+    // `master.read` belongs to core, not to this module, so narrowing the
+    // session's permissions to the plan does not withhold it and the ops
+    // layout's URL guard does not run for a server action. Every other
+    // action on this screen is authorised on `sla.manage`, which the plan
+    // does withhold; this one had nothing standing between a carrier
+    // without service levels and the whole policy table.
+    if (!(await hasModule("sla"))) {
+      return { ok: false, error: "Service levels are not part of your plan." };
+    }
 
     const parsed = testSchema.safeParse(Object.fromEntries(formData.entries()));
     if (!parsed.success) {

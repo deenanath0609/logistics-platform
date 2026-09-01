@@ -130,10 +130,25 @@ export async function openReceipt(
   // scans across two reconciliations.
   const existing = await prisma.inboundReceipt.findFirst({
     where: { manifestId: manifest.id, branchId: input.branchId, status: "OPEN" },
-    select: { id: true },
+    select: { id: true, sealIntact: true },
   });
 
-  if (existing) return { ok: true, receiptId: existing.id, reopened: true };
+  if (existing) {
+    // The dialog asks about the seal before it hands the receipt back, and
+    // the answer used to go nowhere on this path: a clerk who arrived at a
+    // half-scanned truck, saw a cut seal and said so was returned to the
+    // console with the receipt still reading "not checked". Recorded only
+    // when there is something to record and nothing recorded yet — a
+    // second opener shrugging "not checked" must not erase the first
+    // opener's "broken".
+    if (input.sealIntact != null && existing.sealIntact === null) {
+      await prisma.inboundReceipt.update({
+        where: { id: existing.id },
+        data: { sealIntact: input.sealIntact },
+      });
+    }
+    return { ok: true, receiptId: existing.id, reopened: true };
+  }
 
   const expectedPackages = manifest.lines.reduce(
     (sum, line) => sum + line.packageCount,

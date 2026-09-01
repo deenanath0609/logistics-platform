@@ -46,17 +46,29 @@ export default async function PortalOverviewPage() {
       />
 
       <section className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {/*
+          `group=inFlight`, not `group=moving`: this tile counts everything
+          booked and not yet finished, and `moving` is one of the four
+          groups that makes up. Clicking it used to open a list shorter
+          than the number on the card.
+        */}
         <StatCard
           label="In flight"
           value={dashboard.inFlight}
           hint="Booked but not yet delivered"
-          href="/portal/shipments?group=moving"
+          href="/portal/shipments?group=inFlight"
         />
+        {/*
+          No `href`. The list has no month filter, so `group=done` would
+          open every delivery this account has ever had under a heading
+          that says "this month". A tile that cannot be clicked is better
+          than one that contradicts itself when it is.
+        */}
         <StatCard
           label="Delivered this month"
           value={dashboard.deliveredThisMonth}
           tone="ok"
-          href="/portal/shipments?group=done"
+          hint="Signed for since the 1st"
         />
         <StatCard
           label="Pending POD"

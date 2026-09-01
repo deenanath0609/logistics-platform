@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { format } from "date-fns";
 import { ChevronLeft } from "lucide-react";
-import { requireCustomerUser } from "@/lib/auth/customer-session";
+import { canWrite, requireCustomerUser } from "@/lib/auth/customer-session";
 import { requireTenantPage } from "@/lib/tenant/page";
 import { getPortalComplaint } from "@/lib/portal/complaints";
 import { PageHeader } from "@/components/shell/page-header";
@@ -130,10 +130,17 @@ export default async function PortalComplaintPage({
           </section>
         )}
 
+        {/*
+          `canReply` is both halves: the complaint is open to replies at
+          all, and this login is one that may write. `getPortalComplaint`
+          answers only the first — it knows nothing about roles — and
+          `replyToComplaint` refuses a VIEWER, so a box offered to one
+          would be a box that fails on submit.
+        */}
         <ComplaintThread
           complaintId={complaint.id}
           messages={complaint.messages}
-          canReply={complaint.canReply}
+          canReply={complaint.canReply && canWrite(session)}
           settled={complaint.tone === "settled"}
           carrierName={branding.name}
         />

@@ -79,29 +79,53 @@ export default async function ShipmentsPage({
 
   const groupFilter = group && group in GROUP_WHERE ? GROUP_WHERE[group] : undefined;
 
+  /**
+   * ── Two `OR`s cannot share one object ────────────────────────────────
+   *
+   * `anyBranchScope` returns `{ OR: [...] }` — a shipment is visible to its
+   * origin, its current location and its destination. The search returns
+   * `{ OR: [...] }` too. Spread into the same literal, the second key wins
+   * and the first simply disappears: the moment anybody typed anything into
+   * the search box, this list dropped its branch filter entirely and
+   * answered from the whole network.
+   *
+   * It was invisible because it needed a search to appear at all. An empty
+   * box scoped correctly, the counts on the chips scoped correctly, and the
+   * detail page refused the row — so the only way to see it was to search a
+   * Jaipur LR number at a Gurugram counter and click nothing. That is the
+   * Phase 1 acceptance test, failing through a text input.
+   *
+   * `AND` is a list, so both conditions survive being written down next to
+   * each other. Anything else that produces an `OR` belongs in this array
+   * rather than in the object.
+   */
+  const scoped = anyBranchScope(user, [
+    "originBranchId",
+    "currentBranchId",
+    "destinationBranchId",
+  ]);
+
   const where = {
     deletedAt: null,
-    // A shipment is visible to its origin, its current location, and its
-    // destination — all three branches have a legitimate interest in it.
-    ...anyBranchScope(user, [
-      "originBranchId",
-      "currentBranchId",
-      "destinationBranchId",
-    ]),
+    AND: [
+      scoped,
+      ...(q
+        ? [
+            {
+              OR: [
+                { lrNumber: { contains: q, mode: "insensitive" as const } },
+                { consigneeName: { contains: q, mode: "insensitive" as const } },
+                { consigneePhone: { contains: q } },
+                { consignorName: { contains: q, mode: "insensitive" as const } },
+                { consignorPhone: { contains: q } },
+                { customerReference: { contains: q, mode: "insensitive" as const } },
+              ],
+            },
+          ]
+        : []),
+    ],
     ...(groupFilter ?? {}),
     ...(mode ? { mode: mode as never } : {}),
-    ...(q
-      ? {
-          OR: [
-            { lrNumber: { contains: q, mode: "insensitive" as const } },
-            { consigneeName: { contains: q, mode: "insensitive" as const } },
-            { consigneePhone: { contains: q } },
-            { consignorName: { contains: q, mode: "insensitive" as const } },
-            { consignorPhone: { contains: q } },
-            { customerReference: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : {}),
   };
 
   const [rows, total, counts] = await Promise.all([
@@ -137,15 +161,10 @@ export default async function ShipmentsPage({
       Object.entries(GROUP_WHERE).map(async ([key, filter]) => ({
         key,
         count: await prisma.shipment.count({
-          where: {
-            deletedAt: null,
-            ...anyBranchScope(user, [
-              "originBranchId",
-              "currentBranchId",
-              "destinationBranchId",
-            ]),
-            ...filter,
-          },
+          // `AND` here too, for the same reason: `filter` is a plain object
+          // today, and the day one of the chips needs an `OR` it must not
+          // silently take the scope's place.
+          where: { deletedAt: null, AND: [scoped], ...filter },
         }),
       })),
     ),

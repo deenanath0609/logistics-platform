@@ -1,13 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
-import { anyBranchScope } from "@/server/repositories/scope";
+import { anyBranchScope, coversBranch } from "@/server/repositories/scope";
 import {
   haversineMetres,
   polylineLengthMetres,
   projectOntoPolyline,
   type LatLng,
 } from "./geo";
-import { delayMinutes } from "./eta";
+import { delayMinutes, scheduleEta } from "./eta";
 import { LIVE_TRIP_STATUSES, plannedRouteForTrip, type TripContext } from "./context";
 
 /**
@@ -94,6 +94,17 @@ export type MapRoute = {
 export type LiveFleet = {
   vehicles: FleetVehicle[];
   branches: MapBranch[];
+  /**
+   * The nodes this user may record a movement at.
+   *
+   * A subset of `branches`, and separate from it on purpose: the map draws
+   * the whole network so a dispatcher can see where a truck is relative to
+   * places they do not run, while a typed arrival is refused anywhere they
+   * do not cover. Offering the full list in the dialog produced a dropdown
+   * whose options were rejected on submit, which reads as a broken form
+   * rather than as a boundary.
+   */
+  recordableBranches: Array<{ id: string; code: string; name: string }>;
   routes: MapRoute[];
   /** Server clock at load, so relative times agree between server and client. */
   asOf: string;
@@ -302,6 +313,14 @@ export async function loadLiveFleet(user: SessionUser): Promise<LiveFleet> {
       coveredKm,
       remainingKm,
       routeQuality: route.quality,
+      // A measured estimate where there is one; otherwise the timetable.
+      //
+      // Half the fleet is attached or vendor-owned and will never have a
+      // working device, and a vehicle standing still produces no estimate
+      // by design. Both used to render "No estimate" on a trip that has a
+      // planned arrival sitting on it — the answer was on the row and the
+      // screen would not say it. `method` distinguishes the two, so nobody
+      // mistakes the timetable for a live observation.
       eta: snapshot
         ? {
             at: snapshot.estimatedArrivalAt.toISOString(),
@@ -310,7 +329,7 @@ export async function loadLiveFleet(user: SessionUser): Promise<LiveFleet> {
             computedAt: snapshot.computedAt.toISOString(),
             delayMinutes: delayMinutes(snapshot.estimatedArrivalAt, trip.plannedArrivalAt),
           }
-        : null,
+        : scheduledEtaFor(trip.plannedArrivalAt, now),
       alerts: vehicleAlerts.map((alert) => ({
         id: alert.id,
         kind: alert.kind as string,
@@ -339,7 +358,43 @@ export async function loadLiveFleet(user: SessionUser): Promise<LiveFleet> {
       point: { lat: Number(row.latitude), lng: Number(row.longitude) },
     }));
 
-  return { vehicles, branches, routes, asOf: now.toISOString(), counts };
+  const recordableBranches = branches
+    .filter((branch) => coversBranch(user, branch.id))
+    .map((branch) => ({ id: branch.id, code: branch.code, name: branch.name }));
+
+  return {
+    vehicles,
+    branches,
+    recordableBranches,
+    routes,
+    asOf: now.toISOString(),
+    counts,
+  };
+}
+
+/**
+ * The trip's own planned arrival, dressed as an estimate.
+ *
+ * Not stored — nothing is written to `EtaSnapshot`, which stays a record of
+ * what GPS actually measured. This is a display fallback and says so:
+ * `method` is "schedule" and confidence is "low", and the lateness against
+ * plan is deliberately null rather than zero, because a timetable compared
+ * against itself is not evidence that anything is on time.
+ */
+function scheduledEtaFor(
+  plannedArrivalAt: Date | null,
+  now: Date,
+): FleetVehicle["eta"] {
+  const scheduled = scheduleEta(plannedArrivalAt);
+  if (!scheduled) return null;
+
+  return {
+    at: scheduled.estimatedArrivalAt.toISOString(),
+    method: scheduled.method,
+    confidence: scheduled.confidence,
+    computedAt: now.toISOString(),
+    delayMinutes: null,
+  };
 }
 
 function alertSummary(alert: {
@@ -482,9 +537,27 @@ const REPLAY_FIX_LIMIT = 3_000;
 /** A gap longer than this is a hole in the trail, not a slow reporting rate. */
 const GAP_MINUTES = 15;
 
-export async function loadTripReplay(tripId: string): Promise<TripReplay | null> {
-  const trip = await prisma.trip.findUnique({
-    where: { id: tripId },
+/**
+ * Historical playback for one trip.
+ *
+ * `user` is not optional, and the scope fragment is not decoration. The
+ * live map has always been branch-scoped; this screen was not, so a
+ * branch-scoped account holding `tracking.replay` could type any trip id
+ * and read another branch's whole trail — position by position, with the
+ * driver's name on it. Scoped the same way `loadLiveFleet` is, against the
+ * two ends of the lane, so a Jaipur trip is readable by Delhi and Jaipur
+ * and by nobody else. A network-scoped user is unaffected: `anyBranchScope`
+ * returns an empty fragment for them.
+ */
+export async function loadTripReplay(
+  tripId: string,
+  user: SessionUser,
+): Promise<TripReplay | null> {
+  const trip = await prisma.trip.findFirst({
+    where: {
+      id: tripId,
+      ...anyBranchScope(user, ["originBranchId", "destinationBranchId"]),
+    },
     select: {
       id: true,
       number: true,

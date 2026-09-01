@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState, useTransition } from "react";
 import { Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,17 +40,49 @@ export type BranchChoice = { id: string; code: string; name: string; hasCoordina
 export function GeofenceDialog({
   fence,
   branches,
+  pollSeconds,
 }: {
   fence?: FenceRow;
   branches: BranchChoice[];
+  /**
+   * The process tick, in seconds, so the latency arithmetic below is this
+   * deployment's rather than a hard-coded thirty. A fence tuned against the
+   * wrong number is tuned against nothing.
+   */
+  pollSeconds: number;
 }) {
   const [open, setOpen] = useState(false);
-  const [state, formAction, pending] = useActionState(saveGeofenceAction, IDLE);
+  const [state, setState] = useState<GeofenceState>(IDLE);
+  const [pending, startTransition] = useTransition();
   const [debounce, setDebounce] = useState(fence?.debouncePings ?? 2);
-  const [pollSeconds] = useState(30);
+
+  /**
+   * Submitted by hand rather than through `<form action={…}>`.
+   *
+   * React 19 resets an uncontrolled form the moment a form action returns,
+   * and every field here but the debounce is uncontrolled. A radius of ten
+   * metres used to answer "check the highlighted fields" over a form that
+   * had just thrown away the node, the name and the radius — the highlight
+   * pointing at a box that had been refilled with its default. Same shape
+   * as `components/data/master-form.tsx`, for the same reason.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      setState(await saveGeofenceAction(IDLE, formData));
+    });
+  }
+
+  function handleOpenChange(next: boolean) {
+    // Reopening starts clean rather than showing the last save's outcome.
+    if (next) setState(IDLE);
+    setOpen(next);
+  }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger
         render={
           fence ? (
@@ -66,7 +98,7 @@ export function GeofenceDialog({
         }
       />
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <form action={formAction}>
+        <form onSubmit={submit}>
           <input type="hidden" name="id" value={fence?.id ?? ""} />
 
           <DialogHeader>

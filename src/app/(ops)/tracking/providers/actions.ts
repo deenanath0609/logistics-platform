@@ -93,13 +93,6 @@ export async function saveProviderAction(
       };
     }
 
-    if (input.mode === "webhook" && !input.webhookSecret && !input.id) {
-      return {
-        error: "A webhook provider needs a shared secret — an unsigned endpoint accepts anything.",
-        fieldErrors: { webhookSecret: "Required for a webhook provider" },
-      };
-    }
-
     const existing = input.id
       ? await prisma.trackingProviderConfig.findFirst({
           where: { id: input.id, orgId: actor.orgId },
@@ -118,6 +111,23 @@ export async function saveProviderAction(
       : null;
 
     if (input.id && !existing) return { error: "That provider does not exist." };
+
+    // A webhook provider with no secret is worse than a broken one: it is
+    // not polled, because it is a push vendor, and its deliveries are never
+    // matched either, because the endpoint identifies a sender by whichever
+    // stored secret verifies the body and this row has none. The screen
+    // shows "no secret" in red afterwards, which is the wrong moment — by
+    // then the carrier's live map has silently stopped. Checked against the
+    // stored secret as well as the typed one, because a blank field on an
+    // edit means "leave it as it is": switching an existing poll row to
+    // push used to slip through this on the strength of having an id.
+    if (input.mode === "webhook" && !input.webhookSecret && !existing?.webhookSecret) {
+      return {
+        error:
+          "A webhook provider needs a shared secret — an unsigned endpoint accepts anything, so this one would accept nothing and the vendor's deliveries would all be rejected.",
+        fieldErrors: { webhookSecret: "Required for a webhook provider" },
+      };
+    }
 
     const data = {
       code: input.code,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState, useTransition } from "react";
 import { Loader2, PhoneCall } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -147,10 +147,30 @@ function MovementForm({
   branches: BranchOption[];
   onDone: () => void;
 }) {
-  const [state, formAction, pending] = useActionState(
-    mode === "ARRIVAL" ? recordManualArrivalAction : recordManualDepartureAction,
-    IDLE,
-  );
+  const [state, setState] = useState<TrackingState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  /**
+   * Submitted by hand rather than through `<form action={…}>`.
+   *
+   * React 19 resets an uncontrolled form the moment a form action returns,
+   * and all three fields here are uncontrolled. A branch outside the user's
+   * scope used to answer "you can only record movements at branches you
+   * cover" over a form that had just discarded the branch, the time the
+   * driver actually arrived and the remark explaining why it was being
+   * typed at all — so the second attempt was made from memory. Same shape
+   * as `components/data/master-form.tsx`.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const action =
+      mode === "ARRIVAL" ? recordManualArrivalAction : recordManualDepartureAction;
+
+    startTransition(async () => {
+      setState(await action(IDLE, formData));
+    });
+  }
 
   if (state.ok) {
     return (
@@ -159,7 +179,7 @@ function MovementForm({
   }
 
   return (
-    <form action={formAction} className="flex flex-col gap-4">
+    <form onSubmit={submit} className="flex flex-col gap-4">
       <input type="hidden" name="tripId" value={trip.id} />
 
       <div className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
@@ -228,12 +248,25 @@ function MovementForm({
 }
 
 function PositionForm({ vehicleId, onDone }: { vehicleId: string; onDone: () => void }) {
-  const [state, formAction, pending] = useActionState(recordManualPositionAction, IDLE);
+  const [state, setState] = useState<TrackingState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  // Four uncontrolled fields, one of them a coordinate read off a phone
+  // call. A rejected latitude must not take the longitude with it. See the
+  // note on `MovementForm`.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      setState(await recordManualPositionAction(IDLE, formData));
+    });
+  }
 
   if (state.ok) return <Outcome state={state} onDone={onDone} />;
 
   return (
-    <form action={formAction} className="flex flex-col gap-4">
+    <form onSubmit={submit} className="flex flex-col gap-4">
       <input type="hidden" name="vehicleId" value={vehicleId} />
 
       <div className="grid grid-cols-2 gap-3">

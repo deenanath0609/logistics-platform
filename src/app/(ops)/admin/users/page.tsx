@@ -65,6 +65,10 @@ export default async function UsersPage({
       include: {
         primaryBranch: { select: { code: true, name: true } },
         roles: { select: { role: { select: { id: true, name: true } } } },
+        // What a BRANCH_SET role actually reaches beyond the home branch.
+        // Read here so the edit dialog opens with the current answer ticked
+        // rather than blank — a blank list saved unchanged would strip it.
+        branchScopes: { select: { branch: { select: { id: true, code: true } } } },
       },
     }),
     prisma.user.count({ where }),
@@ -155,6 +159,29 @@ export default async function UsersPage({
                     ) : (
                       <span className="text-warn">unassigned</span>
                     )}
+                    {/*
+                      Otherwise the roster says one branch for somebody who
+                      reaches three, and the reason a dispatch manager can
+                      see Gurugram freight is invisible to the person asking
+                      why.
+                    */}
+                    {row.branchScopes.length > 0 && (
+                      <span
+                        className="ml-1 font-mono text-muted-foreground"
+                        title={`Also covers ${row.branchScopes
+                          .map((s) => s.branch.code)
+                          .join(", ")}`}
+                      >
+                        {/*
+                          One string, not `+` beside an expression: React
+                          splits adjacent text nodes with a comment marker in
+                          the server-rendered HTML, so the two halves would
+                          never sit next to each other for anything reading
+                          the page.
+                        */}
+                        {`+${row.branchScopes.map((s) => s.branch.code).join(" +")}`}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
@@ -227,6 +254,9 @@ export default async function UsersPage({
                             status: row.status,
                             isFieldUser: row.isFieldUser,
                             roleIds: row.roles.map((r) => r.role.id),
+                            branchScopeIds: row.branchScopes.map(
+                              (s) => s.branch.id,
+                            ),
                           }}
                         />
                         <ResetPasswordDialog

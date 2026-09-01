@@ -52,6 +52,32 @@ import {
 export const WEIGHT_CAPTURE_CALL_SITE =
   "src/app/(ops)/hub/weigh — the hub weighment screen calls captureRevisedWeight()";
 
+/**
+ * Whether this consignment is any of the actor's business.
+ *
+ * `branchId` on the input says where the scale is, and it was the only
+ * thing checked — so a Mumbai manager naming their own branch could
+ * reprice a consignment that had never left Delhi, raise a debit note
+ * against its customer, and notify them. The consignment is scoped the
+ * same way the weighment screen lists it: origin, where it is now, or
+ * where it is going.
+ */
+function coversShipment(
+  actor: SessionUser,
+  shipment: {
+    originBranchId: string;
+    currentBranchId: string | null;
+    destinationBranchId: string;
+  },
+): boolean {
+  if (actor.branchIds === null) return true;
+  return (
+    coversBranch(actor, shipment.originBranchId) ||
+    coversBranch(actor, shipment.destinationBranchId) ||
+    Boolean(shipment.currentBranchId && coversBranch(actor, shipment.currentBranchId))
+  );
+}
+
 export type CaptureRevisedWeightInput = {
   shipmentId: string;
   /** The hub doing the weighing. Checked against the actor's scope. */
@@ -136,6 +162,8 @@ export async function captureRevisedWeight(
       cancelledAt: true,
       currentStatus: true,
       originBranchId: true,
+      currentBranchId: true,
+      destinationBranchId: true,
       consignorId: true,
       chargeableWeight: true,
       actualWeight: true,
@@ -148,6 +176,12 @@ export async function captureRevisedWeight(
 
   if (!before || before.deletedAt) {
     return { ok: false, error: "That consignment no longer exists." };
+  }
+  if (!coversShipment(actor, before)) {
+    return {
+      ok: false,
+      error: `${before.lrNumber} has not been anywhere near your branches. Weighing it here would reprice another branch's consignment.`,
+    };
   }
   if (before.cancelledAt) {
     return { ok: false, error: "That consignment is cancelled. Nothing to reweigh." };
@@ -182,7 +216,13 @@ export async function captureRevisedWeight(
       return { ok: false, error: `That ${label} is not a number.` };
     }
     if (parsed.lessThanOrEqualTo(0)) {
-      return { ok: false, error: `A ${label} of zero is not a weighing.` };
+      return {
+        ok: false,
+        // Built rather than interpolated into "A ${label}": the two labels
+        // are "actual weight" and "chargeable weight", and one of them made
+        // the refusal read "A actual weight of zero".
+        error: `${label[0].toUpperCase()}${label.slice(1)} cannot be zero — that is not a weighing.`,
+      };
     }
   }
 
@@ -455,6 +495,30 @@ export async function previewRevisedWeight(
 > {
   if (!can(actor, "weight.capture")) {
     return { ok: false, error: "You do not have permission to capture weight." };
+  }
+
+  // Scoped as tightly as the commit is. A preview prices a consignment —
+  // it hands back what the customer is paying now and what they would pay
+  // — so an unscoped one is a rate card for somebody else's freight,
+  // readable by posting an id the screen never offered.
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: input.shipmentId },
+    select: {
+      deletedAt: true,
+      originBranchId: true,
+      currentBranchId: true,
+      destinationBranchId: true,
+    },
+  });
+
+  if (!shipment || shipment.deletedAt) {
+    return { ok: false, error: "That consignment no longer exists." };
+  }
+  if (!coversShipment(actor, shipment)) {
+    return {
+      ok: false,
+      error: "That consignment belongs to another branch.",
+    };
   }
 
   // `applyToShipment: false` prices without touching the shipment. It still

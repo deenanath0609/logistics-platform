@@ -1,6 +1,7 @@
 "use client";
 
-import { LogOut, Building2 } from "lucide-react";
+import Link from "next/link";
+import { LogOut, Building2, KeyRound } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -78,6 +79,19 @@ export function UserMenu({
             <span className="truncate">{branch}</span>
           </div>
         )}
+
+        <DropdownMenuSeparator />
+
+        {/*
+          The everyday way in. `/password` is otherwise only reached by
+          being forced there at first sign-in, which would make changing a
+          password afterwards impossible without an administrator resetting
+          it — the one thing a password change exists to avoid.
+        */}
+        <DropdownMenuItem render={<Link href="/password" />}>
+          <KeyRound className="size-4" />
+          Change password
+        </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 

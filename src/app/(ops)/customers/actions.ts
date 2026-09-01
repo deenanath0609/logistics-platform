@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { authorize, PermissionError } from "@/lib/auth/session";
+import { authorize, PermissionError, type SessionUser } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
 import { recordAudit, changedFields } from "@/server/services/audit";
 import type { ActionState } from "@/server/services/master-crud";
@@ -82,6 +82,24 @@ function fieldErrors(error: z.ZodError): Record<string, string> {
   return out;
 }
 
+/**
+ * Whether this actor may act on an account owned by `branchId`.
+ *
+ * One rule for three surfaces. `/customers` lists with
+ * `branchScope(user, "branchId")`, which is `{ branchId: { in: [...] } }`
+ * and so never matches an account with no owning branch; the detail page
+ * refuses those by id for the same reason. These actions used to read
+ * `before.branchId && !coversBranch(...)`, which is the opposite reading:
+ * an unowned account — the shape a network-scoped user creates when they
+ * leave "Owning branch" blank — was editable by any branch-scoped holder of
+ * `customer.update`, credit terms and all, while being invisible to them
+ * everywhere else.
+ */
+function coversCustomer(actor: SessionUser, branchId: string | null): boolean {
+  if (actor.branchIds === null) return true;
+  return branchId !== null && coversBranch(actor, branchId);
+}
+
 function describe(error: unknown): string {
   if (error instanceof PermissionError) {
     return "You do not have permission to manage customers.";
@@ -124,8 +142,13 @@ export async function createCustomer(
     }
 
     const branchId = data.branchId ?? actor.primaryBranch?.id ?? null;
-    if (branchId && !coversBranch(actor, branchId)) {
-      return { error: "That branch is outside your scope.", fieldErrors: { branchId: "Out of scope" } };
+    if (!coversCustomer(actor, branchId)) {
+      return {
+        error: branchId
+          ? "That branch is outside your scope."
+          : "Choose an owning branch — you have no home branch to file this account under.",
+        fieldErrors: { branchId: "Out of scope" },
+      };
     }
 
     const created = await prisma.customer.create({
@@ -169,7 +192,7 @@ export async function updateCustomer(
 
     const before = await prisma.customer.findUnique({ where: { id } });
     if (!before) return { error: "That customer no longer exists." };
-    if (before.branchId && !coversBranch(actor, before.branchId)) {
+    if (!coversCustomer(actor, before.branchId)) {
       return { error: "That customer is outside your scope." };
     }
 
@@ -180,9 +203,17 @@ export async function updateCustomer(
     // checked the branch the account was already in, so an editor could push
     // an account they cover into a branch they do not — off their own list
     // and onto somebody else's, with no way back.
-    if (data.branchId && !coversBranch(actor, data.branchId)) {
+    //
+    // Blank counts as a move too. "Owning branch" offers an empty option,
+    // and an account saved with it belongs to the network — which for a
+    // branch-scoped editor means it leaves their list, their detail page
+    // and their booking picker in one save, with no control anywhere that
+    // could bring it back.
+    if (!coversCustomer(actor, data.branchId)) {
       return {
-        error: "That branch is outside your scope.",
+        error: data.branchId
+          ? "That branch is outside your scope."
+          : "Leave the owning branch set — an account with no branch is only visible to network-wide roles.",
         fieldErrors: { branchId: "Out of scope" },
       };
     }
@@ -270,7 +301,7 @@ export async function saveCustomerAddress(
       select: { id: true, branchId: true },
     });
     if (!customer) return { error: "That customer no longer exists." };
-    if (customer.branchId && !coversBranch(actor, customer.branchId)) {
+    if (!coversCustomer(actor, customer.branchId)) {
       return { error: "That customer is outside your scope." };
     }
 

@@ -150,6 +150,21 @@ export default async function ExceptionDetailPage({
   const def = KIND_DEFS[exception.kind];
   const now = new Date();
 
+  // The `branch` relation hangs off `branchId` — where the problem was
+  // noticed — and it was being rendered under "Owner branch". Everything
+  // the hub raises separates the two on purpose: Delhi finds the missing
+  // box, Gurugram answers for it, and this page was naming Delhi. There
+  // is no relation on `ownerBranchId`, so the owner is fetched by id.
+  const ownerBranch =
+    exception.ownerBranchId && exception.ownerBranchId !== exception.branchId
+      ? await prisma.branch.findUnique({
+          where: { id: exception.ownerBranchId },
+          select: { code: true, name: true },
+        })
+      : exception.ownerBranchId
+        ? exception.branch
+        : null;
+
   return (
     <>
       <PageHeader
@@ -254,10 +269,16 @@ export default async function ExceptionDetailPage({
               {formatDuration(ageMinutes(exception, now))}
             </Fact>
             <Fact label="Owner branch">
-              {exception.branch
-                ? `${exception.branch.code} — ${exception.branch.name}`
+              {ownerBranch
+                ? `${ownerBranch.code} — ${ownerBranch.name}`
                 : "Not attributed"}
             </Fact>
+            {exception.branch &&
+              exception.branchId !== exception.ownerBranchId && (
+                <Fact label="Found at">
+                  {`${exception.branch.code} — ${exception.branch.name}`}
+                </Fact>
+              )}
             <Fact label="Assigned to">
               {exception.assignedTo?.name ?? "Nobody yet"}
             </Fact>

@@ -14,6 +14,7 @@ import {
   updateBatchRow,
 } from "@/lib/bulk/batch";
 import { commitBatch } from "@/lib/bulk/commit";
+import { stampBulkConsignor } from "@/lib/portal/bulk";
 import type { ActionState } from "@/server/services/master-crud";
 
 const PATH = "/shipments/bulk";
@@ -74,39 +75,6 @@ async function batchInScope(
     return { ok: false, error: "That batch is outside the branches you cover." };
   }
   return { ok: true, batch };
-}
-
-/**
- * Attributes consignments booked out of a *customer's* batch to that
- * customer.
- *
- * `commitBatch` is shared and takes no account, so the portal stamps
- * afterwards — see `stampConsignor` in `lib/portal/bulk.ts`, whose three
- * safety properties this relies on and repeats: the ids come from this
- * commit's outcomes, `consignorId: null` is in the WHERE clause so it can
- * only ever fill a blank, and nothing about the status is touched.
- *
- * Without this, a clerk helping a customer over the telephone — "I can see
- * your file, I'll book the good rows for you" — created consignments with
- * no consignor. `customerShipmentFilter` pins on that column, so the
- * customer's own portal showed them nothing at all until somebody happened
- * to open the batch page and trip the portal's repair-on-read.
- */
-async function stampCustomerBatch(
-  customerId: string | null,
-  shipmentIds: readonly string[],
-): Promise<void> {
-  if (!customerId || shipmentIds.length === 0) return;
-
-  const ids = [...new Set(shipmentIds)];
-  const CHUNK = 500;
-
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    await prisma.shipment.updateMany({
-      where: { id: { in: ids.slice(i, i + CHUNK) }, consignorId: null },
-      data: { consignorId: customerId },
-    });
-  }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -281,14 +249,23 @@ export async function commitBulkBatch(
     const result = await commitBatch({ batchId, rowNumbers }, actor);
     if (!result.ok) return { error: result.error };
 
-    // A customer's own file, booked from the counter. See the note on
-    // `stampCustomerBatch`.
-    await stampCustomerBatch(
-      scoped.batch.customerId,
-      result.outcomes
-        .map((outcome) => outcome.shipmentId)
-        .filter((id): id is string => Boolean(id)),
-    );
+    // A customer's own file, booked from the counter — a clerk saying "I
+    // can see your file, I'll book the good rows for you". `commitBatch`
+    // takes no account, so without this the consignments come out with no
+    // consignor and the customer's own portal shows them nothing.
+    //
+    // The same function the portal's own commit uses, deliberately: it is
+    // the one that fills a blank and can never move a consignment from one
+    // account to another. `customerUserId` is not passed — no portal login
+    // did this.
+    if (scoped.batch.customerId) {
+      await stampBulkConsignor({
+        customerId: scoped.batch.customerId,
+        shipmentIds: result.outcomes
+          .map((outcome) => outcome.shipmentId)
+          .filter((id): id is string => Boolean(id)),
+      });
+    }
 
     revalidatePath(`${PATH}/${batchId}`);
     revalidatePath("/shipments");

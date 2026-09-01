@@ -24,10 +24,14 @@ export default async function TripReplayPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requirePermission("tracking.replay");
+  const user = await requirePermission("tracking.replay");
   const { id } = await params;
 
-  const replay = await loadTripReplay(id);
+  // Scoped to the branches this user covers. A trip outside them is a 404
+  // rather than a refusal: "no such trip" and "not yours" should look
+  // identical from outside, or the URL becomes a way to enumerate the
+  // network.
+  const replay = await loadTripReplay(id, user);
   if (!replay) notFound();
 
   const { trip, stats, provenance } = replay;

@@ -95,10 +95,14 @@ export default async function AuditPage({
     // Scoped too: the filter list is derived from the rows, so an unscoped
     // one would name entities this reader is not allowed to see and offer a
     // filter that returns nothing.
-    prisma.auditLog.findMany({
+    //
+    // `groupBy` rather than `findMany({ distinct })`, which Prisma resolves
+    // by reading every matching row and deduplicating them in the client.
+    // On an append-only table that only ever grows, opening this page would
+    // have pulled the whole trail into memory to populate one dropdown.
+    prisma.auditLog.groupBy({
+      by: ["entity"],
       where: branchScope(user, "branchId"),
-      distinct: ["entity"],
-      select: { entity: true },
       orderBy: { entity: "asc" },
     }),
   ]);

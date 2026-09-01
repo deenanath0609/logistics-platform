@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { raiseException } from "@/lib/exceptions/service";
 import type { ExceptionKind, TrackingAlertKind } from "@/generated/prisma/client";
 import { distanceToPolyline, type LatLng } from "./geo";
-import { computeEta, delayMinutes, type EtaSample } from "./eta";
+import { computeEta, type EtaSample } from "./eta";
 import {
   DEFAULT_THRESHOLDS,
   detectDeviation,
@@ -12,7 +12,6 @@ import {
 } from "./alerts";
 import {
   LIVE_TRIP_STATUSES,
-  activeTripForVehicle,
   plannedRouteForTrip,
   type TripContext,
 } from "./context";
@@ -49,9 +48,32 @@ const globalForMonitor = globalThis as unknown as {
   trackingLastDerivedAt: Map<string, number> | undefined;
 };
 
+/**
+ * How long a vehicle's last-derived stamp is worth keeping.
+ *
+ * Only used to skip a derive that ran less than `DERIVE_INTERVAL_MS` ago,
+ * so anything older than that answers the same question as an absent
+ * entry. The worker runs for weeks and the map is keyed by vehicle id, so
+ * without a sweep it accumulates one entry per vehicle the fleet has ever
+ * had — including every vehicle sold, retired or belonging to a carrier
+ * onboarded last spring.
+ */
+const DERIVED_STAMP_TTL_MS = 10 * DERIVE_INTERVAL_MS;
+
 function derivedAt(): Map<string, number> {
-  globalForMonitor.trackingLastDerivedAt ??= new Map();
-  return globalForMonitor.trackingLastDerivedAt;
+  const map = (globalForMonitor.trackingLastDerivedAt ??= new Map());
+
+  // Swept on the way past rather than on a timer of its own: this is
+  // called once per vehicle per ping, and a timer for a housekeeping job
+  // this small is a second thing that can stop without anybody noticing.
+  const horizon = Date.now() - DERIVED_STAMP_TTL_MS;
+  if (map.size > 500) {
+    for (const [vehicleId, at] of map) {
+      if (at < horizon) map.delete(vehicleId);
+    }
+  }
+
+  return map;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -443,75 +465,6 @@ export async function sweepSignalLoss(now = new Date()): Promise<SweepResult> {
   }
 
   return { checked, raised, resolved };
-}
-
-// ────────────────────────────────────────────────────────────
-// Read helper shared by the screens
-// ────────────────────────────────────────────────────────────
-
-/** The most recent stored estimate for a trip, with lateness against plan. */
-export async function latestEta(tripId: string): Promise<{
-  estimatedArrivalAt: Date;
-  remainingKm: number | null;
-  averageSpeedKmph: number | null;
-  method: string;
-  confidence: string | null;
-  computedAt: Date;
-  delayMinutes: number | null;
-} | null> {
-  const [snapshot, trip] = await Promise.all([
-    prisma.etaSnapshot.findFirst({
-      where: { tripId },
-      orderBy: { computedAt: "desc" },
-    }),
-    prisma.trip.findUnique({ where: { id: tripId }, select: { plannedArrivalAt: true } }),
-  ]);
-
-  if (!snapshot) return null;
-
-  return {
-    estimatedArrivalAt: snapshot.estimatedArrivalAt,
-    remainingKm: snapshot.remainingKm === null ? null : Number(snapshot.remainingKm),
-    averageSpeedKmph:
-      snapshot.averageSpeedKmph === null ? null : Number(snapshot.averageSpeedKmph),
-    method: snapshot.method,
-    confidence: snapshot.confidence,
-    computedAt: snapshot.computedAt,
-    delayMinutes: delayMinutes(snapshot.estimatedArrivalAt, trip?.plannedArrivalAt ?? null),
-  };
-}
-
-/** Refreshes the active-trip ETA even when no fresh ping has arrived. */
-export async function refreshEtaForVehicle(vehicleId: string): Promise<number> {
-  const trip = await activeTripForVehicle(vehicleId);
-  if (!trip) return 0;
-
-  const location = await prisma.vehicleLocation.findUnique({
-    where: { vehicleId },
-    select: { latitude: true, longitude: true, recordedAt: true },
-  });
-  if (!location) return 0;
-
-  const since = new Date(location.recordedAt.getTime() - HISTORY_MINUTES * 60_000);
-  const history = await prisma.gpsPing.findMany({
-    where: { vehicleId, recordedAt: { gte: since, lte: location.recordedAt } },
-    orderBy: { recordedAt: "asc" },
-    take: HISTORY_LIMIT,
-    select: { latitude: true, longitude: true, recordedAt: true },
-  });
-
-  const route = await plannedRouteForTrip(trip);
-
-  return snapshotEta({
-    trip,
-    point: { lat: Number(location.latitude), lng: Number(location.longitude) },
-    now: location.recordedAt,
-    history: history.map((row) => ({
-      at: row.recordedAt,
-      point: { lat: Number(row.latitude), lng: Number(row.longitude) },
-    })),
-    route: route.points,
-  });
 }
 
 // ────────────────────────────────────────────────────────────

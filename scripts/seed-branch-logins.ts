@@ -150,8 +150,12 @@ async function main() {
             passwordHash,
             isFieldUser: post.field,
             primaryBranchId: branchId.get(branch.code)!,
-            // These accounts exist to be signed into on the spot. A forced
-            // change would send a tester to a screen that does not exist yet.
+            // These accounts exist to be signed into on the spot. The screen
+            // a forced change sends you to now exists — `/password`, enforced
+            // by `requireUser` — which is exactly why this stays false: a
+            // fixture whose password is printed in the run instructions is
+            // not a credential somebody was handed, and every one of these
+            // logins would otherwise open on a password form.
             mustChangePassword: false,
           },
         });

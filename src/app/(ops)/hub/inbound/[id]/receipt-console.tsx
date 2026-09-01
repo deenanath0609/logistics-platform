@@ -49,6 +49,7 @@ export function ReceiptConsole({
   manifestNumber,
   originCode,
   lines: initialLines,
+  excessAlready,
   canClose,
   sealIntact,
 }: {
@@ -56,13 +57,20 @@ export function ReceiptConsole({
   manifestNumber: string;
   originCode: string;
   lines: ReceiptLine[];
+  /**
+   * Barcodes already recorded against this receipt that the manifest does
+   * not list — from the other gun, or from before this page was loaded.
+   * The tally counted only this session's, so the close dialog could
+   * promise a clean receipt over an excess already on the record.
+   */
+  excessAlready: string[];
   canClose: boolean;
   sealIntact: boolean | null;
 }) {
   const router = useRouter();
   const [lines, setLines] = useState(initialLines);
   const [items, setItems] = useState<ScanFeedItem[]>([]);
-  const [excessBarcodes, setExcessBarcodes] = useState<string[]>([]);
+  const [excessBarcodes, setExcessBarcodes] = useState<string[]>(excessAlready);
   const [closeOpen, setCloseOpen] = useState(false);
   const [closeState, setCloseState] = useState<CloseReceiptState>(IDLE);
   const [closing, startClosing] = useTransition();

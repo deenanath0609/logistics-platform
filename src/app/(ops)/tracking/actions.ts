@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { authorize, PermissionError } from "@/lib/auth/session";
+import { hasModule } from "@/lib/modules/tenant-modules";
 import {
   MANUAL_MOVEMENT_PERMISSION,
   MANUAL_TRACKING_PERMISSION,
@@ -61,12 +62,28 @@ const movementSchema = z.object({
   remarks: optionalText,
 });
 
+/**
+ * The module gate, for the actions the permission set does not gate.
+ *
+ * Narrowing a session's permissions to the modules a carrier bought covers
+ * every action guarded by a permission the module owns — `tracking.read`
+ * and `geofence.manage` both vanish from a carrier without tracking. It
+ * does not cover these two: a movement is authorised on `trip.dispatch`,
+ * which belongs to dispatch and which a carrier on dispatch alone holds in
+ * full. The layout's URL guard does not close it either, because a server
+ * action runs before the page it lives on is re-rendered.
+ */
+const NOT_ON_PLAN: TrackingState = {
+  error: "GPS tracking is not part of your plan.",
+};
+
 async function movement(
   formData: FormData,
   direction: "ARRIVAL" | "DEPARTURE",
 ): Promise<TrackingState> {
   try {
     const actor = await authorize(MANUAL_MOVEMENT_PERMISSION);
+    if (!(await hasModule("tracking"))) return NOT_ON_PLAN;
 
     const parsed = movementSchema.safeParse(Object.fromEntries(formData.entries()));
     if (!parsed.success) {

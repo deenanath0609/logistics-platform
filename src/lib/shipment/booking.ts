@@ -181,6 +181,33 @@ export type BookingResult =
     }
   | { ok: false; error: string; field?: string };
 
+/**
+ * Today, as a `date` column actually stores it.
+ *
+ * `PickupRequest.requestedDate` is `@db.Date`. Postgres keeps the **UTC**
+ * calendar day, so handing it a raw instant throws away the local day the
+ * booking happened on: at IST (+5:30) every booking taken between 00:00 and
+ * 05:30 was filed under *yesterday*. `/pickups` asks for one exact day
+ * (`gte` day start, `lt` day end, both rebuilt at UTC midnight), so the
+ * collection raised alongside such a booking never appeared on the branch's
+ * list at all and no van was ever sent for it.
+ *
+ * The night-shift booking window is precisely when a next-morning
+ * collection is raised, which is what made this both rare in testing and
+ * expensive in service.
+ *
+ * The same trick, for the same reason, as `asStoredDate` in
+ * `lib/pickup/execute.ts` — where it is written out in full — and as
+ * `calendarDay` on the reading side in `/pickups/page.tsx`. This is the
+ * fourth time the offset has bitten this repository.
+ */
+function storedToday(): Date {
+  const now = new Date();
+  return new Date(
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0),
+  );
+}
+
 export async function createBooking(
   input: BookingInput,
   actor: SessionUser,
@@ -599,16 +626,18 @@ export async function createBooking(
             address: input.consignorAddress,
             cityId: input.consignorCityId,
             pincode: input.consignorPincode,
-            // Today unless the caller said otherwise. A consignor who booked
-            // this morning expects somebody today, and a branch that cannot
-            // manage it moves the date rather than being silently given a
-            // week.
             // Today, and any slot. A consignor who booked this morning
             // expects somebody today; a branch that cannot manage it moves
             // the date on the pickup rather than being silently given a
             // week. Booking does not ask for a slot, and inventing one
             // would be a promise nobody made.
-            requestedDate: new Date(),
+            //
+            // `storedToday()`, not `new Date()`. See its docblock: this is
+            // a `@db.Date` column and a raw instant is truncated to the UTC
+            // calendar day, so every booking taken between midnight and
+            // 05:30 IST raised a collection dated yesterday — which
+            // `/pickups` never showed, because it asks for one exact day.
+            requestedDate: storedToday(),
             slot: "ANYTIME",
             expectedPackages: input.packageCount,
             expectedWeight: input.actualWeight ?? undefined,

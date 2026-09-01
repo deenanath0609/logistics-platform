@@ -18,6 +18,9 @@ type RoleRow = {
   code: string;
   name: string;
   isActive: boolean;
+  scope?: string;
+  isSystem?: boolean;
+  description?: string | null;
   /** Permission codes granted to this role. */
   permissions: string[];
   /** Ids of users holding it. */
@@ -30,6 +33,10 @@ const store = vi.hoisted(() => ({
   grants: [] as Array<Record<string, unknown>>,
   /** Every `rolePermission.deleteMany` payload, in order. */
   revokes: [] as Array<Record<string, unknown>>,
+  /** Every `role.create` payload. */
+  created: [] as Array<Record<string, unknown>>,
+  /** Every `role.update` payload. */
+  updated: [] as Array<Record<string, unknown>>,
   audits: [] as Array<Record<string, unknown>>,
 }));
 
@@ -84,6 +91,23 @@ vi.mock("@/lib/prisma", () => {
             name: role.name,
             permissions: role.permissions.map((code) => ({ permission: { code } })),
           })),
+
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        store.created.push(data);
+        return { id: "r-new", ...data };
+      },
+
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        store.updated.push({ id: where.id, ...data });
+        const row = roles().find((r) => r.id === where.id);
+        return { ...row, ...data };
+      },
     },
 
     permission: {
@@ -160,6 +184,8 @@ beforeEach(() => {
   store.roles.length = 0;
   store.grants.length = 0;
   store.revokes.length = 0;
+  store.created.length = 0;
+  store.updated.length = 0;
   store.audits.length = 0;
 
   // The actor's own role: it may edit roles and nothing else that matters.
@@ -270,5 +296,131 @@ describe("updateRolePermissions", () => {
 
     expect(result.error).toContain("settlement.approve");
     expect(store.grants).toHaveLength(0);
+  });
+});
+
+/**
+ * The role itself, as opposed to what it may do. None of this was reachable
+ * — `/admin/roles` could only tick permission boxes — so a carrier whose
+ * shape does not match the seeded eleven had to overload a shipped role.
+ */
+describe("createRole and updateRole", () => {
+  function roleForm(fields: Record<string, string>): FormData {
+    const data = new FormData();
+    const base: Record<string, string> = {
+      code: "REGIONAL_SUP",
+      name: "Regional Supervisor",
+      description: "Runs the western cluster.",
+      scope: "BRANCH_SET",
+      isActive: "true",
+      ...fields,
+    };
+    for (const [key, value] of Object.entries(base)) data.set(key, value);
+    return data;
+  }
+
+  it("creates a role with no permissions on it", async () => {
+    const { createRole } = await import("./actions");
+
+    const result = await createRole({}, roleForm({}));
+
+    expect(result.ok).toBe(true);
+    expect(store.created).toHaveLength(1);
+    expect(store.created[0]).toMatchObject({
+      code: "REGIONAL_SUP",
+      scope: "BRANCH_SET",
+      isSystem: false,
+    });
+    // Permissions are ticked on the role's own page, behind the guard that
+    // already stands there. Nothing is granted here.
+    expect(store.grants).toHaveLength(0);
+  });
+
+  it("refuses a scope wider than the actor's own, and creates nothing", async () => {
+    const { createRole } = await import("./actions");
+
+    actor.scope = "BRANCH";
+    actor.branchIds = ["br-del"];
+
+    const result = await createRole({}, roleForm({ scope: "NETWORK" }));
+
+    expect(result.fieldErrors?.scope).toBeDefined();
+    expect(store.created).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+  });
+
+  it("renames a role without touching its permissions", async () => {
+    const { updateRole } = await import("./actions");
+
+    store.roles.push({
+      id: "r-custom",
+      code: "REGIONAL_SUP",
+      name: "Regional Supervisor",
+      description: null,
+      scope: "BRANCH_SET",
+      isSystem: false,
+      isActive: true,
+      permissions: ["shipment.read"],
+      users: [],
+    });
+
+    const result = await updateRole(
+      {},
+      roleForm({ id: "r-custom", name: "Cluster Supervisor" }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(store.updated).toHaveLength(1);
+    expect(store.updated[0]).toMatchObject({ name: "Cluster Supervisor" });
+    expect(store.grants).toHaveLength(0);
+    expect(store.revokes).toHaveLength(0);
+  });
+
+  it("refuses to re-scope a system role, and writes nothing", async () => {
+    const { updateRole } = await import("./actions");
+
+    store.roles.push({
+      id: "r-dispatch",
+      code: "DISPATCH_MANAGER",
+      name: "Dispatch Manager",
+      description: null,
+      scope: "BRANCH_SET",
+      isSystem: true,
+      isActive: true,
+      permissions: ["shipment.read"],
+      users: [],
+    });
+
+    const result = await updateRole(
+      {},
+      roleForm({ id: "r-dispatch", scope: "NETWORK" }),
+    );
+
+    expect(result.fieldErrors?.scope).toBeDefined();
+    expect(store.updated).toHaveLength(0);
+  });
+
+  it("refuses to deactivate Super Admin, and writes nothing", async () => {
+    const { updateRole } = await import("./actions");
+
+    store.roles.push({
+      id: "r-super",
+      code: "SUPER_ADMIN",
+      name: "Super Admin",
+      description: null,
+      scope: "NETWORK",
+      isSystem: true,
+      isActive: true,
+      permissions: [...PERMISSION_CODES],
+      users: ["u-owner"],
+    });
+
+    const result = await updateRole(
+      {},
+      roleForm({ id: "r-super", scope: "NETWORK", isActive: "false" }),
+    );
+
+    expect(result.fieldErrors?.isActive).toBeDefined();
+    expect(store.updated).toHaveLength(0);
   });
 });

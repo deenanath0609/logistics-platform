@@ -39,6 +39,12 @@ export type UserRecord = {
   status: string;
   isFieldUser: boolean;
   roleIds: string[];
+  /**
+   * Extra branches, beyond the home one, for a BRANCH_SET role. Optional
+   * because the field-staff roster opens this same dialog and never asks —
+   * a delivery agent's role is OWN-scoped, so there is nothing to widen.
+   */
+  branchScopeIds?: string[];
 };
 
 const SCOPE_HINT: Record<string, string> = {
@@ -82,9 +88,43 @@ export function UserFormDialog({
   const [isFieldUser, setIsFieldUser] = useState(
     user?.isFieldUser ?? defaultFieldUser,
   );
+  /**
+   * Ticked roles, held in state rather than left to the DOM, because the
+   * branch-reach list below only exists when one of them is BRANCH_SET.
+   * An admin ticking "Dispatch Manager" has to see the second question
+   * appear in the same breath, or they will never know it was asked.
+   */
+  const [roleIds, setRoleIds] = useState<string[]>(user?.roleIds ?? []);
+  const [primaryBranchId, setPrimaryBranchId] = useState(
+    user?.primaryBranchId ?? "",
+  );
   const formId = useId();
 
-  function submit(formData: FormData) {
+  const wantsBranchSet = roles.some(
+    (role) => roleIds.includes(role.id) && role.scope === "BRANCH_SET",
+  );
+
+  function toggleRole(roleId: string, on: boolean) {
+    setRoleIds((current) =>
+      on ? [...new Set([...current, roleId])] : current.filter((id) => id !== roleId),
+    );
+  }
+
+  /**
+   * Submitted by hand rather than through `<form action={…}>`.
+   *
+   * React 19 resets an uncontrolled form the moment a form action returns,
+   * and every box on this one is uncontrolled — name, mobile, email,
+   * employee code, the initial password, and the role ticks. So a mobile
+   * number that collides with somebody already on the roster answered
+   * "Another user already has that mobile number" over a form that had
+   * just emptied itself, and the admin had to type the whole person in
+   * again to change one digit.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action(EMPTY, formData);
       setState(result);
@@ -126,7 +166,7 @@ export function UserFormDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form id={formId} action={submit} className="flex flex-col gap-4">
+        <form id={formId} onSubmit={submit} className="flex flex-col gap-4">
           {user?.id ? <input type="hidden" name="id" value={user.id} /> : null}
 
           <div className="grid grid-cols-2 gap-4">
@@ -193,7 +233,8 @@ export function UserFormDialog({
               <select
                 id={`${formId}-branch`}
                 name="primaryBranchId"
-                defaultValue={user?.primaryBranchId ?? ""}
+                value={primaryBranchId}
+                onChange={(event) => setPrimaryBranchId(event.target.value)}
                 aria-invalid={Boolean(state.fieldErrors?.primaryBranchId)}
                 className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                 required
@@ -280,7 +321,10 @@ export function UserFormDialog({
                     <Checkbox
                       name="roleIds"
                       value={role.id}
-                      defaultChecked={user?.roleIds.includes(role.id)}
+                      checked={roleIds.includes(role.id)}
+                      onCheckedChange={(checked) =>
+                        toggleRole(role.id, Boolean(checked))
+                      }
                       className="mt-0.5"
                     />
                     <span className="flex min-w-0 flex-col gap-0.5">
@@ -293,6 +337,59 @@ export function UserFormDialog({
                 ))}
               </div>
             </fieldset>
+
+            {/*
+              Only for a role that can actually use it. `UserBranchScope` is
+              read by the session loader and the partner API, and rows on a
+              plain BRANCH user would sit there doing nothing until somebody
+              ticked a dispatch role on and widened them without meaning to
+              — so the action drops them, and the form does not ask.
+            */}
+            {wantsBranchSet && (
+              <fieldset className="col-span-2 flex flex-col gap-2">
+                <legend className="pb-1.5 text-sm font-medium">
+                  Also covers
+                </legend>
+                <p className="pb-1 text-xs text-muted-foreground">
+                  A role marked “assigned branches” reaches the home branch
+                  above plus whatever is ticked here. Leave it empty and it
+                  reaches the home branch only.
+                </p>
+                <FieldError message={state.fieldErrors?.branchScopeIds} />
+                {/*
+                  Says "this form asked the question", so unticking every box
+                  clears the rows rather than reading as silence. Without it
+                  the action cannot tell an empty answer from a form that
+                  never rendered the list — which is exactly what the
+                  field-staff roster posts.
+                */}
+                <input type="hidden" name="branchScopesEdited" value="true" />
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  {branches
+                    .filter((branch) => branch.id !== primaryBranchId)
+                    .map((branch) => (
+                      <label
+                        key={branch.id}
+                        className="flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2 hover:bg-accent/40"
+                      >
+                        <Checkbox
+                          name="branchScopeIds"
+                          value={branch.id}
+                          defaultChecked={user?.branchScopeIds?.includes(branch.id)}
+                        />
+                        <span className="flex min-w-0 flex-col gap-0.5">
+                          <span className="font-mono text-xs font-medium">
+                            {branch.code}
+                          </span>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {branch.name}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                </div>
+              </fieldset>
+            )}
           </div>
 
           {state.error && (
@@ -338,7 +435,13 @@ export function ResetPasswordDialog({
   const [pending, startTransition] = useTransition();
   const formId = useId();
 
-  function submit(formData: FormData) {
+  // Same reason as the user dialog above: a password shorter than eight
+  // characters used to come back "At least 8 characters" over a box that
+  // had already been cleared.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action(EMPTY, formData);
       setState(result);
@@ -379,7 +482,7 @@ export function ResetPasswordDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form id={formId} action={submit} className="flex flex-col gap-3">
+        <form id={formId} onSubmit={submit} className="flex flex-col gap-3">
           <input type="hidden" name="id" value={userId} />
           <Label htmlFor={`${formId}-pw`}>New password</Label>
           <Input

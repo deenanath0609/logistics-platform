@@ -116,6 +116,25 @@ export default async function InboundReceiptPage({
   }));
 
   const isOpen = receipt.status === "OPEN";
+
+  // Unexpected barcodes already against this receipt.
+  //
+  // The console counted only the ones scanned in the current browser
+  // session, so the confirmation dialog — the last thing anybody reads
+  // before raising a claim on another branch — said "0 unexpected" for a
+  // stray box a colleague on the second gun had scanned an hour ago, or
+  // for one this clerk scanned before the page was reloaded. The line
+  // tallies were always read back from the server; the excess side was
+  // not. Distinct on barcode, because two reads of the same stray box are
+  // one stray box.
+  const excessScans = isOpen
+    ? await prisma.scanRecord.findMany({
+        where: { receiptId: receipt.id, isExpected: false },
+        distinct: ["barcode"],
+        select: { barcode: true },
+      })
+    : [];
+
   const canScan = can(user, "scan.inbound");
   const canClose = can(user, "receipt.close");
   const canResolve = can(user, "discrepancy.resolve");
@@ -194,6 +213,7 @@ export default async function InboundReceiptPage({
             manifestNumber={receipt.manifest?.number ?? "this manifest"}
             originCode={receipt.manifest?.originBranch.code ?? "the origin"}
             lines={lines}
+            excessAlready={excessScans.map((scan) => scan.barcode)}
             canClose={canClose}
             sealIntact={receipt.sealIntact}
           />

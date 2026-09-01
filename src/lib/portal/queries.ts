@@ -6,6 +6,7 @@ import {
   STATUS_GROUPS,
 } from "@/lib/shipment/state-machine";
 import {
+  customerOwnedFilter,
   customerShipmentFilter,
   toPublicTimeline,
   toneFor,
@@ -31,6 +32,33 @@ const IN_FLIGHT = [
   ...STATUS_GROUPS.moving,
   ...STATUS_GROUPS.lastMile,
 ];
+
+/**
+ * The filters the portal offers, which are the spine's groups plus one.
+ *
+ * `inFlight` exists because the overview's own tile counts it: everything
+ * booked and not yet finished, across four of the spine's groups. Before
+ * this the tile linked to `?group=moving`, so a customer read "In flight
+ * 14", clicked it, and was shown three — the eleven sitting at
+ * `PICKED_UP`, `PROCESSED` or `OUT_FOR_DELIVERY` were counted by the card
+ * and matched by no filter the page offered. `inNetwork` had no chip at
+ * all, so those four statuses were reachable only under "All".
+ *
+ * Defined here rather than in `state-machine.ts` on purpose. It is a
+ * portal *view* over the spine's grouping, not a change to it — nothing
+ * about the state machine's own vocabulary moves for a customer-facing
+ * filter chip.
+ */
+export const PORTAL_GROUPS = {
+  ...STATUS_GROUPS,
+  inFlight: IN_FLIGHT,
+};
+
+export type PortalGroup = keyof typeof PORTAL_GROUPS;
+
+export function isPortalGroup(value: string | undefined): value is PortalGroup {
+  return value !== undefined && Object.hasOwn(PORTAL_GROUPS, value);
+}
 
 export type PortalDashboard = {
   inFlight: number;
@@ -67,30 +95,33 @@ export async function getPortalDashboard(
     openComplaints,
     outstanding,
   ] = await Promise.all([
-      prisma.shipment.count({
-        where: { ...scope, currentStatus: { in: IN_FLIGHT } },
-      }),
-      prisma.shipment.count({
-        where: {
-          ...scope,
-          currentStatus: { in: STATUS_GROUPS.done },
-          deliveredAt: { gte: monthStart },
-        },
-      }),
-      // Delivered but the signed proof has not come back off the device.
-      //
-      // `pod: null` is the whole point of this tile and it was missing, so
-      // the card read "Pending POD: 41" on an account whose forty-one
-      // deliveries all had their proof — the same number as "delivered",
-      // permanently amber, and a customer ringing the branch about
-      // paperwork that was already there.
-      prisma.shipment.count({
-        where: { ...scope, currentStatus: "DELIVERED", pod: { is: null } },
-      }),
-      listPortalShipments(session, { take: 5 }),
+    prisma.shipment.count({
+      where: { ...scope, currentStatus: { in: IN_FLIGHT } },
+    }),
+    prisma.shipment.count({
+      where: {
+        ...scope,
+        currentStatus: { in: STATUS_GROUPS.done },
+        deliveredAt: { gte: monthStart },
+      },
+    }),
+    // Delivered but the signed proof has not come back off the device.
+    //
+    // `pod: null` is the whole point of this tile and it was missing, so
+    // the card read "Pending POD: 41" on an account whose forty-one
+    // deliveries all had their proof — the same number as "delivered",
+    // permanently amber, and a customer ringing the branch about
+    // paperwork that was already there.
+    prisma.shipment.count({
+      where: { ...scope, currentStatus: "DELIVERED", pod: { is: null } },
+    }),
+    listPortalShipments(session, { take: 5 }),
     prisma.pickupRequest.count({
       where: {
-        customerId: session.customerId,
+        // The scope helper, not a hand-written `customerId`. It is the one
+        // that throws on a blank account rather than counting the network's
+        // pickups, and this was the single portal read not going through it.
+        ...customerOwnedFilter(session),
         status: { in: ["REQUESTED", "ASSIGNED", "IN_PROGRESS"] },
       },
     }),
@@ -128,7 +159,7 @@ export type PortalShipmentRow = {
 
 export type PortalShipmentQuery = {
   q?: string;
-  group?: keyof typeof STATUS_GROUPS;
+  group?: PortalGroup;
   page?: number;
   take?: number;
 };
@@ -143,20 +174,41 @@ export async function listPortalShipments(
   const page = Math.max(1, query.page ?? 1);
   const q = query.q?.trim();
 
+  /*
+    ── Why this is an `AND` and not a spread ────────────────────────────
+
+    The comment that used to sit here said the account pin could not be
+    overwritten because nothing below writes `consignorId`. That was true
+    and beside the point. `customerShipmentFilter` returns an `OR` of its
+    own for a sub-user restricted to particular plants — and the search
+    below writes an `OR` too. Spread into one literal, the second key won:
+    the account pin survived, so nothing leaked between customers, but the
+    plant restriction was silently discarded. A plant manager who typed
+    anything at all into the search box saw the whole group's traffic,
+    which is the one thing `visibleBranchIds` exists to prevent.
+
+    The same collision was found the same day on `/shipments` and on
+    `/hub/weigh`. `src/server/repositories/scope.test.ts` now reads the
+    source for it, which is how this one was caught.
+  */
   const where = {
-    // Spread first, then narrow. The account pin is never overwritten
-    // because nothing below writes `consignorId`.
-    ...customerShipmentFilter(session),
-    ...(query.group ? { currentStatus: { in: STATUS_GROUPS[query.group] } } : {}),
-    ...(q
-      ? {
-          OR: [
-            { lrNumber: { contains: q, mode: "insensitive" as const } },
-            { customerReference: { contains: q, mode: "insensitive" as const } },
-            { consigneeName: { contains: q, mode: "insensitive" as const } },
-          ],
-        }
-      : {}),
+    AND: [
+      customerShipmentFilter(session),
+      ...(query.group
+        ? [{ currentStatus: { in: PORTAL_GROUPS[query.group] } }]
+        : []),
+      ...(q
+        ? [
+            {
+              OR: [
+                { lrNumber: { contains: q, mode: "insensitive" as const } },
+                { customerReference: { contains: q, mode: "insensitive" as const } },
+                { consigneeName: { contains: q, mode: "insensitive" as const } },
+              ],
+            },
+          ]
+        : []),
+    ],
   };
 
   const [rows, total] = await Promise.all([

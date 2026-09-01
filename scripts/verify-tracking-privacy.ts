@@ -99,6 +99,10 @@ async function run(BASE: string) {
           branch: { select: { code: true, name: true } },
           user: { select: { name: true } },
           reasonCode: { select: { code: true, name: true } },
+          // `ShipmentEvent` carries `vehicleId` and `tripId` as bare
+          // columns — the tracking tables are deliberately decoupled from
+          // the operational ones — so the plate and the trip number are
+          // resolved separately below.
         },
       },
     },
@@ -144,7 +148,86 @@ async function run(BASE: string) {
     if (event.branch?.code) secrets.push(["event branch code", event.branch.code]);
     if (event.remarks) secrets.push(["internal remarks", event.remarks]);
     if (event.reasonCode?.code) secrets.push(["reason code", event.reasonCode.code]);
+
+    // ── What tracking adds to this log ──────────────────────
+    //
+    // A GPS device id is the worst of these: it is the identifier a
+    // competitor would hand to the telematics vendor, and it is stamped on
+    // every automatic arrival. The vehicle's plate and the trip number are
+    // the line-haul plan — which truck runs which lane, on what schedule —
+    // and the coordinates on a fence crossing are the yard itself.
+    if (event.deviceId) secrets.push(["GPS device id", event.deviceId]);
+    if (event.latitude != null) {
+      secrets.push(["event latitude", Number(event.latitude).toFixed(4)]);
+    }
+    if (event.longitude != null) {
+      secrets.push(["event longitude", Number(event.longitude).toFixed(4)]);
+    }
+
+    // The payload a fence crossing carries: the fence's own name — which
+    // embeds the branch — the adapter code, and, on a movement typed by
+    // hand, the name of the person who typed it.
+    const payload =
+      event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : {};
+
+    for (const [key, label] of [
+      ["geofence", "geofence name"],
+      ["trip", "trip number in payload"],
+      ["provider", "telematics adapter code"],
+      ["enteredBy", "name of the person who typed the movement"],
+    ] as const) {
+      const value = payload[key];
+      if (typeof value === "string") secrets.push([label, value]);
+    }
   }
+
+  // The vehicles and trips this consignment's own events name. Resolved by
+  // id because `ShipmentEvent` holds no relation to either.
+  const vehicleIds = [
+    ...new Set(
+      shipment.events
+        .map((event) => event.vehicleId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const tripIds = [
+    ...new Set(
+      shipment.events
+        .map((event) => event.tripId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+
+  if (vehicleIds.length > 0) {
+    const vehicles = await prisma.vehicle.findMany({
+      where: { id: { in: vehicleIds } },
+      select: { registrationNumber: true, gpsDeviceId: true },
+    });
+    for (const vehicle of vehicles) {
+      secrets.push(["vehicle registration", vehicle.registrationNumber]);
+      if (vehicle.gpsDeviceId) {
+        secrets.push(["vehicle's GPS device id", vehicle.gpsDeviceId]);
+      }
+    }
+  }
+
+  if (tripIds.length > 0) {
+    const trips = await prisma.trip.findMany({
+      where: { id: { in: tripIds } },
+      select: { number: true },
+    });
+    for (const trip of trips) secrets.push(["trip number", trip.number]);
+  }
+
+  // Every fence this carrier has drawn. A fence name is "Delhi Hub — site":
+  // the branch, and the fact that it is a hub, in one string.
+  const fences = await prisma.geofence.findMany({
+    take: 20,
+    select: { name: true },
+  });
+  for (const fence of fences) secrets.push(["geofence name", fence.name]);
 
   const seen = new Set<string>();
   let leaks = 0;

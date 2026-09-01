@@ -190,6 +190,43 @@ export async function bookShipment(
       return { error: "You can only book at a branch you work at." };
     }
 
+    /**
+     * The account being billed, if one was named.
+     *
+     * The picker is scoped — `page.tsx` filters the customer list by
+     * `branchScope` — but `consignorId` arrives as form data like anything
+     * else, and `createBooking` only asks whether the account can carry the
+     * charge, never whose account it is. So posting another branch's
+     * customer id billed that branch's credit account for freight it never
+     * handed over, and the consignment then showed on that customer's
+     * portal. The same reasoning as the origin branch above: checked here
+     * because this is the only caller where a person picks.
+     */
+    if (data.consignorId) {
+      const consignor = await prisma.customer.findUnique({
+        where: { id: data.consignorId },
+        select: { branchId: true },
+      });
+      if (!consignor) {
+        return {
+          error: "That customer account no longer exists.",
+          fieldErrors: { consignorId: "Not found" },
+        };
+      }
+      // An account with no owning branch belongs to the network, and only a
+      // network-scoped user sees it — the same rule `/customers` applies on
+      // both its list and its detail page.
+      const inScope =
+        actor.branchIds === null ||
+        (consignor.branchId !== null && coversBranch(actor, consignor.branchId));
+      if (!inScope) {
+        return {
+          error: "That customer account is outside the branches you cover.",
+          fieldErrors: { consignorId: "Out of scope" },
+        };
+      }
+    }
+
     const charges = await readCharges(formData);
 
     const result = await createBooking(

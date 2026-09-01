@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { requirePermission, can } from "@/lib/auth/session";
+import { redirect } from "next/navigation";
+import { requireUser, can, canAny } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { ScanConsole, type ScanTypeOption } from "./scan-console";
@@ -11,10 +12,15 @@ export const metadata: Metadata = { title: "Scan console" };
 export const dynamic = "force-dynamic";
 
 /**
- * The dock screen. Guarded on `scan.inbound` because that is the least
- * privileged thing this console can do; each individual mode is offered
- * only to a user who holds its own permission, and the server action
- * re-checks before writing anything.
+ * The dock screen.
+ *
+ * Guarded on holding *any* of the five permissions its modes need, not on
+ * `scan.inbound`. `scan.inbound` is not the least privileged thing this
+ * console does, it is simply one of them — and gating on it locked the
+ * dispatch manager out of the only screen in the product that offers an
+ * outbound scan, which is a permission their role is granted and could
+ * not use anywhere. Each mode is still offered only to somebody who holds
+ * its own permission, and the server action re-checks before writing.
  */
 const ALL_MODES: Array<ScanTypeOption & { permission: string }> = [
   {
@@ -60,7 +66,11 @@ export default async function ScanPage({
 }: {
   searchParams: Promise<{ branch?: string }>;
 }) {
-  const user = await requirePermission("scan.inbound");
+  const user = await requireUser();
+  if (!canAny(user, [...new Set(ALL_MODES.map((mode) => mode.permission))])) {
+    redirect("/forbidden");
+  }
+
   const { branch: branchParam } = await searchParams;
 
   const branches = await prisma.branch.findMany({

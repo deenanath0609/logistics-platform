@@ -106,7 +106,7 @@ export default async function CustomerDetailPage({
     notFound();
   }
 
-  const [shipments, cities, branches] = await Promise.all([
+  const [shipments, shipmentCount, cities, branches] = await Promise.all([
     prisma.shipment.findMany({
       where: { consignorId: id, deletedAt: null },
       orderBy: { bookedAt: "desc" },
@@ -123,6 +123,10 @@ export default async function CustomerDetailPage({
         destinationBranch: { select: { code: true } },
       },
     }),
+    // The table below shows the last ten. The stat says how many there are
+    // — it used to say `shipments.length`, so every account that had ever
+    // been booked against more than ten times reported exactly "10".
+    prisma.shipment.count({ where: { consignorId: id, deletedAt: null } }),
     prisma.city.findMany({
       where: { isActive: true },
       orderBy: { name: "asc" },
@@ -153,7 +157,7 @@ export default async function CustomerDetailPage({
     { label: "Type", value: customer.type.replace("_", " ") },
     { label: "Terms", value: customer.paymentTerm },
     { label: "Addresses", value: String(customer.addresses.length) },
-    { label: "Shipments", value: String(shipments.length) },
+    { label: "Shipments", value: String(shipmentCount) },
   ];
 
   return (

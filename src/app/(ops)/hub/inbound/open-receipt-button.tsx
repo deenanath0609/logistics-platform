@@ -52,7 +52,14 @@ export function OpenReceiptButton({
     const formData = new FormData(event.currentTarget);
 
     startTransition(async () => {
-      setState(await openInboundReceipt(IDLE, formData));
+      // A successful open redirects to the new receipt, and Next resolves
+      // a redirecting action with nothing at all — so the result is read
+      // as possibly absent rather than spread into state blindly.
+      const result: OpenReceiptState | undefined = await openInboundReceipt(
+        IDLE,
+        formData,
+      );
+      setState(result ?? IDLE);
     });
   }
 

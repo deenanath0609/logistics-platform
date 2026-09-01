@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useState, useTransition } from "react";
 import { Loader2, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,10 +46,38 @@ export function ProviderDialog({
   const [mode, setMode] = useState<"poll" | "webhook">(
     (provider?.mode as "poll" | "webhook") ?? "poll",
   );
-  const [state, formAction, pending] = useActionState(saveProviderAction, IDLE);
+  const [state, setState] = useState<ProviderState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  /**
+   * Submitted by hand rather than through `<form action={…}>`.
+   *
+   * React 19 resets an uncontrolled form the moment a form action returns.
+   * Seven fields here are uncontrolled, two of them secrets: a base URL
+   * with a missing scheme used to come back as "that is not a valid URL"
+   * over a form that had just discarded the name, the URL, the interval and
+   * both keys — so the operator retyped an API key they had already pasted
+   * once. Same shape as `components/data/master-form.tsx`.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      setState(await saveProviderAction(IDLE, formData));
+    });
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (next) {
+      setState(IDLE);
+      setMode((provider?.mode as "poll" | "webhook") ?? "poll");
+    }
+    setOpen(next);
+  }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger
         render={
           provider ? (
@@ -65,7 +93,7 @@ export function ProviderDialog({
         }
       />
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <form action={formAction}>
+        <form onSubmit={submit}>
           <input type="hidden" name="id" value={provider?.id ?? ""} />
           <input type="hidden" name="mode" value={mode} />
 
@@ -250,10 +278,29 @@ export function ToggleProvider({ provider }: { provider: ProviderSummary }) {
 
 export function RotateSecret({ provider }: { provider: ProviderSummary }) {
   const [open, setOpen] = useState(false);
-  const [state, formAction, pending] = useActionState(rotateWebhookSecretAction, IDLE);
+  const [state, setState] = useState<ProviderState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  // One field, but it is a secret somebody has just pasted from the
+  // vendor's console, and a form action returning "too short" would empty
+  // it. See the note on `ProviderDialog`.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      setState(await rotateWebhookSecretAction(IDLE, formData));
+    });
+  }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setState(IDLE);
+        setOpen(next);
+      }}
+    >
       <DialogTrigger
         render={
           <Button variant="ghost" size="sm">
@@ -262,7 +309,7 @@ export function RotateSecret({ provider }: { provider: ProviderSummary }) {
         }
       />
       <DialogContent className="sm:max-w-md">
-        <form action={formAction}>
+        <form onSubmit={submit}>
           <input type="hidden" name="id" value={provider.id} />
           <DialogHeader>
             <DialogTitle>Rotate the shared secret</DialogTitle>

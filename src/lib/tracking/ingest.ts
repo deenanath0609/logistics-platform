@@ -330,14 +330,26 @@ async function ingestForVehicle(
 // Persist
 // ────────────────────────────────────────────────────────────
 
-/** Returns false when the unique index rejected this fix as a duplicate. */
+/**
+ * Returns false when the unique index rejected this fix as a duplicate.
+ *
+ * `createMany({ skipDuplicates })` rather than `create` inside a try/catch,
+ * for one reason that only shows up in a log file. A duplicate here is the
+ * *ordinary* case — a vendor resend, a webhook retry, two pollers racing —
+ * and letting it surface as a thrown P2002 made Prisma print a multi-line
+ * `prisma:error … Unique constraint failed` for every one of them. A
+ * worker log in which the most common line is an error teaches whoever
+ * reads it that errors do not matter, which is the opposite of what a log
+ * is for. The database does exactly the same work; it simply reports the
+ * conflict as a count of zero instead of as an exception.
+ */
 async function persistPing(
   ping: NormalizedPing,
   vehicleId: string | null,
 ): Promise<boolean> {
-  try {
-    await prisma.gpsPing.create({
-      data: {
+  const { count } = await prisma.gpsPing.createMany({
+    data: [
+      {
         // A ping arrives before anything is known about it — `vehicleId` is
         // null for a device nobody has fitted yet — so the tenant is the one
         // whose poll or webhook brought the fix in.
@@ -354,23 +366,11 @@ async function persistPing(
         provider: ping.provider,
         providerRef: ping.providerRef ?? undefined,
       },
-    });
-    return true;
-  } catch (error) {
-    // The index doing its job, not a failure. A vendor resend, a webhook
-    // retry, or two pollers racing all land here.
-    if (isUniqueViolation(error)) return false;
-    throw error;
-  }
-}
+    ],
+    skipDuplicates: true,
+  });
 
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "P2002"
-  );
+  return count > 0;
 }
 
 // ────────────────────────────────────────────────────────────

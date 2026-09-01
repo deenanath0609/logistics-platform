@@ -28,20 +28,30 @@ export default async function WeighPage({
       deletedAt: null,
       cancelledAt: null,
       currentStatus: { in: weighable },
-      ...anyBranchScope(user, [
-        "originBranchId",
-        "currentBranchId",
-        "destinationBranchId",
-      ]),
-      ...(q
-        ? {
-            OR: [
-              { lrNumber: { contains: q, mode: "insensitive" as const } },
-              { consigneeName: { contains: q, mode: "insensitive" as const } },
-              { consignorName: { contains: q, mode: "insensitive" as const } },
-            ],
-          }
-        : {}),
+      // Both of these produce an `OR`, and two `OR` keys cannot share one
+      // object — the second silently replaces the first. Spread side by
+      // side, as they were, the branch filter vanished the moment anybody
+      // typed in the search box, and this list answered from the whole
+      // network. `AND` is a list, so both survive. The same fault was found
+      // and fixed on `/shipments`; its docblock explains it in full.
+      AND: [
+        anyBranchScope(user, [
+          "originBranchId",
+          "currentBranchId",
+          "destinationBranchId",
+        ]),
+        ...(q
+          ? [
+              {
+                OR: [
+                  { lrNumber: { contains: q, mode: "insensitive" as const } },
+                  { consigneeName: { contains: q, mode: "insensitive" as const } },
+                  { consignorName: { contains: q, mode: "insensitive" as const } },
+                ],
+              },
+            ]
+          : []),
+      ],
     },
     orderBy: { bookedAt: "desc" },
     take: 25,
