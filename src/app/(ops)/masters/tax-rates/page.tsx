@@ -62,6 +62,7 @@ const FIELDS: FieldDef[] = [
     name: "isReverseCharge",
     label: "Reverse charge",
     help: "GTA services usually are — the recipient pays the tax, and the invoice must say so.",
+    defaultOn: false,
   },
   { type: "switch", name: "isActive", label: "Active" },
 ];

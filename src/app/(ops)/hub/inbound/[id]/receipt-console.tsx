@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Loader2, PackageX } from "lucide-react";
 import { ScanInput } from "@/components/hub/scan-input";
@@ -64,10 +64,29 @@ export function ReceiptConsole({
   const [items, setItems] = useState<ScanFeedItem[]>([]);
   const [excessBarcodes, setExcessBarcodes] = useState<string[]>([]);
   const [closeOpen, setCloseOpen] = useState(false);
-  const [closeState, closeAction, closing] = useActionState(
-    closeInboundReceipt,
-    IDLE,
-  );
+  const [closeState, setCloseState] = useState<CloseReceiptState>(IDLE);
+  const [closing, startClosing] = useTransition();
+
+  /**
+   * Closing, submitted by hand.
+   *
+   * `<form action={…}>` in React 19 resets the form as soon as the action
+   * returns, and this one carries the seal answer and the remarks the
+   * receiving clerk writes for the dispatching branch. A refusal — the
+   * receipt already closed by a colleague, a permission the role turns out
+   * not to hold — threw both away and left an empty dialog behind an
+   * error message.
+   */
+  function submitClose(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startClosing(async () => {
+      const result = await closeInboundReceipt(IDLE, formData);
+      setCloseState(result);
+      if (result.ok) setCloseOpen(false);
+    });
+  }
 
   const deviceId = useRef<string>(
     typeof window === "undefined"
@@ -281,7 +300,7 @@ export function ReceiptConsole({
             </DialogTrigger>
 
             <DialogContent className="sm:max-w-md">
-              <form action={closeAction}>
+              <form onSubmit={submitClose}>
                 <input type="hidden" name="receiptId" value={receiptId} />
 
                 <DialogHeader>

@@ -1,4 +1,5 @@
 import { prisma, tenantTransaction } from "@/lib/prisma";
+import { coversBranch } from "@/server/repositories/scope";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { enqueueOutbox } from "@/server/services/outbox";
 import { recordAudit } from "@/server/services/audit";
@@ -170,6 +171,41 @@ export type ActionResult =
   | { ok: true; message: string }
   | { ok: false; error: string };
 
+/** The shape every write below needs to decide whether the actor may act. */
+type ScopedException = {
+  branchId: string | null;
+  ownerBranchId: string | null;
+  assignedToId: string | null;
+};
+
+/**
+ * May this person work this exception?
+ *
+ * The same rule the tower's list and detail screens read with: your
+ * branches, or anything routed to you personally wherever it was raised —
+ * a Delhi shortage handed to the claims desk in Mumbai is theirs to work.
+ *
+ * It belongs here rather than only on the page. The screens were scoped
+ * and these writes were not, so a branch manager who could not *see* a
+ * sister branch's exception could still acknowledge it, reassign it, or
+ * close it with a resolution note by posting its id — and the audit
+ * trail would show a Gurugram manager resolving a Jaipur shortage.
+ */
+export function canWorkException(
+  user: SessionUser,
+  exception: ScopedException,
+): boolean {
+  if (user.branchIds === null) return true;
+  if (exception.assignedToId === user.id) return true;
+  if (exception.ownerBranchId && coversBranch(user, exception.ownerBranchId)) {
+    return true;
+  }
+  return Boolean(exception.branchId && coversBranch(user, exception.branchId));
+}
+
+const OUT_OF_SCOPE =
+  "That exception belongs to another branch and is not assigned to you.";
+
 /** A note on the thread, changing nothing else. */
 export async function addExceptionNote(
   exceptionId: string,
@@ -178,6 +214,15 @@ export async function addExceptionNote(
 ): Promise<ActionResult> {
   const trimmed = note.trim();
   if (!trimmed) return { ok: false, error: "Say something." };
+
+  const exception = await prisma.exception.findUnique({
+    where: { id: exceptionId },
+    select: { branchId: true, ownerBranchId: true, assignedToId: true },
+  });
+  if (!exception) return { ok: false, error: "That exception is gone." };
+  if (!canWorkException(actor, exception)) {
+    return { ok: false, error: OUT_OF_SCOPE };
+  }
 
   await prisma.exceptionAction.create({
     data: {
@@ -199,9 +244,18 @@ export async function assignException(
 ): Promise<ActionResult> {
   const exception = await prisma.exception.findUnique({
     where: { id: exceptionId },
-    select: { id: true, number: true, assignedToId: true, ownerBranchId: true },
+    select: {
+      id: true,
+      number: true,
+      assignedToId: true,
+      ownerBranchId: true,
+      branchId: true,
+    },
   });
   if (!exception) return { ok: false, error: "That exception is gone." };
+  if (!canWorkException(actor, exception)) {
+    return { ok: false, error: OUT_OF_SCOPE };
+  }
 
   const assignee = assignedToId
     ? await prisma.user.findUnique({
@@ -277,10 +331,15 @@ export async function transitionException(
       number: true,
       status: true,
       ownerBranchId: true,
+      branchId: true,
+      assignedToId: true,
       resolution: true,
     },
   });
   if (!exception) return { ok: false, error: "That exception is gone." };
+  if (!canWorkException(actor, exception)) {
+    return { ok: false, error: OUT_OF_SCOPE };
+  }
 
   const transition = transitionTo(exception.status, input.to);
   if (!transition) {

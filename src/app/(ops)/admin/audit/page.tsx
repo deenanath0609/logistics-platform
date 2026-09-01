@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { requirePermission } from "@/lib/auth/session";
+import { branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState, Pagination } from "@/components/data/data-shell";
 import { SearchInput } from "@/components/data/search-input";
@@ -51,11 +52,24 @@ export default async function AuditPage({
     page?: string;
   }>;
 }) {
-  await requirePermission("audit.read");
+  const user = await requirePermission("audit.read");
   const { q, entity, action, page: pageParam } = await searchParams;
   const page = Math.max(1, Number(pageParam ?? 1) || 1);
 
   const where = {
+    // `audit.read` is not a sensitive permission, so it falls into the
+    // "every read" bundle that Branch Manager holds — and this page had no
+    // branch filter at all. A branch manager could therefore read the whole
+    // carrier's trail: role grants, user creations, rate overrides and
+    // cancellations at every other branch, with the before/after values on
+    // each row. Every other listing in the product scopes; this one did not.
+    //
+    // `recordAudit` stamps `branchId` from the actor's home branch when the
+    // caller does not name one, so a scoped reader sees the rows their own
+    // branches caused. Rows with no branch at all are network-level acts and
+    // stay with the network-scoped roles — which is what `branchScope`'s
+    // `{ in: [...] }` already says, since it does not match null.
+    ...branchScope(user, "branchId"),
     ...(entity ? { entity } : {}),
     ...(action ? { action: action as never } : {}),
     ...(q
@@ -78,7 +92,11 @@ export default async function AuditPage({
       include: { user: { select: { name: true, mobile: true } } },
     }),
     prisma.auditLog.count({ where }),
+    // Scoped too: the filter list is derived from the rows, so an unscoped
+    // one would name entities this reader is not allowed to see and offer a
+    // filter that returns nothing.
     prisma.auditLog.findMany({
+      where: branchScope(user, "branchId"),
       distinct: ["entity"],
       select: { entity: true },
       orderBy: { entity: "asc" },

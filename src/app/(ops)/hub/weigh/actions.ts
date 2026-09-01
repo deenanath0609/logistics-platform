@@ -2,8 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import { prisma } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
-import { captureRevisedWeight } from "@/lib/hub/weight";
+import { captureRevisedWeight, previewRevisedWeight } from "@/lib/hub/weight";
 
 export type WeighState = {
   error?: string;
@@ -100,6 +101,7 @@ async function capture(formData: FormData): Promise<WeighState> {
 
   revalidatePath("/hub/weigh");
   revalidatePath(`/shipments/${parsed.data.shipmentId}`);
+  if (result.exceptionNumber) revalidatePath("/exceptions");
 
   return {
     ok: true,
@@ -120,4 +122,86 @@ async function capture(formData: FormData): Promise<WeighState> {
     },
     warnings: result.warnings,
   };
+}
+
+export type PreviewState =
+  | {
+      ok: true;
+      lrNumber: string;
+      fromAmount: string;
+      toAmount: string;
+      deltaAmount: string;
+      deltaPercent: string;
+      chargeableWeight: string;
+      exceedsTolerance: boolean;
+      tolerancePercent: string;
+      unrated: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * What this reading would do to the bill, without doing it.
+ *
+ * `previewRevisedWeight` has existed since the reweigh work and had no
+ * caller: the screen offered one button, and pressing it repriced the
+ * consignment, raised the debit note and told the customer in a single
+ * irreversible step. A clerk who fat-fingered 700 for 70 found out from
+ * the consignor. This is the look-before-you-commit the service was
+ * written for — it prices without applying anything to the consignment.
+ */
+export async function previewWeight(
+  input: { shipmentId: string; actualWeight: string | null; chargeableWeight: string | null },
+): Promise<PreviewState> {
+  try {
+    const actor = await authorize("weight.capture");
+
+    const parsed = schema
+      .omit({ branchId: true, reference: true })
+      .safeParse(input);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "Enter a weight in kilograms.",
+      };
+    }
+    if (!parsed.data.actualWeight && !parsed.data.chargeableWeight) {
+      return { ok: false, error: "Enter what the scale read." };
+    }
+
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: parsed.data.shipmentId },
+      select: { lrNumber: true },
+    });
+    if (!shipment) return { ok: false, error: "That consignment no longer exists." };
+
+    const result = await previewRevisedWeight(
+      {
+        shipmentId: parsed.data.shipmentId,
+        actualWeight: parsed.data.actualWeight,
+        chargeableWeight: parsed.data.chargeableWeight,
+      },
+      actor,
+    );
+
+    if (!result.ok) return { ok: false, error: result.error };
+
+    return {
+      ok: true,
+      lrNumber: shipment.lrNumber,
+      fromAmount: inr(result.previousTotal.toFixed(2)),
+      toAmount: inr(result.revisedTotal.toFixed(2)),
+      deltaAmount: inr(result.delta.toFixed(2)),
+      deltaPercent: result.deltaPercent.toFixed(2),
+      chargeableWeight: result.chargeableWeight.toFixed(3),
+      exceedsTolerance: result.exceedsTolerance,
+      tolerancePercent: result.tolerancePercent.toFixed(2),
+      unrated: result.unrated,
+    };
+  } catch (error) {
+    if (error instanceof PermissionError) {
+      return { ok: false, error: "You do not have permission to capture weight." };
+    }
+    console.error("[hub/weigh preview]", error);
+    return { ok: false, error: "The price could not be checked. Try again." };
+  }
 }

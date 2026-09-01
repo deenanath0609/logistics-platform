@@ -164,6 +164,14 @@ export async function recheckPortalBulkBatch(
 ): Promise<BulkState> {
   try {
     const session = await authorizeCustomer();
+    // Re-checking rewrites every staged row's status and the batch's
+    // tallies. It reads like a refresh and it is a write, which is how it
+    // came to be the one action here with no role check while the Re-check
+    // button beside it stayed enabled for a VIEWER.
+    if (!canWrite(session)) {
+      return { error: "Your login can view this file but not re-check it." };
+    }
+
     const batchId = String(formData.get("batchId") ?? "");
     if (!batchId) return { error: "That batch could not be identified." };
 

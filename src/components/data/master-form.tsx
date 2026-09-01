@@ -56,6 +56,34 @@ export type FieldDef =
       name: string;
       label: string;
       help?: string;
+      /**
+       * Where the switch starts on a *new* record. Editing always reads the
+       * record.
+       *
+       * It used to be "on" for every switch there is, because `isActive`
+       * wants that and nothing else was considered. `isActive` is not the
+       * only boolean on these forms: a new PIN code arrived out of delivery
+       * area, a new package type arrived fragile, a new tax rate arrived
+       * under reverse charge, and a new reason code demanded a photograph
+       * and remarks and notified both parties. Each of those is a real
+       * operational consequence that nobody chose, on a switch the person
+       * filling the form never touched.
+       *
+       * Left defaulting to `true` so the flags that genuinely mean "on
+       * unless you say otherwise" keep their behaviour without every call
+       * site in the product restating it; the ones that do not say so.
+       */
+      defaultOn?: boolean;
+    }
+  | {
+      /**
+       * A value the action needs and a person must not retype.
+       *
+       * `customerId` on the address form was rendered as a text input
+       * labelled "customerId", with a cuid in it, next to "Landmark".
+       */
+      type: "hidden";
+      name: string;
     };
 
 const EMPTY: ActionState = {};
@@ -120,7 +148,17 @@ export function MasterFormDialog({
   // Driving this from useTransition rather than useActionState keeps the
   // "close on success" decision at the call site instead of in an effect,
   // which would fire a second render pass every time the action returns.
-  function submit(formData: FormData) {
+  //
+  // Submitted by hand rather than through `<form action={…}>`: React 19
+  // resets an uncontrolled form the moment a form action returns. Every
+  // field here is uncontrolled, and this dialog carries eighteen of them on
+  // the customer screen — so a mistyped GSTIN used to answer "check the
+  // highlighted fields" over a form that had just been emptied, with the
+  // highlight pointing at a blank box.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action(EMPTY, formData);
       setState(result);
@@ -162,7 +200,7 @@ export function MasterFormDialog({
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
 
-        <form id={formId} action={submit} className="flex flex-col gap-4">
+        <form id={formId} onSubmit={submit} className="flex flex-col gap-4">
           {record?.id ? (
             <input type="hidden" name="id" value={String(record.id)} />
           ) : null}
@@ -172,6 +210,17 @@ export function MasterFormDialog({
               const id = `${formId}-${field.name}`;
               const error = state.fieldErrors?.[field.name];
               const half = "half" in field && field.half;
+
+              if (field.type === "hidden") {
+                return (
+                  <input
+                    key={field.name}
+                    type="hidden"
+                    name={field.name}
+                    value={valueOf(record, field.name)}
+                  />
+                );
+              }
 
               return (
                 <div
@@ -201,7 +250,9 @@ export function MasterFormDialog({
                         name={field.name}
                         value="true"
                         defaultChecked={
-                          record ? valueOf(record, field.name) === "true" : true
+                          record
+                            ? valueOf(record, field.name) === "true"
+                            : (field.defaultOn ?? true)
                         }
                       />
                     </div>

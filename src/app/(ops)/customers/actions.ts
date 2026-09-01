@@ -174,6 +174,18 @@ export async function updateCustomer(
     }
 
     const data = parsed.data;
+
+    // Both ends of the move, not just the one it came from. `createCustomer`
+    // has always checked the branch it is planting an account in; this only
+    // checked the branch the account was already in, so an editor could push
+    // an account they cover into a branch they do not — off their own list
+    // and onto somebody else's, with no way back.
+    if (data.branchId && !coversBranch(actor, data.branchId)) {
+      return {
+        error: "That branch is outside your scope.",
+        fieldErrors: { branchId: "Out of scope" },
+      };
+    }
     const creditChanged =
       String(before.creditLimit ?? "") !== String(data.creditLimit ?? "") ||
       before.creditDays !== data.creditDays ||

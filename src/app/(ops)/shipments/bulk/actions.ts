@@ -3,7 +3,8 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { authorize, PermissionError } from "@/lib/auth/session";
+import { prisma } from "@/lib/prisma";
+import { authorize, PermissionError, type SessionUser } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
 import { COLUMN_BY_FIELD } from "@/lib/bulk/columns";
 import {
@@ -38,6 +39,74 @@ function describe(error: unknown, fallback: string): string {
   }
   console.error("[bulk]", error);
   return fallback;
+}
+
+/**
+ * The batch, if it is one this person may touch.
+ *
+ * `/shipments/bulk/[batchId]` checks `coversBranch` before it renders, and
+ * for a while that was the only place it was checked. Every action below
+ * takes a `batchId` straight off a posted form, so a clerk scoped to one
+ * branch could correct rows in, re-check, book from, or abandon another
+ * branch's batch by posting its id — no screen needed, and the consignments
+ * would be created against that other branch. The guard belongs beside the
+ * write, not beside the render.
+ *
+ * Returns the batch rather than a boolean so the caller has to have looked
+ * it up, and `customerId` comes back with it — see `stampCustomerBatch`.
+ */
+async function batchInScope(
+  actor: SessionUser,
+  batchId: string,
+): Promise<
+  | { ok: true; batch: { id: string; branchId: string; customerId: string | null } }
+  | { ok: false; error: string }
+> {
+  if (!batchId) return { ok: false, error: "That batch could not be identified." };
+
+  const batch = await prisma.bulkUploadBatch.findUnique({
+    where: { id: batchId },
+    select: { id: true, branchId: true, customerId: true },
+  });
+
+  if (!batch) return { ok: false, error: "That batch no longer exists." };
+  if (!coversBranch(actor, batch.branchId)) {
+    return { ok: false, error: "That batch is outside the branches you cover." };
+  }
+  return { ok: true, batch };
+}
+
+/**
+ * Attributes consignments booked out of a *customer's* batch to that
+ * customer.
+ *
+ * `commitBatch` is shared and takes no account, so the portal stamps
+ * afterwards — see `stampConsignor` in `lib/portal/bulk.ts`, whose three
+ * safety properties this relies on and repeats: the ids come from this
+ * commit's outcomes, `consignorId: null` is in the WHERE clause so it can
+ * only ever fill a blank, and nothing about the status is touched.
+ *
+ * Without this, a clerk helping a customer over the telephone — "I can see
+ * your file, I'll book the good rows for you" — created consignments with
+ * no consignor. `customerShipmentFilter` pins on that column, so the
+ * customer's own portal showed them nothing at all until somebody happened
+ * to open the batch page and trip the portal's repair-on-read.
+ */
+async function stampCustomerBatch(
+  customerId: string | null,
+  shipmentIds: readonly string[],
+): Promise<void> {
+  if (!customerId || shipmentIds.length === 0) return;
+
+  const ids = [...new Set(shipmentIds)];
+  const CHUNK = 500;
+
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    await prisma.shipment.updateMany({
+      where: { id: { in: ids.slice(i, i + CHUNK) }, consignorId: null },
+      data: { consignorId: customerId },
+    });
+  }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -111,6 +180,9 @@ export async function saveBulkRow(
     });
     if (!parsed.success) return { error: "That row could not be identified." };
 
+    const scoped = await batchInScope(actor, parsed.data.batchId);
+    if (!scoped.ok) return { error: scoped.error };
+
     // Only declared columns are writable. Anything else in the form is a
     // control field, not data.
     const patch: Record<string, string> = {};
@@ -161,7 +233,9 @@ export async function revalidateBulkBatch(
   try {
     const actor = await authorize("shipment.bulk_upload");
     const batchId = String(formData.get("batchId") ?? "");
-    if (!batchId) return { error: "That batch could not be identified." };
+
+    const scoped = await batchInScope(actor, batchId);
+    if (!scoped.ok) return { error: scoped.error };
 
     const result = await revalidateBatch(batchId, actor);
     if (!result.ok) return { error: result.error };
@@ -191,7 +265,9 @@ export async function commitBulkBatch(
     await authorize("shipment.create");
 
     const batchId = String(formData.get("batchId") ?? "");
-    if (!batchId) return { error: "That batch could not be identified." };
+
+    const scoped = await batchInScope(actor, batchId);
+    if (!scoped.ok) return { error: scoped.error };
 
     const only = String(formData.get("rowNumbers") ?? "").trim();
     const rowNumbers =
@@ -204,6 +280,15 @@ export async function commitBulkBatch(
 
     const result = await commitBatch({ batchId, rowNumbers }, actor);
     if (!result.ok) return { error: result.error };
+
+    // A customer's own file, booked from the counter. See the note on
+    // `stampCustomerBatch`.
+    await stampCustomerBatch(
+      scoped.batch.customerId,
+      result.outcomes
+        .map((outcome) => outcome.shipmentId)
+        .filter((id): id is string => Boolean(id)),
+    );
 
     revalidatePath(`${PATH}/${batchId}`);
     revalidatePath("/shipments");
@@ -246,7 +331,9 @@ export async function abandonBulkBatch(
   try {
     const actor = await authorize("shipment.bulk_upload");
     const batchId = String(formData.get("batchId") ?? "");
-    if (!batchId) return { error: "That batch could not be identified." };
+
+    const scoped = await batchInScope(actor, batchId);
+    if (!scoped.ok) return { error: scoped.error };
 
     await abandonBatch(batchId, actor);
     revalidatePath(PATH);

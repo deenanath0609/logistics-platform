@@ -134,6 +134,12 @@ export type AddToManifestResult = {
   /** LR numbers that could not be added, each with why. */
   rejected: Array<{ lrNumber: string; reason: string }>;
   error?: string;
+  /**
+   * The load after the add, when a vehicle is attached. Returned so the
+   * screen can say "that took the truck over its rated payload" at the
+   * moment it happened rather than at the gate.
+   */
+  load?: Utilisation;
 };
 
 /**
@@ -188,6 +194,8 @@ export async function addShipmentsToManifest(
       chargeableWeight: true,
       actualWeight: true,
       mode: true,
+      currentBranchId: true,
+      currentBranch: { select: { code: true } },
     },
   });
 
@@ -216,6 +224,19 @@ export async function addShipmentsToManifest(
         rejected.push({
           lrNumber: shipment.lrNumber,
           reason: `Is ${shipment.currentStatus.replace(/_/g, " ").toLowerCase()}, not processed — sort it first`,
+        });
+        continue;
+      }
+      // The freight has to be standing where the truck is loading. The
+      // screen only offers consignments at this origin; this is what makes
+      // that hold when the form is bypassed, and it is the difference
+      // between a manifest and a wish.
+      if (shipment.currentBranchId !== manifest.originBranchId) {
+        rejected.push({
+          lrNumber: shipment.lrNumber,
+          reason: shipment.currentBranch
+            ? `Is at ${shipment.currentBranch.code}, not at this manifest's origin`
+            : "Is not at this manifest's origin",
         });
         continue;
       }
@@ -282,7 +303,41 @@ export async function addShipmentsToManifest(
     });
   }
 
-  return { ok: added.length > 0 || rejected.length === 0, added, rejected };
+  return {
+    ok: added.length > 0 || rejected.length === 0,
+    added,
+    rejected,
+    load: added.length > 0 ? await loadOnManifest(manifest.id) : undefined,
+  };
+}
+
+/**
+ * What the assigned vehicle is now carrying, against its rated payload.
+ *
+ * Read back after a change rather than projected forward, so the number in
+ * the message is the number on the screen.
+ */
+export async function loadOnManifest(manifestId: string): Promise<Utilisation> {
+  const manifest = await prisma.manifest.findUnique({
+    where: { id: manifestId },
+    select: {
+      totalWeight: true,
+      trip: {
+        select: {
+          vehicle: { select: { vehicleType: { select: { capacityKg: true } } } },
+        },
+      },
+    },
+  });
+
+  if (!manifest) return utilisation(0, null);
+  return manifestUtilisation(manifest);
+}
+
+/** Reads as a sentence, for a toast or an error. Empty when it is fine. */
+export function overloadNote(load: Utilisation): string {
+  if (load.band !== "OVERLOADED" || load.headroomKg === null) return "";
+  return `${load.percent}% of the vehicle's rated payload — ${Math.abs(load.headroomKg)} kg over.`;
 }
 
 export async function removeShipmentFromManifest(
@@ -360,7 +415,10 @@ export async function removeShipmentFromManifest(
 export async function closeManifest(
   input: { manifestId: string },
   actor: SessionUser,
-): Promise<{ ok: true; number: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; number: string; load: Utilisation; overload: string }
+  | { ok: false; error: string }
+> {
   if (!can(actor, "manifest.close")) {
     return { ok: false, error: "You do not have permission to close manifests." };
   }
@@ -392,6 +450,12 @@ export async function closeManifest(
     data: { status: "CLOSED", closedAt: new Date(), closedById: actor.id },
   });
 
+  // The last moment anybody looks at this load before it is somebody
+  // else's problem. An overload is recorded rather than merely coloured,
+  // so "we did not know the truck was over" is not available later.
+  const load = await loadOnManifest(manifest.id);
+  const overload = overloadNote(load);
+
   await recordAudit({
     user: actor,
     action: "STATUS_CHANGE",
@@ -400,11 +464,17 @@ export async function closeManifest(
     entityRef: manifest.number,
     branchId: manifest.originBranchId,
     before: { status: "DRAFT" },
-    after: { status: "CLOSED" },
-    reason: "Closed for dispatch",
+    after: {
+      status: "CLOSED",
+      utilisationPercent: load.percent,
+      overloaded: load.band === "OVERLOADED",
+    },
+    reason: overload
+      ? `Closed for dispatch over the rated payload — ${overload}`
+      : "Closed for dispatch",
   });
 
-  return { ok: true, number: manifest.number };
+  return { ok: true, number: manifest.number, load, overload };
 }
 
 /**
@@ -500,6 +570,7 @@ export async function setManifestTrip(
         number: true,
         status: true,
         originBranchId: true,
+        destinationBranchId: true,
         ftlShipmentId: true,
       },
     });
@@ -516,6 +587,15 @@ export async function setManifestTrip(
     }
     if (trip.originBranchId !== manifest.originBranchId) {
       return { ok: false, error: `${trip.number} does not start at this manifest's origin.` };
+    }
+    // A manifest is the paperwork for one leg, and the leg is the trip. A
+    // vehicle running to Jaipur cannot carry the Mumbai manifest, however
+    // convenient the truck is.
+    if (trip.destinationBranchId !== manifest.destinationBranchId) {
+      return {
+        ok: false,
+        error: `${trip.number} does not end where this manifest is going.`,
+      };
     }
   }
 

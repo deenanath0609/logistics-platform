@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { authorize, PermissionError } from "@/lib/auth/session";
+import { coversBranch } from "@/server/repositories/scope";
 import { createBooking, type BookingChargeInput } from "@/lib/shipment/booking";
 
 export type BookingFormState = {
@@ -156,14 +157,43 @@ export async function bookShipment(
     }
 
     const data = parsed.data;
+
+    /**
+     * The origin is the one branch on this form the clerk does not get to
+     * choose freely.
+     *
+     * `originBranchId` arrives as form data, and the select used to list
+     * every branch in the network, so a Gurugram booking clerk could raise
+     * a consignment whose origin is the Jaipur hub. That is not a harmless
+     * mislabel: the shipment appears on Jaipur's list as freight they are
+     * expected to have taken in, the pickup goes to the Gurugram address,
+     * and no scan will ever reconcile the two. The destination stays open —
+     * a consignment is addressed to wherever it is going.
+     *
+     * Checked here rather than in `createBooking` because the service has
+     * four callers and only this one lets a person pick. The portal derives
+     * both branches from the account and the PIN codes, the bulk importer
+     * checks the file's rows, and the partner API books against the key.
+     */
+    if (!coversBranch(actor, data.originBranchId)) {
+      return {
+        error: "You can only book at a branch you work at.",
+        fieldErrors: { originBranchId: "Outside the branches you cover" },
+      };
+    }
+
+    // Where the booking was *taken*, which is this clerk's own counter.
+    // Falling back to the origin is for a network-scoped user with no home
+    // branch, and that origin has just been checked.
+    const bookingBranchId = actor.primaryBranch?.id ?? data.originBranchId;
+    if (!coversBranch(actor, bookingBranchId)) {
+      return { error: "You can only book at a branch you work at." };
+    }
+
     const charges = await readCharges(formData);
 
     const result = await createBooking(
-      {
-        ...data,
-        bookingBranchId: actor.primaryBranch?.id ?? data.originBranchId,
-        charges,
-      },
+      { ...data, bookingBranchId, charges },
       actor,
     );
 

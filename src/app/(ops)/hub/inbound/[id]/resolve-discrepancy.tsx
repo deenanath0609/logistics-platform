@@ -39,7 +39,15 @@ export function ResolveDiscrepancyButton({
 
   // The dialog closes from the action's result rather than from an effect
   // watching it: the close is a consequence of the submit, not of a render.
-  function submit(formData: FormData) {
+  //
+  // Submitted through `onSubmit` rather than `<form action={…}>`, which in
+  // React 19 clears an uncontrolled form as soon as the action returns —
+  // a refused resolution used to wipe the sentence the clerk had just
+  // written, leaving them staring at an error over an empty box.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await resolveReceiptDiscrepancy(IDLE, formData);
       setState(result);
@@ -51,7 +59,13 @@ export function ResolveDiscrepancyButton({
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setState(IDLE);
+        setOpen(next);
+      }}
+    >
       <DialogTrigger
         render={
           <Button variant="outline" size="xs">
@@ -60,7 +74,7 @@ export function ResolveDiscrepancyButton({
         }
       />
       <DialogContent>
-        <form action={submit}>
+        <form onSubmit={submit}>
           <input type="hidden" name="discrepancyId" value={discrepancyId} />
 
           <DialogHeader>

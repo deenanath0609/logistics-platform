@@ -167,12 +167,18 @@ export async function closeInboundReceipt(
     revalidatePath(`/hub/inbound/${parsed.data.receiptId}`);
     revalidatePath("/hub/inbound");
     revalidatePath("/hub");
+    revalidatePath("/exceptions");
+
+    const raised =
+      result.exceptionNumbers.length > 0
+        ? ` Exception${result.exceptionNumbers.length === 1 ? "" : "s"} ${result.exceptionNumbers.join(", ")} ${result.exceptionNumbers.length === 1 ? "is" : "are"} open in the control tower.`
+        : "";
 
     return {
       ok: true,
       summary: isClean
-        ? `Closed clean — all ${totals.expectedPackages} packages accounted for.`
-        : `Closed with ${totals.shortPackages} short and ${totals.excessPackages} excess. ${result.discrepanciesRaised} discrepancy row${result.discrepanciesRaised === 1 ? "" : "s"} raised against the dispatching branch.`,
+        ? `Closed clean — all ${totals.expectedPackages} packages accounted for.${raised}`
+        : `Closed with ${totals.shortPackages} short and ${totals.excessPackages} excess. ${result.discrepanciesRaised} discrepancy row${result.discrepanciesRaised === 1 ? "" : "s"} raised against the dispatching branch.${raised}`,
       warnings: result.warnings,
     };
   } catch (error) {
@@ -208,6 +214,12 @@ export async function resolveReceiptDiscrepancy(
 
     revalidatePath("/hub");
     revalidatePath("/hub/inbound");
+    // The Resolve control lives on the receipt page, and that page is the
+    // one thing this used not to revalidate: the row went on saying "Open"
+    // until somebody reloaded by hand, so the same discrepancy got settled
+    // twice. Revalidated by route pattern, because the action is given a
+    // discrepancy and not the receipt it belongs to.
+    revalidatePath("/hub/inbound/[id]", "page");
     return { ok: true };
   } catch (error) {
     if (error instanceof PermissionError) {

@@ -28,7 +28,17 @@ const SLOTS = [
 export function PickupForm({ addresses }: { addresses: PickupAddress[] }) {
   const [state, action, pending] = useActionState(requestPickup, EMPTY);
 
-  const today = new Date().toISOString().slice(0, 10);
+  // The *local* calendar day, not `toISOString().slice(0, 10)`, which is
+  // the UTC one. In IST the two disagree between midnight and 05:30, and
+  // the value this field defaults to is the value the server compares
+  // against its own floor — so a mismatch here is a form that refuses its
+  // own default first thing in the morning. See `requestPickup`.
+  const now = new Date();
+  const today = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("-");
 
   return (
     <form

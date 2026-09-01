@@ -33,6 +33,7 @@ const FIELDS: FieldDef[] = [
     name: "isFragile",
     label: "Fragile",
     help: "Prompts handling instructions at booking and flags it on the label.",
+    defaultOn: false,
   },
   {
     type: "switch",

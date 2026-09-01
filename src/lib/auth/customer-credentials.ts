@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { requireTenantOrgId } from "@/lib/tenant";
 import { customerSubject } from "@/lib/auth/subject";
+import { modulesForOrg } from "@/lib/modules/tenant-modules";
 
 /**
  * Portal sign-in.
@@ -57,6 +58,18 @@ export async function authenticateCustomer(
   password: string,
 ): Promise<CustomerCredentialResult | null> {
   const normalised = email.trim().toLowerCase();
+
+  // `/api/auth/callback/customer` sits outside `(portal)`, so the layout
+  // that 404s the portal on a carrier who has not bought the module never
+  // runs for it. Without this, the sign-in form could be gone from the
+  // product while the endpoint behind it still minted portal sessions.
+  //
+  // Silent, like every other refusal in this function: a sign-in form that
+  // says "this carrier does not have a portal" is a sign-in form that
+  // answers questions about carriers.
+  if (!(await modulesForOrg(await requireTenantOrgId())).has("portal")) {
+    return null;
+  }
 
   // `findFirst`, not `findUnique`: a portal email is unique within a tenant
   // now, so a consignee who ships with two carriers on the platform holds an

@@ -118,6 +118,7 @@ const selectClass =
 export function BookingForm({
   services,
   branches,
+  originBranches,
   cities,
   packageTypes,
   chargeTypes,
@@ -127,6 +128,12 @@ export function BookingForm({
 }: {
   services: ServiceOption[];
   branches: Option[];
+  /**
+   * Where this clerk may book. A branch-scoped person sees their own
+   * counters and nothing else — the destination list stays the whole
+   * network, because a consignment goes wherever it is addressed.
+   */
+  originBranches: Option[];
   cities: Option[];
   packageTypes: Option[];
   chargeTypes: ChargeOption[];
@@ -207,7 +214,24 @@ export function BookingForm({
     [charges, chargeTypes],
   );
 
-  function submit(formData: FormData) {
+  /**
+   * Submitted by hand, not through `<form action={…}>`.
+   *
+   * React 19 resets an uncontrolled form as soon as a form action returns,
+   * and almost every box on this one is uncontrolled — both parties, both
+   * addresses, the goods description, the references. A booking refused for
+   * a blocked account, an unserviceable PIN or a ten-digit phone therefore
+   * came back saying "check the highlighted fields" over a form that had
+   * just emptied itself, and the counter had to take the whole consignment
+   * down again with the consignor still standing there.
+   *
+   * A successful booking redirects, so nothing is lost by keeping the
+   * values on screen.
+   */
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await bookShipment(EMPTY, formData);
       // A successful booking redirects, so anything returned is a failure.
@@ -254,7 +278,7 @@ export function BookingForm({
   }
 
   return (
-    <form id={formId} action={submit} className="flex flex-col gap-6">
+    <form id={formId} onSubmit={submit} className="flex flex-col gap-6">
       {state.error && (
         <p
           role="alert"
@@ -309,7 +333,7 @@ export function BookingForm({
               required
             >
               <option value="">Select…</option>
-              {branches.map((b) => (
+              {originBranches.map((b) => (
                 <option key={b.value} value={b.value}>
                   {b.label}
                 </option>

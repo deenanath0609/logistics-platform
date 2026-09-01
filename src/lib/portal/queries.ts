@@ -78,8 +78,14 @@ export async function getPortalDashboard(
         },
       }),
       // Delivered but the signed proof has not come back off the device.
+      //
+      // `pod: null` is the whole point of this tile and it was missing, so
+      // the card read "Pending POD: 41" on an account whose forty-one
+      // deliveries all had their proof — the same number as "delivered",
+      // permanently amber, and a customer ringing the branch about
+      // paperwork that was already there.
       prisma.shipment.count({
-        where: { ...scope, currentStatus: "DELIVERED" },
+        where: { ...scope, currentStatus: "DELIVERED", pod: { is: null } },
       }),
       listPortalShipments(session, { take: 5 }),
     prisma.pickupRequest.count({
@@ -342,16 +348,13 @@ export async function getPortalShipment(
   };
 }
 
-/** Confirms an id belongs to this account before linking out to the POD. */
-export async function customerOwnsShipment(
-  session: CustomerSession,
-  shipmentId: string,
-): Promise<boolean> {
-  const count = await prisma.shipment.count({
-    where: { ...customerShipmentFilter(session), id: shipmentId },
-  });
-  return count > 0;
-}
+// `customerOwnsShipment` used to live here — a "check the id belongs to
+// this account, then go and fetch it" helper with no caller anywhere in
+// the product. It was written for the POD screen, which does not use it:
+// `getPortalPod` below carries the account in its own WHERE clause, so
+// the check and the fetch are one statement and there is no window
+// between them. Keeping a second, weaker pattern exported invites the
+// next screen to use it.
 
 export type PortalPod = {
   lrNumber: string;

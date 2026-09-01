@@ -351,7 +351,13 @@ export async function recordScan(
     }
 
     // ── Where the package now sits ────────────────────────
-    if (resolved.kind === "PACKAGE") {
+    //
+    // A stock audit is a count, and a count that writes is not a count:
+    // it moved `currentBranchId` onto the auditing branch and, for a
+    // barcode still sitting at BOOKED, quietly promoted the package to
+    // IN_NETWORK. An audit that disagrees with the system is precisely
+    // the thing worth finding, so it is recorded and nothing is touched.
+    if (resolved.kind === "PACKAGE" && input.scanType !== "AUDIT") {
       await tx.shipmentPackage.update({
         where: { id: resolved.packageId },
         data: {

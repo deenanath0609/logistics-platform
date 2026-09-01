@@ -13,8 +13,20 @@ export const dynamic = "force-dynamic";
 export default async function NewBookingPage() {
   const user = await requirePermission("shipment.create");
 
-  const [services, branches, cities, packageTypes, chargeTypes, customers] =
-    await Promise.all([
+  // Two branch lists, because the two ends of a lane are different
+  // questions. A consignment may be *sent* anywhere in the network, so the
+  // destination list is the whole network. It may only be *booked* at a
+  // counter this clerk works at — the origin list is theirs, and
+  // `bookShipment` refuses anything outside it whatever the form posts.
+  const [
+    services,
+    branches,
+    originBranches,
+    cities,
+    packageTypes,
+    chargeTypes,
+    customers,
+  ] = await Promise.all([
       prisma.serviceType.findMany({
         where: { isActive: true },
         orderBy: [{ mode: "asc" }, { code: "asc" }],
@@ -30,6 +42,15 @@ export default async function NewBookingPage() {
       }),
       prisma.branch.findMany({
         where: { isActive: true, deletedAt: null },
+        orderBy: { code: "asc" },
+        select: { id: true, code: true, name: true },
+      }),
+      prisma.branch.findMany({
+        where: {
+          isActive: true,
+          deletedAt: null,
+          ...branchScope(user, "id"),
+        },
         orderBy: { code: "asc" },
         select: { id: true, code: true, name: true },
       }),
@@ -100,6 +121,10 @@ export default async function NewBookingPage() {
       <BookingForm
         services={services}
         branches={branches.map((b) => ({
+          value: b.id,
+          label: `${b.code} — ${b.name}`,
+        }))}
+        originBranches={originBranches.map((b) => ({
           value: b.id,
           label: `${b.code} — ${b.name}`,
         }))}

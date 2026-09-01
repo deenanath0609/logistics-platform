@@ -5,7 +5,7 @@ import { format } from "date-fns";
 import { ChevronLeft, MapPin, Star } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
-import { coversBranch } from "@/server/repositories/scope";
+import { branchScope, coversBranch } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { MasterFormDialog, type FieldDef } from "@/components/data/master-form";
@@ -26,7 +26,6 @@ export const metadata: Metadata = { title: "Customer" };
 export const dynamic = "force-dynamic";
 
 function addressFields(
-  customerId: string,
   cities: Array<{ value: string; label: string }>,
 ): FieldDef[] {
   return [
@@ -54,9 +53,17 @@ function addressFields(
       name: "isDefault",
       label: "Default for this purpose",
       help: "Pre-selected on the booking screen.",
+      // Off unless asked for. Saving this on unsets whichever address was
+      // the default before, so a second pickup point added in passing used
+      // to silently become the one the booking screen pre-fills.
+      defaultOn: false,
     },
     // Carried through the form rather than the URL so the action has it.
-    { type: "text", name: "customerId", label: "customerId", half: true },
+    // Hidden: it is a cuid the action needs and a person must never edit —
+    // it used to render as a text box labelled "customerId" beside
+    // "Landmark", and `saveCustomerAddress` refuses a mismatch, so typing
+    // in it could only ever break the save.
+    { type: "hidden", name: "customerId" },
   ];
 }
 
@@ -85,7 +92,19 @@ export default async function CustomerDetailPage({
   });
 
   if (!customer || customer.deletedAt) notFound();
-  if (customer.branchId && !coversBranch(user, customer.branchId)) notFound();
+
+  // The listing scopes with `branchScope(user, "branchId")`, which is
+  // `{ branchId: { in: [...] } }` and therefore excludes accounts with no
+  // owning branch. This page only checked the branch when there *was* one,
+  // so an account owned by nobody — the shape a network-scoped user creates
+  // — was invisible in the list and readable by id, with its credit terms
+  // and every consignment on it. One rule, both surfaces.
+  if (
+    user.branchIds !== null &&
+    (!customer.branchId || !coversBranch(user, customer.branchId))
+  ) {
+    notFound();
+  }
 
   const [shipments, cities, branches] = await Promise.all([
     prisma.shipment.findMany({
@@ -109,8 +128,16 @@ export default async function CustomerDetailPage({
       orderBy: { name: "asc" },
       select: { id: true, name: true, code: true },
     }),
+    // Scoped, as the listing already scopes it. Offering every branch here
+    // meant the "Owning branch" picker on the edit dialog could move an
+    // account to a branch the editor does not cover — out of their own
+    // sight, and into somebody else's, in one save.
     prisma.branch.findMany({
-      where: { isActive: true, deletedAt: null },
+      where: {
+        isActive: true,
+        deletedAt: null,
+        ...branchScope(user, "id"),
+      },
       orderBy: { code: "asc" },
       select: { id: true, code: true, name: true },
     }),
@@ -192,7 +219,7 @@ export default async function CustomerDetailPage({
             <MasterFormDialog
               title="New address"
               description="Saved addresses turn booking into a two-field job."
-              fields={addressFields(customer.id, cityOptions)}
+              fields={addressFields(cityOptions)}
               action={saveCustomerAddress}
               record={{ customerId: customer.id, kind: "PICKUP" }}
               submitLabel="Add address"
@@ -222,9 +249,49 @@ export default async function CustomerDetailPage({
                     )}
                     {address.label}
                   </span>
-                  <Badge variant="secondary" className="text-[0.6rem]">
-                    {address.kind}
-                  </Badge>
+                  <div className="flex items-center gap-1">
+                    <Badge variant="secondary" className="text-[0.6rem]">
+                      {address.kind}
+                    </Badge>
+                    {/*
+                      `saveCustomerAddress` has always had an update branch —
+                      it reads `id` off the form, checks the address really
+                      belongs to this account, and rewrites it. Nothing ever
+                      posted an `id`, so the branch was unreachable: a
+                      consignor who moved could only have a second address
+                      added beside the stale one, and the stale one went on
+                      pre-filling the booking screen.
+                    */}
+                    {writable && (
+                      <MasterFormDialog
+                        title={`Edit ${address.label}`}
+                        description="Corrections apply from the next booking. Consignments already raised keep the address they were booked with."
+                        fields={addressFields(cityOptions)}
+                        action={saveCustomerAddress}
+                        record={{
+                          id: address.id,
+                          customerId: customer.id,
+                          label: address.label,
+                          kind: address.kind,
+                          contactName: address.contactName,
+                          phone: address.phone,
+                          address: address.address,
+                          cityId: address.cityId,
+                          pincode: address.pincode,
+                          landmark: address.landmark,
+                          isDefault: address.isDefault,
+                        }}
+                        submitLabel="Save address"
+                        trigger={{
+                          label: `Edit ${address.label}`,
+                          icon: "pencil",
+                          variant: "ghost",
+                          size: "icon-sm",
+                          iconOnly: true,
+                        }}
+                      />
+                    )}
+                  </div>
                 </div>
                 <p className="text-sm text-muted-foreground">{address.address}</p>
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">

@@ -67,11 +67,16 @@ export function PortalCommitBar({
 
         <form action={recheck} className="w-full sm:w-auto">
           <input type="hidden" name="batchId" value={batchId} />
+          {/*
+            Gated on the same flag as Confirm. Re-checking rewrites every
+            row's status, so offering it to a login that may not book is
+            offering a write to a reader.
+          */}
           <Button
             type="submit"
             variant="outline"
             className="w-full sm:w-auto"
-            disabled={rechecking}
+            disabled={!canCommit || rechecking}
           >
             {rechecking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
             Re-check

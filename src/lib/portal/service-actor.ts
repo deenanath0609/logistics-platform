@@ -37,6 +37,20 @@ const PORTAL_ACTOR_NAME = "Customer portal";
 const PORTAL_ACTOR_PERMISSIONS = ["shipment.create"] as const;
 
 /**
+ * The narrowest set that lets a `BOOKING_AMENDED` event through, and
+ * nothing else.
+ *
+ * Deliberately a *second* set rather than a wider first one. The only
+ * customer-side act that has to touch a consignment already booked is
+ * calling off its collection — `cancelPortalPickup` — and that records
+ * `BOOKING_AMENDED`, whose rule in `TRANSITIONS` asks for
+ * `shipment.update`. Adding that permission to `PORTAL_ACTOR_PERMISSIONS`
+ * would have handed it to every portal booking and every bulk commit as
+ * well, for the sake of one call site.
+ */
+const PORTAL_AMENDMENT_PERMISSIONS = ["shipment.update"] as const;
+
+/**
  * Finds or creates the portal service principal for an organisation.
  *
  * Idempotent: `(orgId, mobile)` is unique, so concurrent first bookings
@@ -74,6 +88,27 @@ async function portalServiceUser(orgId: string) {
 export async function bookingActorFor(
   session: CustomerSession,
 ): Promise<SessionUser> {
+  return portalActorFor(session, PORTAL_ACTOR_PERMISSIONS);
+}
+
+/**
+ * The actor a customer-side amendment is written as.
+ *
+ * The same service principal — one row per carrier, still unable to sign
+ * in — carrying one permission instead of the booking one. The portal
+ * customer who actually did it travels separately, on the event's
+ * `customerUserId`, so borrowing the principal does not lose the person.
+ */
+export async function amendmentActorFor(
+  session: CustomerSession,
+): Promise<SessionUser> {
+  return portalActorFor(session, PORTAL_AMENDMENT_PERMISSIONS);
+}
+
+async function portalActorFor(
+  session: CustomerSession,
+  permissions: readonly string[],
+): Promise<SessionUser> {
   const service = await portalServiceUser(session.orgId);
 
   return {
@@ -86,7 +121,7 @@ export async function bookingActorFor(
     mustChangePassword: false,
     primaryBranch: null,
     roles: [],
-    permissions: new Set<string>(PORTAL_ACTOR_PERMISSIONS),
+    permissions: new Set<string>(permissions),
     // A booking's origin branch is chosen from the customer's own account,
     // never from this actor's scope — see `resolveBookingBranches`.
     scope: "OWN",

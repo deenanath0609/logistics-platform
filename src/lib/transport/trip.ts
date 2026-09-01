@@ -6,6 +6,7 @@ import { coversBranch } from "@/server/repositories/scope";
 import { nextNumber } from "@/lib/numbering/number-series";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import { recordAudit } from "@/server/services/audit";
+import { canAssignDriver, canAssignVehicle } from "@/lib/fleet/availability";
 
 /**
  * The trip: a vehicle physically moving between two branches.
@@ -57,6 +58,8 @@ export async function createTrip(
     };
   }
 
+  const asOf = new Date();
+
   const vehicle = await prisma.vehicle.findUnique({
     where: { id: input.vehicleId },
     select: {
@@ -65,6 +68,7 @@ export async function createTrip(
       isActive: true,
       deletedAt: true,
       status: true,
+      documents: { select: { kind: true, expiresOn: true, isMandatory: true } },
     },
   });
 
@@ -79,16 +83,83 @@ export async function createTrip(
     };
   }
 
+  // BRD §A.8: a vehicle whose mandatory paperwork has lapsed may not be put
+  // on a trip. This is the same rule, and the same wording, the fleet
+  // screens show — planning must not be the one place with a softer rule.
+  //
+  // `canAssignVehicle` is asked with the vehicle pinned to AVAILABLE
+  // deliberately: its "already assigned" branch answers "is this truck free
+  // right now", and a trip may legitimately be planned for tomorrow against
+  // a truck that is out today. Being *on the road* is checked below, against
+  // trips rather than against a status column that a stale trip can strand.
+  const paperwork = canAssignVehicle(
+    { ...vehicle, status: "AVAILABLE" },
+    vehicle.documents,
+    asOf,
+  );
+  if (!paperwork.ok) {
+    return {
+      ok: false,
+      error: `${vehicle.registrationNumber}: ${paperwork.reason}`,
+      field: "vehicleId",
+    };
+  }
+
+  const onTheRoad = await prisma.trip.findFirst({
+    where: {
+      vehicleId: vehicle.id,
+      status: { in: ["LOADING", "DISPATCHED", "IN_TRANSIT", "ARRIVED", "UNLOADING"] },
+    },
+    select: { number: true, status: true },
+  });
+
+  if (onTheRoad) {
+    return {
+      ok: false,
+      error: `${vehicle.registrationNumber} is ${onTheRoad.status.replace(/_/g, " ").toLowerCase()} on ${onTheRoad.number}. Close that trip before sending it out again.`,
+      field: "vehicleId",
+    };
+  }
+
   if (input.driverId) {
     const driver = await prisma.driver.findUnique({
       where: { id: input.driverId },
-      select: { id: true, name: true, status: true },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        isActive: true,
+        deletedAt: true,
+        licenceNumber: true,
+        licenceExpiry: true,
+      },
     });
     if (!driver) return { ok: false, error: "That driver does not exist.", field: "driverId" };
-    if (driver.status === "SUSPENDED" || driver.status === "INACTIVE") {
+
+    if (driver.status === "ON_LEAVE") {
+      return { ok: false, error: `${driver.name} is on leave.`, field: "driverId" };
+    }
+
+    // Licence, suspension and deactivation, in the same words the driver
+    // list uses. Status is pinned for the same reason as the vehicle above:
+    // "on a trip today" must not stop tomorrow's trip being planned.
+    const licence = canAssignDriver({ ...driver, status: "AVAILABLE" }, asOf);
+    if (!licence.ok) {
+      return { ok: false, error: `${driver.name}: ${licence.reason}`, field: "driverId" };
+    }
+
+    const driving = await prisma.trip.findFirst({
+      where: {
+        driverId: driver.id,
+        status: { in: ["LOADING", "DISPATCHED", "IN_TRANSIT", "ARRIVED", "UNLOADING"] },
+      },
+      select: { number: true },
+    });
+
+    if (driving) {
       return {
         ok: false,
-        error: `${driver.name} is ${driver.status.toLowerCase()} and cannot be assigned.`,
+        error: `${driver.name} is out on ${driving.number}. Close that trip first.`,
         field: "driverId",
       };
     }
@@ -104,6 +175,11 @@ export async function createTrip(
         mode: true,
         currentStatus: true,
         deletedAt: true,
+        originBranchId: true,
+        currentBranchId: true,
+        destinationBranchId: true,
+        currentBranch: { select: { code: true } },
+        destinationBranch: { select: { code: true } },
       },
     });
 
@@ -114,6 +190,27 @@ export async function createTrip(
       return {
         ok: false,
         error: `${shipment.lrNumber} is a ${shipment.mode} consignment. Put it on a manifest instead of binding a whole truck to it.`,
+        field: "ftlShipmentId",
+      };
+    }
+
+    // The truck loads where the goods are standing, not where they were
+    // booked. A full load that has already moved to a hub starts its trip
+    // from that hub — and the branch that has it is the branch that may
+    // send it, which is what makes the scope check above land on a branch
+    // the dispatcher actually works at.
+    const loadsAt = shipment.currentBranchId ?? shipment.originBranchId;
+    if (input.originBranchId !== loadsAt) {
+      return {
+        ok: false,
+        error: `${shipment.lrNumber} is at ${shipment.currentBranch?.code ?? "another branch"}. A full-truck trip starts where the freight is standing.`,
+        field: "ftlShipmentId",
+      };
+    }
+    if (input.destinationBranchId !== shipment.destinationBranchId) {
+      return {
+        ok: false,
+        error: `${shipment.lrNumber} is going to ${shipment.destinationBranch.code}. A full-truck trip goes where its consignment goes.`,
         field: "ftlShipmentId",
       };
     }
@@ -219,6 +316,12 @@ async function shipmentsOnTrip(
   );
 }
 
+/**
+ * Thrown inside the gate-out transaction when every consignment was
+ * refused, purely to roll the whole thing back. Never escapes this module.
+ */
+class NothingDispatched extends Error {}
+
 export type GateResult =
   | {
       ok: true;
@@ -261,8 +364,10 @@ export async function gateOut(
       status: true,
       originBranchId: true,
       vehicleId: true,
+      driverId: true,
       ftlShipmentId: true,
       sealNumber: true,
+      vehicle: { select: { status: true } },
       manifests: { select: { id: true, number: true, status: true } },
     },
   });
@@ -304,89 +409,119 @@ export async function gateOut(
   const refused: Array<{ lrNumber: string; reason: string }> = [];
   let moved = 0;
 
-  await tenantTransaction(async (tx) => {
-    for (const shipment of carrying) {
-      const event = await appendShipmentEvent(
-        {
-          shipmentId: shipment.id,
+  try {
+    await tenantTransaction(async (tx) => {
+      for (const shipment of carrying) {
+        const event = await appendShipmentEvent(
+          {
+            shipmentId: shipment.id,
+            eventType: "GATE_OUT",
+            occurredAt,
+            branchId: trip.originBranchId,
+            vehicleId: trip.vehicleId,
+            tripId: trip.id,
+            manifestId: shipment.manifestId,
+            idempotencyKey: `trip:${trip.id}:gateout:${shipment.id}`,
+            payload: {
+              trip: trip.number,
+              sealNumber: input.sealNumber ?? trip.sealNumber ?? null,
+            },
+          },
+          actor,
+          tx,
+        );
+
+        if (event.ok) moved += 1;
+        else refused.push({ lrNumber: shipment.lrNumber, reason: event.error });
+      }
+
+      // Not one consignment could be dispatched — every event was refused.
+      // Marking the trip gone anyway would put a truck on the board carrying
+      // nothing, with its freight still reading as sitting on the floor. The
+      // throw rolls the whole gate-out back; the caller reports the reasons.
+      if (moved === 0) throw new NothingDispatched();
+
+      await tx.trip.update({
+        where: { id: trip.id },
+        data: {
+          status: "DISPATCHED",
+          actualDepartureAt: occurredAt,
+          startOdometerKm: input.odometerKm ?? undefined,
+          sealNumber: input.sealNumber ?? undefined,
+          remarks: input.remarks ?? undefined,
+        },
+      });
+
+      if (trip.manifests.length > 0) {
+        await tx.manifest.updateMany({
+          where: { tripId: trip.id, status: "CLOSED" },
+          data: { status: "DISPATCHED", dispatchedAt: occurredAt },
+        });
+      }
+
+      await tx.tripEvent.create({
+        data: {
+          // The gate clerk. Trip, vehicle and manifests were all read under
+          // this tenant, so the whole gate-out belongs to it.
+          orgId: actor.orgId,
+          tripId: trip.id,
           eventType: "GATE_OUT",
           occurredAt,
           branchId: trip.originBranchId,
-          vehicleId: trip.vehicleId,
-          tripId: trip.id,
-          manifestId: shipment.manifestId,
-          idempotencyKey: `trip:${trip.id}:gateout:${shipment.id}`,
+          userId: actor.id,
+          odometerKm: input.odometerKm ?? undefined,
+          remarks: input.remarks ?? undefined,
           payload: {
-            trip: trip.number,
+            shipments: carrying.length,
+            dispatched: moved,
             sealNumber: input.sealNumber ?? trip.sealNumber ?? null,
           },
         },
-        actor,
-        tx,
-      );
-
-      if (event.ok) moved += 1;
-      else refused.push({ lrNumber: shipment.lrNumber, reason: event.error });
-    }
-
-    await tx.trip.update({
-      where: { id: trip.id },
-      data: {
-        status: "DISPATCHED",
-        actualDepartureAt: occurredAt,
-        startOdometerKm: input.odometerKm ?? undefined,
-        sealNumber: input.sealNumber ?? undefined,
-        remarks: input.remarks ?? undefined,
-      },
-    });
-
-    if (trip.manifests.length > 0) {
-      await tx.manifest.updateMany({
-        where: { tripId: trip.id, status: "CLOSED" },
-        data: { status: "DISPATCHED", dispatchedAt: occurredAt },
       });
-    }
 
-    await tx.tripEvent.create({
-      data: {
-        // The gate clerk. Trip, vehicle and manifests were all read under
-        // this tenant, so the whole gate-out belongs to it.
-        orgId: actor.orgId,
-        tripId: trip.id,
-        eventType: "GATE_OUT",
-        occurredAt,
-        branchId: trip.originBranchId,
-        userId: actor.id,
-        odometerKm: input.odometerKm ?? undefined,
-        remarks: input.remarks ?? undefined,
-        payload: {
-          shipments: carrying.length,
-          dispatched: moved,
-          sealNumber: input.sealNumber ?? trip.sealNumber ?? null,
+      // The vehicle is out. Its status is fleet's to own, but leaving it
+      // AVAILABLE while it is on the highway would let a dispatcher assign
+      // the same truck twice.
+      await tx.vehicle.update({
+        where: { id: trip.vehicleId },
+        data: { status: "DISPATCHED", currentOdometerKm: input.odometerKm ?? undefined },
+      });
+
+      await tx.vehicleStatusLog.create({
+        data: {
+          orgId: actor.orgId,
+          vehicleId: trip.vehicleId,
+          fromStatus: trip.vehicle.status,
+          toStatus: "DISPATCHED",
+          tripId: trip.id,
+          branchId: trip.originBranchId,
+          userId: actor.id,
+          remarks: `Gate-out on ${trip.number}`,
         },
-      },
-    });
+      });
 
-    // The vehicle is out. Its status is fleet's to own, but leaving it
-    // AVAILABLE while it is on the highway would let a dispatcher assign
-    // the same truck twice.
-    await tx.vehicle.update({
-      where: { id: trip.vehicleId },
-      data: { status: "DISPATCHED", currentOdometerKm: input.odometerKm ?? undefined },
+      // The driver is on the road too. Without this the roster shows them
+      // available, `canAssignDriver` says yes, and the same person is put on
+      // two trucks leaving in opposite directions.
+      if (trip.driverId) {
+        await tx.driver.updateMany({
+          where: { id: trip.driverId, status: { in: ["AVAILABLE", "ON_LEAVE"] } },
+          data: { status: "ON_TRIP" },
+        });
+      }
     });
-
-    await tx.vehicleStatusLog.create({
-      data: {
-        orgId: actor.orgId,
-        vehicleId: trip.vehicleId,
-        toStatus: "DISPATCHED",
-        tripId: trip.id,
-        branchId: trip.originBranchId,
-        userId: actor.id,
-        remarks: `Gate-out on ${trip.number}`,
-      },
-    });
-  });
+  } catch (error) {
+    if (error instanceof NothingDispatched) {
+      return {
+        ok: false,
+        error:
+          refused.length > 0
+            ? `Nothing on ${trip.number} could be dispatched. ${refused.map((r) => `${r.lrNumber}: ${r.reason}`).join(" · ")}`
+            : `Nothing on ${trip.number} could be dispatched.`,
+      };
+    }
+    throw error;
+  }
 
   await recordAudit({
     user: actor,

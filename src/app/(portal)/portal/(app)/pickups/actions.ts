@@ -40,6 +40,14 @@ const schema = z.object({
   ),
 });
 
+/** Today's local calendar day, rebuilt at UTC midnight — see below. */
+function storedToday(): Date {
+  const now = new Date();
+  return new Date(
+    Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0),
+  );
+}
+
 function fieldErrors(error: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
   for (const issue of error.issues) {
@@ -68,9 +76,19 @@ export async function requestPickup(
     }
 
     // A collection cannot be asked for in the past.
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (parsed.data.requestedDate < today) {
+    //
+    // `requestedDate` arrives from `<input type="date">` as `YYYY-MM-DD`,
+    // which JavaScript parses at UTC midnight — and that is what the
+    // `@db.Date` column stores. The floor has to be built the same way or
+    // the two are not comparable: `new Date(); setHours(0,0,0,0)` is
+    // *local* midnight, which at IST's +5:30 is 18:30 UTC on the previous
+    // day. Between midnight and half past five in the morning the form's
+    // own default date sat below that floor and every collection asked for
+    // "today" was refused with "Choose today or a later date."
+    //
+    // `asStoredDate` in `lib/pickup/execute.ts` is the same trick and
+    // explains it at length.
+    if (parsed.data.requestedDate < storedToday()) {
       return {
         error: "Choose today or a later date.",
         fieldErrors: { requestedDate: "Not in the past" },
@@ -114,7 +132,8 @@ export async function cancelPickup(
     if (!result.ok) return { error: result.error };
 
     revalidatePath(PATH);
-    return { ok: true, message: "Pickup cancelled." };
+    revalidatePath("/portal");
+    return { ok: true, message: `Pickup ${result.number} cancelled.` };
   } catch (error) {
     if (error instanceof CustomerAuthError) {
       return { error: "Your session has expired. Sign in again." };

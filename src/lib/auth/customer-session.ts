@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { readCustomerSubject } from "@/lib/auth/subject";
+import { hasModule } from "@/lib/modules/tenant-modules";
 import type { CustomerUserRole } from "@/generated/prisma/client";
 
 /**
@@ -51,6 +52,26 @@ export const getCurrentCustomerUser = cache(
     const session = await auth();
     const customerUserId = readCustomerSubject(session?.user?.id);
     if (!customerUserId) return null;
+
+    // ── The plan gate, and why it is here rather than only in the layout ──
+    //
+    // `(portal)/portal/layout.tsx` 404s the whole portal on a carrier who
+    // has not bought the module, and that is the right refusal for a
+    // *page*. It is not a refusal for anything else: a Next layout does
+    // not run for a server action, and it does not run for a route
+    // handler. So on a carrier who dropped the portal at renewal, every
+    // `"use server"` action under `(portal)` still executed, and both
+    // route handlers under it — the booking template at
+    // `/portal/bulk/template` and the invoice PDF at
+    // `/portal/invoices/[invoiceId]/document` — still answered, for as
+    // long as any customer's cookie stayed valid.
+    //
+    // Putting the check on the session closes all three at once: pages,
+    // actions and route handlers all resolve their customer through this
+    // function, and a portal that is not sold resolves to nobody. The
+    // layout's 404 stays, because "signed out" is the wrong thing to show
+    // someone whose carrier never had a portal.
+    if (!(await hasModule("portal"))) return null;
 
     // Tenant-scoped for the same reason as `getCurrentUser`: the id is
     // globally unique, but the extension pins the lookup to the host's

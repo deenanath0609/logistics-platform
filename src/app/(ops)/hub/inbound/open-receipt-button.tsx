@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useState, useTransition } from "react";
 import { Loader2, PackageOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -40,10 +40,30 @@ export function OpenReceiptButton({
   packages: number;
 }) {
   const [open, setOpen] = useState(false);
-  const [state, formAction, pending] = useActionState(openInboundReceipt, IDLE);
+  const [state, setState] = useState<OpenReceiptState>(IDLE);
+  const [pending, startTransition] = useTransition();
+
+  // Submitted by hand: React 19 resets an uncontrolled form once the
+  // action returns, so a refusal — a manifest not gated out, a second
+  // receipt on a manifest already reconciled — would put the seal answer
+  // back to "not checked" underneath the error explaining the refusal.
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    startTransition(async () => {
+      setState(await openInboundReceipt(IDLE, formData));
+    });
+  }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setState(IDLE);
+        setOpen(next);
+      }}
+    >
       <DialogTrigger
         render={
           <Button size="sm" variant="outline">
@@ -53,7 +73,7 @@ export function OpenReceiptButton({
         }
       />
       <DialogContent>
-        <form action={formAction}>
+        <form onSubmit={submit}>
           <input type="hidden" name="manifestId" value={manifestId} />
           <input type="hidden" name="branchId" value={branchId} />
 

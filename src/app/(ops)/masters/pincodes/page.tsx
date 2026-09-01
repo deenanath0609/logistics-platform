@@ -74,6 +74,9 @@ function buildFields(
       name: "isOda",
       label: "Out of delivery area (ODA)",
       help: "Triggers the ODA charge and a longer transit expectation.",
+      // Off for a new PIN. Most of the network is not ODA, and a PIN code
+      // created as one bills every consignment to it an ODA charge.
+      defaultOn: false,
     },
   ];
 }

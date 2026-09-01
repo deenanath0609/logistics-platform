@@ -151,6 +151,15 @@ export function ShipmentLifecycleActions({
  *
  * The dialog closes from the action's result rather than from an effect
  * watching it — the close is a consequence of the submit, not of a render.
+ *
+ * `onSubmit` with `preventDefault`, not `<form action={…}>`: React 19
+ * resets an uncontrolled form as soon as a form action returns, and these
+ * are uncontrolled forms. On Amend that is fifteen boxes — a ten-digit
+ * phone typed with nine used to wipe the corrected consignee address, the
+ * landmark and the explanation along with it. On Correct status it threw
+ * away the written account of what went wrong, which the service demands
+ * ten characters of and which is the only explanation that record will
+ * ever carry.
  */
 function useAction(
   action: (prev: ActionState, formData: FormData) => Promise<ActionState>,
@@ -159,7 +168,10 @@ function useAction(
   const [state, setState] = useState<ActionState>(IDLE);
   const [pending, startTransition] = useTransition();
 
-  function submit(formData: FormData) {
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
     startTransition(async () => {
       const result = await action(IDLE, formData);
       setState(result);
@@ -237,7 +249,7 @@ function CancelDialog({
       </DialogTrigger>
 
       <DialogContent>
-        <form action={submit}>
+        <form onSubmit={submit}>
           <input type="hidden" name="shipmentId" value={shipmentId} />
 
           <DialogHeader>
@@ -311,7 +323,7 @@ function HoldDialog({
       </DialogTrigger>
 
       <DialogContent>
-        <form action={submit}>
+        <form onSubmit={submit}>
           <input type="hidden" name="shipmentId" value={shipmentId} />
 
           <DialogHeader>
@@ -380,7 +392,7 @@ function ReleaseDialog({
       </DialogTrigger>
 
       <DialogContent>
-        <form action={submit}>
+        <form onSubmit={submit}>
           <input type="hidden" name="shipmentId" value={shipmentId} />
 
           <DialogHeader>
@@ -478,7 +490,7 @@ function AmendDialog({
       </DialogTrigger>
 
       <DialogContent className="sm:max-w-2xl">
-        <form action={submit} className="flex max-h-[75vh] flex-col">
+        <form onSubmit={submit} className="flex max-h-[75vh] flex-col">
           <input type="hidden" name="shipmentId" value={shipmentId} />
 
           <DialogHeader>
@@ -718,7 +730,7 @@ function CorrectStatusDialog({
       </DialogTrigger>
 
       <DialogContent>
-        <form action={submit}>
+        <form onSubmit={submit}>
           <input type="hidden" name="shipmentId" value={shipmentId} />
 
           <DialogHeader>

@@ -4,6 +4,7 @@ import type { SessionUser } from "@/lib/auth/session";
 import { can } from "@/lib/auth/session";
 import { coversBranch } from "@/server/repositories/scope";
 import { appendShipmentEvent } from "@/lib/shipment/events";
+import { raiseException } from "@/lib/exceptions/service";
 import { recordAudit } from "@/server/services/audit";
 import { recordScan, type ScanOutcome } from "./scan";
 import {
@@ -67,6 +68,7 @@ export async function openReceipt(
       status: true,
       destinationBranchId: true,
       tripId: true,
+      trip: { select: { number: true } },
       lines: {
         select: {
           shipmentId: true,
@@ -87,6 +89,34 @@ export async function openReceipt(
   }
   if (manifest.status === "CANCELLED") {
     return { ok: false, error: `${manifest.number} was cancelled.` };
+  }
+  // Closed for dispatch but never gated out. The truck has, on paper,
+  // not left — so every consignment on it is still MANIFESTED, and the
+  // state machine takes an inbound scan from DISPATCHED, not from there.
+  // Opening the receipt anyway used to "work": the lines ticked green,
+  // the reconciliation came out clean, and not one consignment moved.
+  // The dock would have signed for freight the network still believed
+  // was standing at the origin.
+  if (manifest.status === "CLOSED") {
+    return {
+      ok: false,
+      error:
+        `${manifest.number} has not been gated out${manifest.trip ? ` — ${manifest.trip.number} is still at the origin` : ""}. ` +
+        `Receiving it now would record the boxes and move none of them. ` +
+        `Ask the dispatching branch to gate the vehicle out first.`,
+    };
+  }
+  // A manifest is reconciled once. A second receipt would re-run the
+  // whole reconciliation against a fresh, empty set of scans and file
+  // every package on it as short a second time, against a branch that
+  // has already answered for it.
+  if (manifest.status === "RECEIVED" || manifest.status === "RECONCILED") {
+    return {
+      ok: false,
+      error:
+        `${manifest.number} has already been received and reconciled. ` +
+        `Anything found afterwards belongs on the existing receipt's discrepancies, not on a second one.`,
+    };
   }
   if (manifest.destinationBranchId !== input.branchId) {
     return {
@@ -285,6 +315,8 @@ export type CloseReceiptResult =
       ok: true;
       reconciliation: ReconcileResult;
       discrepanciesRaised: number;
+      /** Exceptions opened in the tower against the dispatching branch. */
+      exceptionNumbers: string[];
       warnings: string[];
     }
   | { ok: false; error: string };
@@ -592,6 +624,38 @@ export async function closeReceipt(
     );
   }
 
+  // ── The tower ─────────────────────────────────────────────
+  //
+  // A discrepancy row records that freight is missing. It does not make
+  // anybody answer for it: nothing chases it, nothing escalates it, and
+  // the only place it appears is a receipt the closing clerk has already
+  // walked away from. The exception tower is where the duty manager runs
+  // the shift, and `SHORT_RECEIVED` and `EXCESS_RECEIVED` — owner
+  // "Dispatching branch", detected by "Hub inbound scan", with a seeded
+  // ladder escalating to the branch manager after a day and the ops
+  // manager after two — were defined for exactly this and raised by
+  // nothing. The loss-and-damage figure on the insights report counts
+  // `SHORT_RECEIVED`, so it was structurally always zero.
+  //
+  // Raised after the transaction, never inside it: the reconciliation is
+  // the record of account and must not roll back because the tower was
+  // briefly unavailable.
+  const exceptionNumbers = await raiseReceiptExceptions(
+    {
+      receiptId: receipt.id,
+      receivingBranchId: receipt.branchId,
+      ownerBranchId,
+      manifestNumber: receipt.manifest.number,
+      orgId: actor.orgId,
+      reconciliation,
+      sealBroken,
+      shortReasonId: reasonIdByCode.get(REASON_CODE.SHORT ?? "") ?? null,
+      excessReasonId: reasonIdByCode.get(REASON_CODE.EXCESS ?? "") ?? null,
+      sealReasonId: reasonIdByCode.get(REASON_CODE.SEAL_BROKEN ?? "") ?? null,
+    },
+    warnings,
+  );
+
   await recordAudit({
     user: actor,
     action: "UPDATE",
@@ -609,6 +673,7 @@ export async function closeReceipt(
       excessPackages: reconciliation.totals.excessPackages,
       sealIntact,
       ownerBranchId,
+      exceptions: exceptionNumbers,
     },
   });
 
@@ -616,8 +681,178 @@ export async function closeReceipt(
     ok: true,
     reconciliation,
     discrepanciesRaised: discrepancies.length,
+    exceptionNumbers,
     warnings,
   };
+}
+
+/**
+ * Puts the reconciliation in front of a duty manager.
+ *
+ * One exception per affected consignment, matching how the timeline
+ * events are grouped — a forty-line manifest that arrived three boxes
+ * short is three things to chase, not three hundred. Every barcode the
+ * system does not recognise is folded into a single unidentified-freight
+ * exception, because they are one conversation with one branch.
+ *
+ * `dedupeKey` is keyed on the receipt, so closing is idempotent: nothing
+ * here can double-open if the close is somehow replayed.
+ *
+ * Never throws. A tower that is unavailable produces a warning on the
+ * close screen, not a lost reconciliation.
+ */
+async function raiseReceiptExceptions(
+  input: {
+    receiptId: string;
+    receivingBranchId: string;
+    /** The dispatching branch — the one that answers for the freight. */
+    ownerBranchId: string;
+    manifestNumber: string;
+    orgId: string;
+    reconciliation: ReconcileResult;
+    sealBroken: boolean;
+    shortReasonId: string | null;
+    excessReasonId: string | null;
+    sealReasonId: string | null;
+  },
+  warnings: string[],
+): Promise<string[]> {
+  const { reconciliation, manifestNumber } = input;
+  const numbers: string[] = [];
+
+  // LR numbers for the excess side. `ExcessPackage` carries the shipment
+  // it really belongs to but not its number, and an exception titled with
+  // a cuid is an exception nobody opens.
+  const excessShipmentIds = [
+    ...new Set(
+      reconciliation.excess
+        .map((item) => item.shipmentId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+
+  const lrByShipment = new Map<string, string>(
+    reconciliation.short.map((item) => [item.shipmentId, item.lrNumber ?? ""]),
+  );
+
+  if (excessShipmentIds.length > 0) {
+    const rows = await prisma.shipment.findMany({
+      where: { id: { in: excessShipmentIds } },
+      select: { id: true, lrNumber: true },
+    });
+    for (const row of rows) lrByShipment.set(row.id, row.lrNumber);
+  }
+
+  const common = {
+    orgId: input.orgId,
+    branchId: input.receivingBranchId,
+    ownerBranchId: input.ownerBranchId,
+    source: "hub",
+  } as const;
+
+  async function open(
+    args: Parameters<typeof raiseException>[0],
+  ): Promise<void> {
+    try {
+      const raised = await raiseException(args);
+      if (raised.created) numbers.push(raised.exception.number);
+    } catch (error) {
+      console.error("[hub/receipt] exception", error);
+      warnings.push(
+        `The discrepancies were saved but could not be raised in the exception tower. Raise them by hand against the dispatching branch.`,
+      );
+    }
+  }
+
+  // ── Short ─────────────────────────────────────────────────
+  const shortByShipment = new Map<string, string[]>();
+  for (const item of reconciliation.short) {
+    const list = shortByShipment.get(item.shipmentId) ?? [];
+    list.push(item.barcode ?? "unlabelled");
+    shortByShipment.set(item.shipmentId, list);
+  }
+
+  for (const [shipmentId, barcodes] of shortByShipment) {
+    const lr = lrByShipment.get(shipmentId) || "This consignment";
+    await open({
+      ...common,
+      kind: "SHORT_RECEIVED",
+      shipmentId,
+      reasonCodeId: input.shortReasonId,
+      title: `${barcodes.length} package${barcodes.length === 1 ? "" : "s"} short on ${lr}`,
+      detail:
+        `${manifestNumber} declared ${barcodes.length} package${barcodes.length === 1 ? "" : "s"} ` +
+        `(${barcodes.join(", ")}) that were never scanned at the receiving hub. ` +
+        `The dispatching branch loaded them and owns the shortage until it can show otherwise.`,
+      dedupeKey: `receipt:${input.receiptId}:short:${shipmentId}`,
+    });
+  }
+
+  // ── Excess, package by known consignment ──────────────────
+  const excessByShipment = new Map<string, string[]>();
+  const unidentified: string[] = [];
+
+  for (const item of reconciliation.excess) {
+    if (!item.shipmentId) {
+      unidentified.push(item.barcode);
+      continue;
+    }
+    const list = excessByShipment.get(item.shipmentId) ?? [];
+    list.push(item.barcode);
+    excessByShipment.set(item.shipmentId, list);
+  }
+
+  for (const [shipmentId, barcodes] of excessByShipment) {
+    const lr = lrByShipment.get(shipmentId) || "An unlisted consignment";
+    await open({
+      ...common,
+      kind: "EXCESS_RECEIVED",
+      shipmentId,
+      reasonCodeId: input.excessReasonId,
+      title: `${barcodes.length} package${barcodes.length === 1 ? "" : "s"} of ${lr} arrived unlisted`,
+      detail:
+        `${barcodes.join(", ")} ${barcodes.length === 1 ? "was" : "were"} scanned off the vehicle ` +
+        `but ${manifestNumber} does not list ${barcodes.length === 1 ? "it" : "them"}. ` +
+        `Almost certainly misrouted: the goods are here and the paperwork is somewhere else.`,
+      dedupeKey: `receipt:${input.receiptId}:excess:${shipmentId}`,
+    });
+  }
+
+  // ── Excess nothing in the system recognises ───────────────
+  if (unidentified.length > 0) {
+    await open({
+      ...common,
+      kind: "EXCESS_RECEIVED",
+      reasonCodeId: input.excessReasonId,
+      title: `${unidentified.length} unidentified package${unidentified.length === 1 ? "" : "s"} off ${manifestNumber}`,
+      detail:
+        `${unidentified.join(", ")} ${unidentified.length === 1 ? "was" : "were"} scanned at the dock and ` +
+        `${unidentified.length === 1 ? "matches" : "match"} nothing in the system — a foreign label, another ` +
+        `carrier's freight, or a misread. The goods are physically here and belong to nobody until somebody claims them.`,
+      dedupeKey: `receipt:${input.receiptId}:excess:unidentified`,
+    });
+  }
+
+  // ── Seal ──────────────────────────────────────────────────
+  // No `SEAL_BROKEN` kind exists in the tower, and inventing one is a
+  // schema change. `OTHER` carries it — the point is that a broken seal
+  // reaches a duty manager at all, rather than sitting on a receipt.
+  if (input.sealBroken) {
+    await open({
+      ...common,
+      kind: "OTHER",
+      priority: "HIGH",
+      reasonCodeId: input.sealReasonId,
+      title: `Seal broken on arrival — ${manifestNumber}`,
+      detail:
+        `The receiving clerk recorded the seal as broken or missing when the vehicle presented. ` +
+        `Everything on ${manifestNumber} was in an unsealed vehicle for some part of the journey, ` +
+        `whatever the reconciliation says.`,
+      dedupeKey: `receipt:${input.receiptId}:seal`,
+    });
+  }
+
+  return numbers;
 }
 
 /** Marks a discrepancy settled. Never deletes it — the row is the record. */

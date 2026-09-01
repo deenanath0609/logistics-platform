@@ -3,7 +3,7 @@ import Link from "next/link";
 import { format } from "date-fns";
 import { ChevronLeft, ScanLine } from "lucide-react";
 import { prisma } from "@/lib/prisma";
-import { requirePermission } from "@/lib/auth/session";
+import { requirePermission, can } from "@/lib/auth/session";
 import { branchScope } from "@/server/repositories/scope";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
@@ -27,7 +27,13 @@ export const dynamic = "force-dynamic";
  * Delhi clerk has no business seeing what Jaipur is expecting.
  */
 export default async function InboundPage() {
-  const user = await requirePermission("scan.inbound");
+  // `receipt.read`, matching the navigation entry that points here.
+  // Guarding on `scan.inbound` meant everybody who could read receipts and
+  // not scan — management, the ops reader roles — was offered "Inbound
+  // receipts" in the sidebar and thrown to the 403 page for taking it.
+  // Receiving itself is a separate permission, checked on the control.
+  const user = await requirePermission("receipt.read");
+  const canReceive = can(user, "scan.inbound");
 
   const scope = branchScope(user, "destinationBranchId");
 
@@ -232,14 +238,29 @@ export default async function InboundPage() {
                         : "—"}
                     </TableCell>
                     <TableCell className="text-right">
-                      <OpenReceiptButton
-                        manifestId={manifest.id}
-                        manifestNumber={manifest.number}
-                        branchId={manifest.destinationBranchId}
-                        originCode={manifest.originBranch.code}
-                        sealNumber={manifest.trip?.sealNumber ?? null}
-                        packages={manifest.totalPackages}
-                      />
+                      {/*
+                        A manifest closed for dispatch but never gated out
+                        has, on paper, not left its origin — every
+                        consignment on it is still MANIFESTED, and the
+                        spine takes an inbound scan from DISPATCHED. The
+                        Receive button used to be offered anyway, and the
+                        receipt that followed ticked green while moving
+                        nothing. Say so instead.
+                      */}
+                      {manifest.status === "CLOSED" ? (
+                        <span className="text-xs text-warn">
+                          Not gated out yet
+                        </span>
+                      ) : canReceive ? (
+                        <OpenReceiptButton
+                          manifestId={manifest.id}
+                          manifestNumber={manifest.number}
+                          branchId={manifest.destinationBranchId}
+                          originCode={manifest.originBranch.code}
+                          sealNumber={manifest.trip?.sealNumber ?? null}
+                          packages={manifest.totalPackages}
+                        />
+                      ) : null}
                     </TableCell>
                   </TableRow>
                 ))}
