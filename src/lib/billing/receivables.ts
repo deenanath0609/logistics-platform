@@ -120,25 +120,53 @@ export async function customerLedger(
   return { summary, rows, unallocated };
 }
 
+/**
+ * The largest open book this will read in one pass.
+ *
+ * Every *open* invoice in the organisation, which is a set the business
+ * keeps small by getting paid — but not one with any hard ceiling, and
+ * this screen had no `take` at all. A carrier a year into monthly bill
+ * runs across seven branches was loading the entire open ledger on every
+ * page view, and on every keystroke in the search box.
+ *
+ * A plain cap is the wrong fix on its own: truncating the rows silently
+ * under-states the total book and the ageing profile drawn from it, and a
+ * receivables figure that is quietly too low is worse than a slow screen.
+ * So the query asks for one more than the cap, and reports whether it hit
+ * it — the screen says so rather than showing a smaller number in
+ * confident type.
+ */
+const OVERVIEW_INVOICE_CAP = 5000;
+
 /** Ageing across every customer, for the receivables screen. */
 export async function receivablesOverview(
-  options: { asOf?: Date; branchId?: string | null; search?: string },
+  options: { asOf?: Date; branchId?: string | null; search?: string; take?: number },
   user: SessionUser,
-): Promise<
-  Array<{
+): Promise<{
+  accounts: Array<{
     customerId: string;
     code: string;
     name: string;
     creditLimit: Decimal | null;
     summary: AgeingSummary;
-  }>
-> {
+  }>;
+  /** True when the open book is larger than one pass of this screen. */
+  truncated: boolean;
+  invoicesRead: number;
+}> {
   const asOf = options.asOf ?? new Date();
+  const cap = options.take ?? OVERVIEW_INVOICE_CAP;
 
-  const invoices = await prisma.invoice.findMany({
+  const found = await prisma.invoice.findMany({
+    // One more than the cap, so hitting it is detectable rather than
+    // indistinguishable from a book that is exactly `cap` invoices long.
+    take: cap + 1,
     where: {
       status: { in: ["ISSUED", "PARTIALLY_PAID", "CREDITED"] },
       amountDue: { gt: 0 },
+      // The caller's branch filter first, then the session's scope — and
+      // the scope must win, so it is spread last. Both write `branchId`,
+      // and the later key replaces the earlier one.
       ...(options.branchId ? { branchId: options.branchId } : {}),
       ...branchScope(user, "branchId"),
       ...(options.search
@@ -164,6 +192,9 @@ export async function receivablesOverview(
       customer: { select: { code: true, name: true, creditLimit: true } },
     },
   });
+
+  const truncated = found.length > cap;
+  const invoices = truncated ? found.slice(0, cap) : found;
 
   const grouped = new Map<
     string,
@@ -199,15 +230,19 @@ export async function receivablesOverview(
     grouped.set(invoice.customerId, bucket);
   }
 
-  return [...grouped.values()]
-    .map((entry) => ({
-      customerId: entry.customerId,
-      code: entry.code,
-      name: entry.name,
-      creditLimit: entry.creditLimit,
-      summary: ageLedger(entry.items, asOf),
-    }))
-    .sort((a, b) => b.summary.total.comparedTo(a.summary.total));
+  return {
+    accounts: [...grouped.values()]
+      .map((entry) => ({
+        customerId: entry.customerId,
+        code: entry.code,
+        name: entry.name,
+        creditLimit: entry.creditLimit,
+        summary: ageLedger(entry.items, asOf),
+      }))
+      .sort((a, b) => b.summary.total.comparedTo(a.summary.total)),
+    truncated,
+    invoicesRead: invoices.length,
+  };
 }
 
 // ────────────────────────────────────────────────────────────

@@ -87,6 +87,22 @@ function templateIssues(parsed: Parsed): string | null {
   return null;
 }
 
+/**
+ * The one rule the toggle already enforced and the form did not.
+ *
+ * `setTemplateActive` refuses to switch on an SMS template with no DLT id,
+ * because an Indian operator accepts and then drops one without a delivery
+ * report. The edit dialog carries the same switch and went straight past
+ * that check — so the guard was one click wide, and the way round it was
+ * the more obvious of the two. Same refusal, same words, both doors.
+ */
+function dltIssue(parsed: Parsed): string | null {
+  if (parsed.isActive && parsed.channel === "SMS" && !parsed.dltTemplateId?.trim()) {
+    return "This SMS template has no DLT id. Activating it would send messages the operator drops silently. Save it inactive, register the text on the DLT portal, then switch it on.";
+  }
+  return null;
+}
+
 function fieldErrors(error: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
   for (const issue of error.issues) {
@@ -108,7 +124,7 @@ export async function createTemplate(
       return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
     }
 
-    const issue = templateIssues(parsed.data);
+    const issue = templateIssues(parsed.data) ?? dltIssue(parsed.data);
     if (issue) return { error: issue };
 
     const created = await prisma.notificationTemplate.create({
@@ -155,7 +171,7 @@ export async function updateTemplate(
       return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
     }
 
-    const issue = templateIssues(parsed.data);
+    const issue = templateIssues(parsed.data) ?? dltIssue(parsed.data);
     if (issue) return { error: issue };
 
     const before = await prisma.notificationTemplate.findUnique({ where: { id } });

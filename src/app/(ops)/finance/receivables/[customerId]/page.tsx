@@ -17,6 +17,7 @@ import {
   StatusPill,
 } from "@/components/finance/finance-shell";
 import { formatDate, formatMoney, isoDate } from "@/components/finance/format";
+import { endOfBusinessDay, startOfBusinessDay } from "@/lib/time/business-day";
 import {
   Table,
   TableBody,
@@ -25,7 +26,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { recordPaymentAction, setCreditTermsAction } from "../actions";
+import {
+  allocateOnAccountAction,
+  recordPaymentAction,
+  setCreditTermsAction,
+} from "../actions";
 
 export const metadata: Metadata = { title: "Customer ledger" };
 export const dynamic = "force-dynamic";
@@ -120,10 +125,26 @@ export default async function CustomerLedgerPage({
 
   if (!customer || customer.deletedAt) notFound();
 
+  /**
+   * The statement window, on the carrier's calendar.
+   *
+   * `new Date(now.getFullYear(), now.getMonth() - 3, 1)` reads the
+   * *server's* local month, and the bounds off the query string were bare
+   * `new Date("yyyy-mm-dd")` — UTC midnight. Nothing pins `process.env.TZ`,
+   * so on a UTC container this window ran five and a half hours adrift at
+   * both ends: a receipt banked at 23:00 IST on the last day of the period
+   * fell outside the statement, and one at 02:00 IST on the first day of
+   * the next fell inside it. A statement that does not tie out is the
+   * document a customer disputes.
+   */
   const now = new Date();
-  const defaultFrom = new Date(now.getFullYear(), now.getMonth() - 3, 1);
-  const periodFrom = from ? new Date(from) : defaultFrom;
-  const periodTo = to ? new Date(to) : now;
+  // Three months back to the 1st, unchanged — but counted off the business
+  // calendar day rather than the server's, so the window does not shift a
+  // month at 01:00 IST on the 1st.
+  const [todayYear, todayMonth] = isoDate(now).split("-").map(Number);
+  const defaultFrom = new Date(Date.UTC(todayYear, todayMonth - 1 - 3, 1));
+  const periodFrom = startOfBusinessDay(from ? new Date(from) : defaultFrom);
+  const periodTo = endOfBusinessDay(to ? new Date(to) : now);
 
   const [ledger, statement, credit, onAccount] = await Promise.all([
     customerLedger({ customerId }, user),
@@ -373,6 +394,7 @@ export default async function CustomerLedgerPage({
                   <TableHead>Received</TableHead>
                   <TableHead>Mode</TableHead>
                   <TableHead className="text-right">Unapplied</TableHead>
+                  {canRecord && <TableHead className="w-10" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -384,6 +406,60 @@ export default async function CustomerLedgerPage({
                     <TableCell className="text-right">
                       <MoneyCell value={payment.unallocated.toString()} tone="text-ok" />
                     </TableCell>
+                    {/*
+                      ── The way to apply it ─────────────────────────────
+
+                      `allocateOnAccountAction` was written, gated on
+                      `payment.record` and audited, and no screen ever
+                      reached it — so money received without an invoice
+                      named sat here for good. That is not merely untidy:
+                      `checkCustomerCredit` counts the open invoices and
+                      does *not* net what is sitting on account, so a
+                      customer who had paid a lump sum still had the whole
+                      amount against their credit limit and got refused at
+                      booking. This table said the money was in; the
+                      booking desk said the account was over its limit.
+                      Both were reading the same database.
+                      ───────────────────────────────────────────────────
+                    */}
+                    {canRecord && (
+                      <TableCell className="text-right">
+                        <EntityFormDialog
+                          title={`Apply ${payment.number}`}
+                          description="Applies money already received to an invoice that is still open. The receipt is not re-banked — this is the allocation, not a new payment."
+                          fields={[
+                            {
+                              type: "select",
+                              name: "invoiceId",
+                              label: "Apply to",
+                              required: true,
+                              options: openInvoiceOptions,
+                              placeholder: "Pick an invoice",
+                            },
+                            {
+                              type: "number",
+                              name: "amount",
+                              label: "Amount to apply (₹)",
+                              required: true,
+                              step: "0.01",
+                              defaultValue: payment.unallocated.toString(),
+                              help: `${formatMoney(payment.unallocated.toString())} is unapplied on this receipt.`,
+                            },
+                          ]}
+                          hidden={{ id: payment.id }}
+                          action={allocateOnAccountAction}
+                          submitLabel="Apply"
+                          trigger={{
+                            label: "Apply",
+                            icon: "plus",
+                            size: "xs",
+                            variant: "outline",
+                            disabled: openInvoiceOptions.length === 0,
+                            disabledReason: "Nothing is open on this account to apply it to.",
+                          }}
+                        />
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>

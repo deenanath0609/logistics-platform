@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
+import { coverageGaps } from "@/lib/pricing/rerate";
 import { PageHeader } from "@/components/shell/page-header";
 import { TableFrame, EmptyState } from "@/components/data/data-shell";
 import { EntityFormDialog, type EntityField } from "@/components/finance/entity-form";
@@ -87,7 +88,7 @@ export default async function RateCardsPage() {
   const user = await requirePermission("ratecard.read");
   const writable = can(user, "ratecard.manage");
 
-  const [cards, customers, fuelRules, gapCount] = await Promise.all([
+  const [cards, customers, fuelRules, gaps] = await Promise.all([
     prisma.rateCard.findMany({
       where: { orgId: user.orgId },
       orderBy: [{ isActive: "desc" }, { customerId: "asc" }, { code: "asc" }],
@@ -117,10 +118,25 @@ export default async function RateCardsPage() {
       orderBy: { effectiveFrom: "desc" },
       take: 6,
     }),
-    prisma.freightCalculation.count({
-      where: { trace: { path: ["unrated"], equals: true } },
-    }),
+    /*
+      The same list the coverage-gap screen draws, not a different count.
+
+      This was `freightCalculation.count({ trace.unrated = true })`, which
+      is every unrated calculation ever written: not one row per
+      consignment, not scoped to the reader's branches, and never dropping
+      a lane that has since been priced — because an append-only record
+      keeps the unrated calculation forever. So the tile climbed for good
+      and a Gurugram manager was counting Jaipur's misses. Clicking through
+      to a screen showing three rows under a tile reading forty-seven is
+      how a worklist stops being believed.
+
+      `coverageGaps` applies the branch scope and the latest-calculation
+      rule, so the number is now the number of rows behind the link.
+    */
+    coverageGaps({ orgId: user.orgId, take: 400 }, user),
   ]);
+
+  const gapCount = gaps.length;
 
   const approvedVersions = cards.reduce(
     (sum, card) => sum + card.versions.filter((v) => v.isApproved).length,
@@ -186,6 +202,11 @@ export default async function RateCardsPage() {
             value: String(gapCount),
             tone: gapCount > 0 ? "warn" : "ok",
             hint: "Consignments that booked unrated",
+            // The only way in. `/finance/coverage-gaps` is in no nav group
+            // and hung off `/finance`, which is itself linked from nowhere,
+            // so until this tile became a link the screen that surfaces
+            // unpriced lanes could only be reached by typing the URL.
+            href: "/finance/coverage-gaps",
           },
         ]}
       />

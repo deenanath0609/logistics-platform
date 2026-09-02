@@ -202,6 +202,7 @@ function stubAdapter(behaviour: "ok" | "throw" | "reject" = "ok") {
   setChannelAdapter("SMS", {
     provider: "stub",
     channel: "SMS",
+    live: true,
     async send(message) {
       sends.push({ to: message.to, body: message.body });
       if (behaviour === "throw") throw new Error("gateway unreachable");
@@ -350,6 +351,7 @@ describe("recipients and preferences", () => {
     setChannelAdapter("EMAIL", {
       provider: "stub",
       channel: "EMAIL",
+      live: true,
       async send() {
         throw new Error("should not be called");
       },
@@ -475,5 +477,111 @@ describe("relevance and template health", () => {
     store.templates = [{ ...DELIVERED_SMS, isActive: false }];
 
     expect((await dispatchEvent(deliveredEvent())).sent).toBe(0);
+  });
+});
+
+/**
+ * A placeholder with nothing behind it used to refuse the whole message,
+ * whatever the reason it was empty. That is right for a name the trigger
+ * cannot supply — a typo, or a template on the wrong trigger — and wrong
+ * for a field of this consignment that is legitimately blank. It was the
+ * second case that was actually happening: `codAmount` is null on every
+ * consignment that is not COD, so the out-for-delivery message was refused
+ * for the majority of parcels rather than sent without a figure.
+ */
+describe("placeholders with no value", () => {
+  const OUT_FOR_DELIVERY = {
+    ...DELIVERED_SMS,
+    id: "tpl_ofd",
+    code: "OUT_FOR_DELIVERY",
+    eventType: "shipment.run_started",
+    body: "{{brandName}}: LR {{lrNumber}} is out for delivery. COD due: {{codAmount}}.",
+    variables: ["brandName", "lrNumber", "codAmount"],
+  };
+
+  function runStarted() {
+    return {
+      outboxId: "obx_run",
+      eventType: "shipment.run_started",
+      aggregate: "Shipment",
+      aggregateId: "shp_1",
+      payload: { eventId: "evt_run", runId: null, taskId: null },
+    };
+  }
+
+  it("sends anyway when the trigger supplies the name but this shipment has no value", async () => {
+    store.templates = [OUT_FOR_DELIVERY];
+    store.shipment = { ...shipment(), codAmount: null, paymentType: "PAID" };
+
+    const summary = await dispatchEvent(runStarted());
+
+    expect(summary.failed).toBe(0);
+    expect(summary.sent).toBe(1);
+    expect(store.logs[0].status).toBe("SENT");
+  });
+
+  it("still refuses a name the trigger cannot supply at all", async () => {
+    store.templates = [
+      {
+        ...OUT_FOR_DELIVERY,
+        body: "{{brandName}}: {{lrNumber}} — {{invoiceBalance}}",
+        variables: ["brandName", "lrNumber", "invoiceBalance"],
+      },
+    ];
+
+    const summary = await dispatchEvent(runStarted());
+
+    expect(summary.failed).toBe(1);
+    expect(sends).toHaveLength(0);
+    expect(store.logs[0].status).toBe("FAILED");
+    expect(store.logs[0].error).toContain("invoiceBalance");
+  });
+
+  it("keeps a required name required, so a blank one still refuses", async () => {
+    // `trackingUrl` and `lrNumber` are marked required in the catalogue: a
+    // message inviting somebody to track a consignment on a link that is
+    // not there is worse than no message. Everything else on a shipment may
+    // legitimately be blank.
+    const { requiredVariables } = await import("./variables");
+    const required = requiredVariables("shipment.run_started");
+
+    expect(required.has("trackingUrl")).toBe(true);
+    expect(required.has("lrNumber")).toBe(true);
+    expect(required.has("codAmount")).toBe(false);
+  });
+});
+
+/**
+ * The delivery OTP is what signs for the parcel. Sitting in the send log
+ * next to the number it went to, it is authentication written down and
+ * readable by everyone holding `master.read` — including the branch staff
+ * whose delivery it would let them close without the consignee.
+ */
+describe("secrets in the send log", () => {
+  it("sends the code to the gateway and never writes it down", async () => {
+    store.templates = [
+      {
+        ...DELIVERED_SMS,
+        id: "tpl_otp",
+        code: "DELIVERY_OTP",
+        eventType: "notification.delivery_otp",
+        recipientKind: "CONSIGNEE",
+        body: "{{otpCode}} is your {{brandName}} delivery code for {{lrNumber}}.",
+        variables: ["otpCode", "brandName", "lrNumber"],
+      },
+    ];
+
+    const summary = await dispatchEvent({
+      outboxId: "obx_otp",
+      eventType: "notification.delivery_otp",
+      aggregate: "Shipment",
+      aggregateId: "shp_1",
+      payload: { eventId: "evt_otp", code: "482193" },
+    });
+
+    expect(summary.sent).toBe(1);
+    expect(sends[0].body).toContain("482193");
+    expect(store.logs[0].body).not.toContain("482193");
+    expect(store.logs[0].body).toContain("••••");
   });
 });

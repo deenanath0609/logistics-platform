@@ -54,7 +54,9 @@ export async function seedNotificationTemplates(orgId: string) {
           code: tpl.code,
           channel: tpl.channel,
           language: tpl.language ?? "en",
-          isActive: tpl.channel !== "SMS",
+          // What the default set itself says, not a rule restated here.
+          // `default-templates.ts` explains why SMS ships off.
+          isActive: tpl.isActive,
         },
       });
       created++;

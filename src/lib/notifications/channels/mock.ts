@@ -22,6 +22,11 @@ export function mockAdapter(channel: NotificationChannel): ChannelAdapter {
   return {
     provider: "mock",
     channel,
+    // Nothing leaves the building. See `ChannelAdapter.live`.
+    live: false,
+    note:
+      `No gateway is connected for ${channel}. Messages are rendered, ` +
+      "logged and discarded — the send log will read SENT for every one of them.",
     async send(message: OutboundMessage): Promise<SendResult> {
       // The recipient is masked even here. Development logs get pasted into
       // tickets, and a real consignee's number should not travel with them.

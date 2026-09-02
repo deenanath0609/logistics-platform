@@ -111,6 +111,33 @@ export function missingVariables(
   return extractPlaceholders(body).filter((key) => !supplied(variables, key));
 }
 
+/**
+ * The same variable map with the secrets replaced.
+ *
+ * Rendering twice — once with this, once without — is how a one-time code
+ * reaches the gateway and never reaches the send log. The alternative,
+ * searching the rendered text for the code and cutting it out, fails
+ * quietly the moment a code is short enough to appear somewhere else in the
+ * body, and fails silently on a template that renders it twice.
+ *
+ * A key with no value is left alone, so a redacted render still reports the
+ * same missing placeholders as the real one.
+ */
+export function redactSecrets(
+  variables: TemplateVariables,
+  secrets: ReadonlySet<string>,
+  mask = "••••",
+): TemplateVariables {
+  const out: TemplateVariables = { ...variables };
+  for (const key of secrets) {
+    const value = out[key];
+    if (value !== null && value !== undefined && String(value).length > 0) {
+      out[key] = mask;
+    }
+  }
+  return out;
+}
+
 export type TemplateValidation = {
   ok: boolean;
   /** Used in the body but not declared — the send will render literally. */

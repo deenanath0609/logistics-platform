@@ -29,21 +29,42 @@ export async function prepareSettlementAction(
     const tripId = String(formData.get("tripId") ?? "");
     if (!tripId) return { error: "Pick a trip." };
 
-    const deductionsRaw = formData.get("deductions");
-    const deductions = deductionsRaw ? Number(deductionsRaw) : 0;
+    /*
+      The digits that were typed, not a double.
+
+      `MoneyIn` takes a string and `dec()` reads it exactly; `Number()` is a
+      lossy first step on figures that are subtracted from a driver's
+      earning to produce the amount actually handed over. The rest of this
+      module was moved off `Number` for exactly this reason — these two were
+      missed, and a deduction is the one line on a settlement a driver
+      argues about.
+    */
+    const deductionsRaw = String(formData.get("deductions") ?? "").trim();
+    const deductions =
+      deductionsRaw !== "" && Number.isFinite(Number(deductionsRaw)) ? deductionsRaw : "0";
+
+    if (Number(deductions) < 0) {
+      return {
+        error: "A deduction cannot be negative.",
+        fieldErrors: { deductions: "Zero or more" },
+      };
+    }
+
+    const tripEarningRaw = String(formData.get("tripEarning") ?? "").trim();
 
     const result = await createSettlement(
       {
         tripId,
-        deductions: Number.isFinite(deductions) ? deductions : 0,
+        deductions,
         deductionNote: (formData.get("deductionNote") as string) ?? null,
         // Still passed, and no longer trusted over the trip: the service
         // uses it only where the trip carries no `freightPayable` of its
         // own, and records in the audit row that it was typed. It used to
         // win outright, on any trip, for anyone holding `settlement.prepare`.
-        tripEarning: formData.get("tripEarning")
-          ? Number(formData.get("tripEarning"))
-          : undefined,
+        tripEarning:
+          tripEarningRaw !== "" && Number.isFinite(Number(tripEarningRaw))
+            ? tripEarningRaw
+            : undefined,
       },
       actor,
     );

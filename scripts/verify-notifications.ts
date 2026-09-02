@@ -20,6 +20,9 @@ import {
 } from "../src/lib/tenant";
 import type { SessionUser } from "../src/lib/auth/session";
 import { createBooking } from "../src/lib/shipment/booking";
+import { enqueueOutbox } from "../src/server/services/outbox";
+import { transportFor } from "../src/lib/notifications/transport";
+import { DEFAULT_TEMPLATES } from "../src/lib/notifications/default-templates";
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = "") => {
@@ -128,7 +131,6 @@ async function run() {
     prisma.city.findFirstOrThrow({ where: { code: "JAI" } }),
   ]);
 
-  const before = await prisma.notificationLog.count();
 
   const booking = await createBooking(
     {
@@ -162,7 +164,20 @@ async function run() {
     process.exit(1);
   }
 
-  const queued = await prisma.outboxEvent.count({ where: { status: "PENDING" } });
+  /**
+   * Everything measured from here on is scoped to this booking.
+   *
+   * It used to compare `notificationLog.count()` before and after — the
+   * whole table — which is an assertion about how busy the database is
+   * rather than about this run. Two people running verifications at once,
+   * or a worker draining somebody else's backlog mid-wait, and it reports a
+   * defect in a product that is fine. `verify-reweigh.ts` learned this the
+   * expensive way.
+   */
+  const ours = { shipmentId: booking.shipmentId };
+  const queued = await prisma.outboxEvent.count({
+    where: { status: "PENDING", aggregateId: booking.shipmentId },
+  });
   check("the booking queued an outbox event", queued > 0, `${queued} pending`);
 
   // The server drains on a 5s timer. Give it two cycles plus slack.
@@ -171,11 +186,11 @@ async function run() {
 
   check("the server drained it (not this script)", drained);
 
-  const after = await prisma.notificationLog.count();
+  const after = await prisma.notificationLog.count({ where: ours });
   check(
-    "notification rows were written",
-    after > before,
-    `${before} → ${after}`,
+    "notification rows were written for this consignment",
+    after > 0,
+    `${after} row(s)`,
   );
 
   const rows = await prisma.notificationLog.findMany({
@@ -185,6 +200,7 @@ async function run() {
       status: true,
       recipient: true,
       eventType: true,
+      providerResponse: true,
       template: { select: { code: true } },
     },
   });
@@ -208,9 +224,30 @@ async function run() {
     rows.every((r) => r.status !== "FAILED"),
   );
 
+  /**
+   * A SENT row that nothing actually sent has to say so.
+   *
+   * Every adapter in this repository is either the mock — which returns
+   * success so the whole path is exercised — or a real provider whose
+   * client has not been written and which therefore throws. So a send log
+   * full of green is the *expected* state, and the only thing separating it
+   * from a working gateway is the `provider` key on the row. Both screens
+   * now read that key; this is the assertion that keeps it being written.
+   */
+  for (const row of rows.filter((r) => r.status === "SENT")) {
+    const transport = transportFor(row.channel);
+    const marked =
+      (row.providerResponse as { provider?: string } | null)?.provider === "mock";
+    check(
+      `a simulated ${row.channel} send is marked as one`,
+      transport.live || marked,
+      transport.live ? "gateway is live" : "providerResponse.provider",
+    );
+  }
+
   // Replaying must not double-send. The dedupe key is derived from the
   // event id, so a second drain of the same event is a no-op.
-  const beforeReplay = await prisma.notificationLog.count();
+  const beforeReplay = await prisma.notificationLog.count({ where: ours });
   await prisma.outboxEvent.updateMany({
     where: { aggregateId: booking.shipmentId, status: "DONE" },
     data: { status: "PENDING", nextAttemptAt: new Date() },
@@ -219,16 +256,99 @@ async function run() {
   console.log("\n  replaying the same events…");
   await waitForOutboxIdle();
 
-  const afterReplay = await prisma.notificationLog.count();
+  const afterReplay = await prisma.notificationLog.count({ where: ours });
   check(
     "a replay does not send twice",
     afterReplay === beforeReplay,
     `${beforeReplay} → ${afterReplay}`,
   );
 
+  await otpNeverReachesTheLog(booking.shipmentId);
+
   console.log(failures === 0 ? "\nPipeline works.\n" : `\n${failures} failed.\n`);
   await prisma.$disconnect();
   process.exit(failures === 0 ? 0 : 1);
+}
+
+/**
+ * The delivery code goes to the phone and nowhere else.
+ *
+ * `auth/otp-delivery.ts` is careful about this for the *sign-in* code — it
+ * writes "a code was sent" and never the code. The delivery OTP travels the
+ * other road, through a template whose body is `{{otpCode}} is your ...` and
+ * whose rendered text is stored on the log row the send-log screen prints.
+ * Anyone holding `master.read` could read the code that signs for a parcel,
+ * which is most of a branch.
+ *
+ * Proved end to end rather than in a unit test because the property that
+ * matters is about the row in the database, not about a function. The
+ * DELIVERY_OTP template ships inactive pending DLT, so this switches it on
+ * for the length of the check and puts it back in a `finally` — including
+ * the DLT id, which is a placeholder here and must not be left behind
+ * looking like a registration somebody obtained.
+ */
+async function otpNeverReachesTheLog(shipmentId: string): Promise<void> {
+  const template = await prisma.notificationTemplate.findFirst({
+    where: { code: "DELIVERY_OTP", channel: "SMS" },
+    select: { id: true, isActive: true, dltTemplateId: true, body: true },
+  });
+
+  if (!template) {
+    check("the delivery OTP template is seeded", false, "DELIVERY_OTP/SMS not found");
+    return;
+  }
+
+  const seeded = DEFAULT_TEMPLATES.find(
+    (t) => t.code === "DELIVERY_OTP" && t.channel === "SMS",
+  );
+  check(
+    "the delivery OTP template carries the code in its body",
+    Boolean(seeded && seeded.body.includes("{{otpCode}}")),
+  );
+
+  const code = String(100000 + Math.floor(Math.random() * 899999));
+
+  try {
+    await prisma.notificationTemplate.update({
+      where: { id: template.id },
+      data: { isActive: true, dltTemplateId: template.dltTemplateId ?? "VERIFY-ONLY" },
+    });
+
+    await enqueueOutbox({
+      eventType: "notification.delivery_otp",
+      aggregate: "Shipment",
+      aggregateId: shipmentId,
+      payload: { eventId: `verify-otp-${code}`, code, channel: "SMS" },
+    });
+
+    console.log("\n  waiting for the delivery-OTP drain…");
+    await waitForOutboxIdle();
+
+    const row = await prisma.notificationLog.findFirst({
+      where: { shipmentId, eventType: "notification.delivery_otp" },
+      orderBy: { queuedAt: "desc" },
+      select: { status: true, body: true, error: true },
+    });
+
+    check("the delivery OTP produced a log row", row !== null, row?.status ?? "none");
+    if (!row) return;
+
+    check(
+      "the stored body does not contain the code",
+      !row.body.includes(code),
+      row.body.slice(0, 90),
+    );
+    check(
+      "the stored body shows the code was redacted, not omitted",
+      row.body.includes("•"),
+      row.body.slice(0, 90),
+    );
+  } finally {
+    await prisma.notificationTemplate.update({
+      where: { id: template.id },
+      data: { isActive: template.isActive, dltTemplateId: template.dltTemplateId },
+    });
+  }
 }
 
 async function main() {

@@ -19,6 +19,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { isoDate } from "./format";
 import type { FinanceActionState } from "@/app/(ops)/finance/action-state";
 
 /**
@@ -96,7 +97,14 @@ export type EntityTrigger = {
 function valueOf(record: Record<string, unknown> | undefined, name: string): string {
   const raw = record?.[name];
   if (raw === null || raw === undefined) return "";
-  if (raw instanceof Date) return raw.toISOString().slice(0, 10);
+  // `isoDate`, not `toISOString()`. This is the same UTC-day defect that was
+  // fixed in `format.ts` and missed here: `toISOString().slice(0, 10)` is the
+  // *UTC* calendar day, and nothing pins `process.env.TZ`, so on a UTC
+  // container every date input prefilled from an existing record read
+  // **yesterday** between 00:00 and 05:30 IST. Re-saving the record without
+  // touching the date field then moved it back a day — silently, on columns
+  // that are `@db.Date` and carry no zone to correct it later.
+  if (raw instanceof Date) return isoDate(raw);
   return String(raw);
 }
 

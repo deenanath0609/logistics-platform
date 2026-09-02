@@ -22,6 +22,10 @@ const store = vi.hoisted(() => ({
   invoiceNumber: "INV/2627/JAI/0007",
   isReverseCharge: false,
   permitted: true,
+  /** Whether a named `shipmentId` resolves at all. */
+  shipmentExists: true,
+  /** The account that consignment is billed to — the invoice's, by default. */
+  shipmentConsignor: "cust-acme",
   created: [] as Array<Record<string, unknown>>,
   audits: [] as Array<Record<string, unknown>>,
   numbersIssued: [] as string[],
@@ -68,6 +72,24 @@ vi.mock("@/lib/prisma", () => {
           ? null
           : { hsnSac: "996791", invoice: invoiceRow() },
     },
+    /*
+      The consignment a named `shipmentId` resolves to.
+
+      `createDebitNote` now verifies it before writing it to the line, so
+      the mock has to answer — `store.shipmentConsignor` is what decides
+      whether it belongs to the account the invoice bills, and
+      `store.shipmentExists` covers an id that resolves to nothing at all.
+    */
+    shipment: {
+      findFirst: async () =>
+        store.shipmentExists
+          ? {
+              id: "shp-1",
+              lrNumber: "CL202608010001",
+              consignorId: store.shipmentConsignor,
+            }
+          : null,
+    },
     invoice: {
       findUnique: async () => (store.invoiceStatus === null ? null : invoiceRow()),
       create: async (args: { data: Record<string, unknown> }) => {
@@ -108,6 +130,8 @@ beforeEach(() => {
   store.invoiceNumber = "INV/2627/JAI/0007";
   store.isReverseCharge = false;
   store.permitted = true;
+  store.shipmentExists = true;
+  store.shipmentConsignor = "cust-acme";
   store.created.length = 0;
   store.audits.length = 0;
   store.numbersIssued.length = 0;
@@ -289,5 +313,71 @@ describe("createDebitNote", () => {
     expect(store.audits).toHaveLength(1);
     expect(store.audits[0].reason).toBe("Chargeable weight revised at the Jaipur hub.");
     expect((store.audits[0].after as Record<string, unknown>).kind).toBe("DEBIT_NOTE");
+  });
+
+  /**
+   * The consignment on the line is checked, not taken on trust.
+   *
+   * `shipmentId` went onto the invoice line unverified. The dialog never
+   * renders the field, but a server action does not pass the dialog and
+   * `createDebitNoteAction` reads it straight off the form — so another
+   * account's consignment could be attached to this customer's correction.
+   * `liveInvoiceForShipment` then resolves that consignment to *this*
+   * invoice, and the next re-weigh of it bills the wrong customer.
+   *
+   * Both refusals must write nothing at all, and must not burn a number.
+   */
+  it("refuses a consignment billed to a different account", async () => {
+    store.shipmentConsignor = "cust-somebody-else";
+
+    const result = await createDebitNote(
+      {
+        againstInvoiceId: "inv-1",
+        shipmentId: "shp-1",
+        amount: "400",
+        reason: "Probe — another account's consignment.",
+      },
+      ACTOR,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.created).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+    expect(store.numbersIssued).toHaveLength(0);
+  });
+
+  it("refuses a consignment id that resolves to nothing", async () => {
+    store.shipmentExists = false;
+
+    const result = await createDebitNote(
+      {
+        againstInvoiceId: "inv-1",
+        shipmentId: "shp-does-not-exist",
+        amount: "400",
+        reason: "Probe — invented consignment.",
+      },
+      ACTOR,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.created).toHaveLength(0);
+    expect(store.audits).toHaveLength(0);
+    expect(store.numbersIssued).toHaveLength(0);
+  });
+
+  it("still accepts the consignment the invoice actually bills", async () => {
+    const result = await createDebitNote(
+      {
+        againstInvoiceId: "inv-1",
+        shipmentId: "shp-1",
+        amount: "400",
+        taxAmount: "72",
+        reason: "Chargeable weight revised at the hub.",
+      },
+      ACTOR,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(store.created).toHaveLength(1);
   });
 });

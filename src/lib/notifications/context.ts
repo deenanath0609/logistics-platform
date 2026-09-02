@@ -226,7 +226,11 @@ export async function baseVariables(
     chargeableWeight: context.chargeableWeight.toString(),
     expectedDeliveryDate: day(context.expectedDeliveryAt),
     paymentType: PAYMENT_LABEL[context.paymentType] ?? context.paymentType,
-    codAmount: rupees(context.codAmount),
+    // Zero rather than nothing. Most consignments are not COD, and a
+    // template that mentions the amount due at the door has to render for
+    // those too — "COD due: 0.00" is a true statement, an unrendered
+    // placeholder is not.
+    codAmount: rupees(context.codAmount) ?? "0.00",
     currentStatus: context.currentStatus.replaceAll("_", " ").toLowerCase(),
   };
 }
@@ -282,8 +286,21 @@ export async function eventVariables(
       };
 
     case "shipment.run_started": {
+      // The event says which run it was. Asking the shipment for its most
+      // recently assigned task instead answers with a *later* run on a
+      // reattempted consignment, and answers with nothing at all when the
+      // out-scan was inferred at the door for a delivery nobody planned a
+      // run for — which is where the missing agent names were coming from.
+      const runId = asString(payload.runId);
+      const taskId = asString(payload.taskId);
+
       const task = await prisma.deliveryTask.findFirst({
-        where: { shipmentId: context.id, runId: { not: null } },
+        where: taskId
+          ? { id: taskId, shipmentId: context.id }
+          : {
+              shipmentId: context.id,
+              ...(runId ? { runId } : { runId: { not: null } }),
+            },
         orderBy: { assignedAt: "desc" },
         select: { run: { select: { agent: { select: { name: true, mobile: true } } } } },
       });

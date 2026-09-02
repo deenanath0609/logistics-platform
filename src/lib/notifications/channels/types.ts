@@ -48,6 +48,20 @@ export interface ChannelAdapter {
   /** Provider name as it appears in `SMS_PROVIDER` etc. */
   readonly provider: string;
   readonly channel: NotificationChannel;
+  /**
+   * Whether anything actually leaves the building.
+   *
+   * The mock returns `ok: true` — that is the point of it, it exercises the
+   * whole path — and a send log full of SENT rows produced by it is
+   * indistinguishable from a working gateway unless somebody reads the JSON
+   * on each row. A carrier looking at that screen has to be told, so the
+   * adapter says so about itself and the screens print it.
+   *
+   * Flip this to `true` in the same commit that writes the provider client.
+   */
+  readonly live: boolean;
+  /** One line an operator can act on, when `live` is false. */
+  readonly note?: string;
   send(message: OutboundMessage): Promise<SendResult>;
 }
 

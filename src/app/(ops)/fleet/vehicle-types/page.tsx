@@ -102,7 +102,14 @@ export default async function VehicleTypesPage() {
 
   const rows = await prisma.vehicleType.findMany({
     orderBy: [{ isActive: "desc" }, { sortOrder: "asc" }, { code: "asc" }],
-    include: { _count: { select: { vehicles: true } } },
+    // Counted the same way `blockDeactivate` counts in `actions.ts` —
+    // retired vehicles excluded. An unfiltered count disagreed with the
+    // rule it was previewing: a class whose lorries had all been sold
+    // showed a disabled button explaining that vehicles were still on it,
+    // while the action would have allowed the deactivation. A preview
+    // that refuses what the server permits is as wrong as one that
+    // permits what the server refuses.
+    include: { _count: { select: { vehicles: { where: { deletedAt: null } } } } },
   });
 
   return (

@@ -18,6 +18,14 @@ export function StatTiles({
     value: string;
     hint?: string;
     tone?: "default" | "ok" | "warn" | "bad" | "info";
+    /**
+     * Makes the tile the way in to the screen it counts.
+     *
+     * A tile that states a number nobody can click is a dead end wherever
+     * the screen behind it is not also in the nav — which is how
+     * `/finance/coverage-gaps` came to be reachable only by typing the URL.
+     */
+    href?: string;
   }>;
 }) {
   const tones: Record<string, string> = {
@@ -30,21 +38,37 @@ export function StatTiles({
 
   return (
     <dl className="grid grid-cols-2 gap-3 pb-6 sm:grid-cols-3 lg:grid-cols-5">
-      {items.map((item) => (
-        <div key={item.label} className="rounded-lg border bg-card px-3 py-2.5">
-          <dt className="font-mono text-[0.6rem] uppercase tracking-[0.13em] text-muted-foreground">
-            {item.label}
-          </dt>
-          <dd
-            className={`pt-1 text-lg font-semibold tabular ${tones[item.tone ?? "default"]}`}
+      {items.map((item) => {
+        const body = (
+          <>
+            <dt className="font-mono text-[0.6rem] uppercase tracking-[0.13em] text-muted-foreground">
+              {item.label}
+            </dt>
+            <dd
+              className={`pt-1 text-lg font-semibold tabular ${tones[item.tone ?? "default"]}`}
+            >
+              {item.value}
+            </dd>
+            {item.hint && (
+              <p className="pt-0.5 text-xs text-muted-foreground">{item.hint}</p>
+            )}
+          </>
+        );
+
+        return item.href ? (
+          <Link
+            key={item.label}
+            href={item.href}
+            className="rounded-lg border bg-card px-3 py-2.5 transition-colors hover:border-foreground/25 hover:bg-muted/50"
           >
-            {item.value}
-          </dd>
-          {item.hint && (
-            <p className="pt-0.5 text-xs text-muted-foreground">{item.hint}</p>
-          )}
-        </div>
-      ))}
+            {body}
+          </Link>
+        ) : (
+          <div key={item.label} className="rounded-lg border bg-card px-3 py-2.5">
+            {body}
+          </div>
+        );
+      })}
     </dl>
   );
 }

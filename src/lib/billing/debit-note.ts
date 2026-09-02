@@ -225,6 +225,49 @@ export async function createDebitNote(
     };
   }
 
+  /**
+   * The consignment the note is attributed to, if one was named.
+   *
+   * ── The loophole this closes ─────────────────────────────────────────
+   *
+   * `input.shipmentId` went straight onto `invoiceLine.shipmentId` with
+   * nothing checked — not that the shipment existed, not that it was this
+   * organisation's, not that it had any connection to the account being
+   * billed. The invoice dialog never renders the field, but a server action
+   * does not pass the dialog, and this one reads `shipmentId` off the form.
+   *
+   * Attaching a stranger's consignment to a debit note is not a cosmetic
+   * error. `liveInvoiceForShipment` resolves a shipment to the invoice it
+   * sits on, so the next re-weigh of that consignment would raise its
+   * correction against *this* customer's invoice — and `staleAgainstConsignments`
+   * would block issuing over a consignment that was never billed here.
+   * One forged field quietly re-points another account's money.
+   *
+   * The consignment must belong to the customer the invoice bills. That is
+   * exactly what the re-weigh path passes — `liveInvoiceForShipment` found
+   * the shipment *on* this invoice — so the legitimate caller is unaffected,
+   * and a consignment left out of a bill run can still be added.
+   * ────────────────────────────────────────────────────────────────────
+   */
+  if (input.shipmentId) {
+    const shipment = await prisma.shipment.findFirst({
+      where: { id: input.shipmentId, orgId: invoice.orgId, deletedAt: null },
+      select: { id: true, lrNumber: true, consignorId: true },
+    });
+
+    if (!shipment) {
+      return { ok: false, error: "That consignment no longer exists." };
+    }
+    if (shipment.consignorId !== invoice.customerId) {
+      return {
+        ok: false,
+        error:
+          `${shipment.lrNumber} is not billed to the account on ${invoice.number}. ` +
+          `A debit note corrects one account's invoice and cannot carry another's consignment.`,
+      };
+    }
+  }
+
   const amount = money(dec(input.amount));
   if (amount.lessThanOrEqualTo(0)) {
     return {

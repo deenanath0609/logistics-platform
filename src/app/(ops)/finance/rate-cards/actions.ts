@@ -13,6 +13,7 @@ import {
   deleteChargeRule,
   saveFuelRule,
   updateRateCard,
+  updateVersionDates,
 } from "@/lib/pricing/rate-cards";
 import type { ChargeCondition } from "@/lib/pricing/engine";
 import type { FinanceActionState } from "../action-state";
@@ -110,7 +111,22 @@ export async function updateRateCardAction(
         rateCardId,
         name: String(formData.get("name") ?? "") || undefined,
         notes: (formData.get("notes") as string) ?? undefined,
-        isActive: formData.get("isActive") === "true",
+        /*
+          `getAll().at(-1)`, not `get()`.
+
+          `EntityFormDialog` renders a switch as a hidden `value="false"`
+          followed by the switch itself posting `value="true"`, so an
+          unchecked switch still posts something. That makes `isActive` a
+          *duplicate* key, and `FormData.get()` returns the **first** value
+          — the hidden false — whatever the operator did with the control.
+          Read that way the card was retired every single time the dialog
+          was saved, including when the switch was plainly on.
+
+          The zod-based actions in this file never hit it because
+          `Object.fromEntries` keeps the last duplicate, which is the switch.
+          This one read the form directly.
+        */
+        isActive: formData.getAll("isActive").at(-1) === "true",
       },
       actor,
     );
@@ -164,6 +180,75 @@ export async function createVersionAction(
           ? `Draft v${result.version} opened with ${result.copiedSlabs} slab(s) copied forward.`
           : `Draft v${result.version} opened.`,
     };
+  } catch (error) {
+    return guard(error);
+  }
+}
+
+const versionDatesSchema = z.object({
+  rateCardId: z.string().min(1),
+  versionId: z.string().min(1),
+  effectiveFrom: z.string().min(1, "Pick a start date"),
+  effectiveTo: optionalText(20),
+  notes: optionalText(500),
+});
+
+/**
+ * Corrects the dates on a draft version.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────
+ *
+ * `updateVersionDates` was written, permission-checked and audited, and no
+ * action or control ever reached it. A version's `effectiveFrom` is typed
+ * once, when the version is created, and until now it could never be
+ * corrected — a tariff opened for the 1st of the wrong month went live on
+ * that date and there was nothing anybody could do about it but approve it
+ * and supersede it with another.
+ *
+ * `effectiveTo` matters more. `resolveRateCards` honours it, so it is the
+ * only way to *close* a tariff — and it too could only be set at creation.
+ * A customer contract that ended could not be made to lapse.
+ *
+ * Draft only: the service's own `assertDraft` refuses an approved version,
+ * which is right — moving the dates of a frozen version silently reprices
+ * every consignment that was booked against it.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+export async function updateVersionDatesAction(
+  _prev: FinanceActionState,
+  formData: FormData,
+): Promise<FinanceActionState> {
+  try {
+    const actor = await authorize("ratecard.manage");
+    const parsed = versionDatesSchema.safeParse(Object.fromEntries(formData.entries()));
+    if (!parsed.success) {
+      return { error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
+    }
+
+    const from = new Date(parsed.data.effectiveFrom);
+    const to = parsed.data.effectiveTo ? new Date(parsed.data.effectiveTo) : null;
+
+    if (to && to < from) {
+      return {
+        error: "The version ends before it starts.",
+        fieldErrors: { effectiveTo: "On or after the start date" },
+      };
+    }
+
+    const result = await updateVersionDates(
+      {
+        versionId: parsed.data.versionId,
+        effectiveFrom: from,
+        effectiveTo: to,
+        notes: parsed.data.notes,
+      },
+      actor,
+    );
+
+    if (!result.ok) return { error: result.error };
+
+    revalidatePath(`${PATH}/${parsed.data.rateCardId}`);
+    return { ok: true, message: "Version dates updated." };
   } catch (error) {
     return guard(error);
   }

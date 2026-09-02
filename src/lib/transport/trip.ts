@@ -7,6 +7,8 @@ import { nextNumber } from "@/lib/numbering/number-series";
 import { appendShipmentEvent } from "@/lib/shipment/events";
 import { recordAudit } from "@/server/services/audit";
 import { canAssignDriver, canAssignVehicle } from "@/lib/fleet/availability";
+import { loadOnTrip, overloadNote } from "./manifest";
+import { utilisation } from "./capacity";
 import type {
   DriverStatus,
   ShipmentStatus,
@@ -108,6 +110,7 @@ export async function createTrip(
       isActive: true,
       deletedAt: true,
       status: true,
+      vehicleType: { select: { capacityKg: true } },
       documents: { select: { kind: true, expiresOn: true, isMandatory: true } },
     },
   });
@@ -223,6 +226,7 @@ export async function createTrip(
         currentStatus: true,
         isOnHold: true,
         deletedAt: true,
+        chargeableWeight: true,
         originBranchId: true,
         currentBranchId: true,
         destinationBranchId: true,
@@ -296,6 +300,33 @@ export async function createTrip(
         ok: false,
         error: `${shipment.lrNumber} is already on ${alreadyBound.number}.`,
         field: "ftlShipmentId",
+      };
+    }
+
+    // ── The full load has to fit on the lorry it is being bound to ──────
+    //
+    // The gate weighs every trip now, but for a full load the gate is far
+    // too late to be the only place: the consignment is chosen here, and
+    // it is the whole of the load. Discovering at the gate that the
+    // freight was never going to fit means a booked truck, a driver and a
+    // loading bay spent on a trip that cannot legally leave. On the PTL
+    // side the equivalent refusal already arrives at the attach, where
+    // the load can still be composed differently; this is the same
+    // courtesy for the mode that has nothing to recompose.
+    const ftlLoad = utilisation(
+      Number(shipment.chargeableWeight.toString()),
+      vehicle.vehicleType?.capacityKg
+        ? Number(vehicle.vehicleType.capacityKg.toString())
+        : null,
+    );
+    if (ftlLoad.band === "OVERLOADED") {
+      return {
+        ok: false,
+        error:
+          `${shipment.lrNumber} weighs ${ftlLoad.weightKg} kg and ` +
+          `${vehicle.registrationNumber} is rated for ${ftlLoad.capacityKg} kg. ` +
+          `Bind it to a larger vehicle.`,
+        field: "vehicleId",
       };
     }
   }
@@ -465,6 +496,32 @@ export async function gateOut(
     return {
       ok: false,
       error: `${draftManifests.map((m) => m.number).join(", ")} ${draftManifests.length === 1 ? "is" : "are"} still in draft. Close for dispatch first.`,
+    };
+  }
+
+  // ── The rated payload, asked of the vehicle rather than of one document ─
+  //
+  // `closeManifest` weighs a manifest against the lorry, which is the
+  // right check in the wrong unit: a lorry carries every manifest hung
+  // off its trip. Two manifests of 200 kg each close without complaint
+  // against a 300 kg vehicle and then both attach to it, and the only
+  // rule between that and the road was "nothing still in draft" — which
+  // both of them satisfy. The same gap reopened a check already passed:
+  // a manifest closed against a big lorry could be moved onto a small
+  // one afterwards, and the gate saw nothing in draft and let it go.
+  //
+  // This is the last moment the load is ours. After it the overload is a
+  // driver at a weighbridge with a challan and a truck that does not
+  // move, so the refusal belongs here even though it is late — and it is
+  // also refused at the attach, where the load can still be composed
+  // differently.
+  const load = await loadOnTrip(trip.id);
+  if (load.band === "OVERLOADED") {
+    return {
+      ok: false,
+      error:
+        `${trip.number} is over the rated payload — ${overloadNote(load)} ` +
+        `Take a manifest off, or move the load to a larger vehicle.`,
     };
   }
 

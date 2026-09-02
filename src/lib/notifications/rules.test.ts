@@ -159,6 +159,32 @@ describe("masking", () => {
     expect(maskPhone("1800")).toBe("••••");
   });
 
+  /**
+   * The head and the tail used to be taken independently — two from the
+   * front, five from the back — so anything six to nine characters long
+   * came back with every character of it present and a bullet wedged in
+   * the middle. A landline written without its STD code, or a number typed
+   * one digit short, was published in full on the send log.
+   */
+  it("never returns a value that still contains the whole number", () => {
+    for (const number of [
+      "123456",
+      "1234567",
+      "12345678",
+      "123456789",
+      "9876543210",
+      "+919876543210",
+    ]) {
+      const masked = maskPhone(number);
+      expect(masked).toHaveLength(number.length);
+      expect(masked.split("•").length - 1).toBeGreaterThanOrEqual(3);
+      // Every digit the mask kept, in order, must be a strict subset.
+      expect(masked.replaceAll("•", "").length).toBeLessThanOrEqual(
+        number.length - 3,
+      );
+    }
+  });
+
   it("keeps the email domain, which is what identifies the account", () => {
     expect(maskEmail("priya.sharma@acme.co.in")).toBe("pr••••••••••@acme.co.in");
   });

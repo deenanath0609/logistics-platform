@@ -382,6 +382,73 @@ export async function loadOnManifest(manifestId: string): Promise<Utilisation> {
   return manifestUtilisation(manifest);
 }
 
+/**
+ * What the whole vehicle is carrying, against its rated payload.
+ *
+ * ── Why the per-manifest figure was not enough ───────────────────────────
+ *
+ * Every payload rule in this module measured **one manifest** against the
+ * lorry, and a lorry carries as many manifests as are hung off its trip.
+ * Two manifests of 200 kg each closed happily against a 300 kg vehicle —
+ * each one is inside the payload on its own — and then both were attached
+ * to it and gated out at 400 kg. `gateOut` only ever refused a manifest
+ * still in DRAFT, so nothing between the second attach and the truck
+ * leaving the yard looked at the total.
+ *
+ * The same arithmetic reopened the check `closeManifest` had already
+ * passed: a manifest closed within payload against a big lorry could be
+ * moved onto a small one afterwards — `setManifestTrip` accepts a CLOSED
+ * manifest and did no capacity check — and the gate, seeing nothing in
+ * draft, let it go.
+ *
+ * So the question is asked of the trip, which is the thing that has an
+ * axle rating, and it is asked at the two moments that matter: when a
+ * manifest is attached, where the load can still be composed differently,
+ * and at the gate, which is the last moment before it is a challan at a
+ * weighbridge.
+ *
+ * `extraKg` lets a caller ask the forward question — "what would this
+ * lorry be carrying if I added that manifest to it" — without writing
+ * anything first.
+ */
+export async function loadOnTrip(
+  tripId: string,
+  extraKg: Decimal | number = 0,
+  client: DbOrTx = prisma,
+): Promise<Utilisation> {
+  const trip = await client.trip.findUnique({
+    where: { id: tripId },
+    select: {
+      vehicle: { select: { vehicleType: { select: { capacityKg: true } } } },
+      ftlShipment: { select: { chargeableWeight: true } },
+      manifests: {
+        where: { status: { notIn: ["CANCELLED"] } },
+        select: { totalWeight: true },
+      },
+    },
+  });
+
+  if (!trip) return utilisation(0, null);
+
+  // An FTL trip carries its one consignment and no manifest; a PTL trip
+  // carries the sum of the manifests hung off it. Both are answered here
+  // so no caller has to branch on the mode to ask about weight.
+  const carried = trip.ftlShipment
+    ? new Decimal(trip.ftlShipment.chargeableWeight.toString())
+    : trip.manifests.reduce(
+        (sum, manifest) => sum.plus(new Decimal(manifest.totalWeight.toString())),
+        new Decimal(0),
+      );
+
+  const total = carried.plus(new Decimal(extraKg.toString()));
+  const capacity = trip.vehicle?.vehicleType?.capacityKg;
+
+  return utilisation(
+    total.toNumber(),
+    capacity ? Number(capacity.toString()) : null,
+  );
+}
+
 /** Reads as a sentence, for a toast or an error. Empty when it is fine. */
 export function overloadNote(load: Utilisation): string {
   if (load.band !== "OVERLOADED" || load.headroomKg === null) return "";
@@ -610,6 +677,7 @@ export async function setManifestTrip(
       status: true,
       originBranchId: true,
       destinationBranchId: true,
+      totalWeight: true,
     },
   });
 
@@ -654,6 +722,23 @@ export async function setManifestTrip(
       return {
         ok: false,
         error: `${trip.number} does not end where this manifest is going.`,
+      };
+    }
+
+    // What the lorry would be carrying with this manifest on it as well.
+    // The manifest may already be inside its own payload and the trip
+    // already inside its own, and the two together still over — which is
+    // the case nothing was measuring. The screen offers this as "would
+    // not fit" beside each option; this is the same rule where a stale
+    // tab or a hand-made post arrives instead.
+    const wouldCarry = await loadOnTrip(trip.id, new Decimal(manifest.totalWeight.toString()));
+    if (wouldCarry.band === "OVERLOADED") {
+      return {
+        ok: false,
+        error:
+          `${manifest.number} would put ${trip.number} over its rated payload — ` +
+          `${overloadNote(wouldCarry)} Attach it to a larger vehicle, or take ` +
+          `a consignment off first.`,
       };
     }
   }

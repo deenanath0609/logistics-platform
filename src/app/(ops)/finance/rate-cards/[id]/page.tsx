@@ -25,6 +25,8 @@ import { SHIPMENT_MODES, SHIPMENT_MODE_SHORT } from "@/lib/shipment/modes";
 import {
   createVersionAction,
   approveVersionAction,
+  updateRateCardAction,
+  updateVersionDatesAction,
   saveSlabAction,
   deleteSlabAction,
   saveChargeRuleAction,
@@ -332,6 +334,44 @@ export default async function RateCardDetailPage({
         }
         actions={
           writable && (
+            <div className="flex flex-wrap items-center gap-2">
+            {/*
+              Retiring a tariff.
+
+              `updateRateCardAction` existed, permission-checked and audited,
+              and no control ever reached it — so `isActive` could be set at
+              creation and never again. `resolveRateCards` filters on it, and
+              it is the only switch that takes a card out of pricing: a card
+              raised against the wrong customer priced that account forever,
+              and there was no screen anywhere that could stop it.
+            */}
+            <EntityFormDialog
+              title="Edit rate card"
+              description="Retiring a card takes it out of pricing altogether — the engine stops considering it from the next booking. Existing invoices are untouched; they reference the frozen version they were priced on."
+              fields={[
+                { type: "text", name: "name", label: "Name", required: true },
+                { type: "textarea", name: "notes", label: "Notes" },
+                {
+                  type: "switch",
+                  name: "isActive",
+                  label: "In use",
+                  defaultChecked: card.isActive,
+                  help: "Off retires the card. Nothing prices against it again, and it stops competing with the published tariff.",
+                },
+              ]}
+              // `isActive` as the string the switch compares against: when a
+              // `record` is supplied it wins over `defaultChecked`, so
+              // leaving it out would render an active card's switch as off.
+              record={{
+                name: card.name,
+                notes: card.notes,
+                isActive: card.isActive ? "true" : "false",
+              }}
+              hidden={{ rateCardId: card.id }}
+              action={updateRateCardAction}
+              submitLabel="Save"
+              trigger={{ label: "Edit card", icon: "pencil", variant: "outline" }}
+            />
             <EntityFormDialog
               title="New version"
               description="Slabs and charge rules are copied forward from the version you pick, so a revision is a handful of edits rather than a retype."
@@ -362,6 +402,7 @@ export default async function RateCardDetailPage({
               submitLabel="Open draft"
               trigger={{ label: "New version", icon: "version" }}
             />
+            </div>
           )
         }
       />
@@ -422,6 +463,47 @@ export default async function RateCardDetailPage({
                       {version.notes ?? "—"}
                     </TableCell>
                     <TableCell className="text-right">
+                      {writable && !version.isApproved && (
+                        <EntityFormDialog
+                          title={`v${version.version} dates`}
+                          description="A draft's dates can still be corrected. Effective-to is what closes a tariff — leave it open and this version prices until another supersedes it."
+                          fields={[
+                            {
+                              type: "date",
+                              name: "effectiveFrom",
+                              label: "Effective from",
+                              required: true,
+                              half: true,
+                              defaultValue: isoDate(version.effectiveFrom),
+                            },
+                            {
+                              type: "date",
+                              name: "effectiveTo",
+                              label: "Effective to",
+                              half: true,
+                              defaultValue: version.effectiveTo
+                                ? isoDate(version.effectiveTo)
+                                : undefined,
+                              help: "Blank leaves it open-ended.",
+                            },
+                            {
+                              type: "textarea",
+                              name: "notes",
+                              label: "What changed",
+                              defaultValue: version.notes ?? undefined,
+                            },
+                          ]}
+                          hidden={{ rateCardId: card.id, versionId: version.id }}
+                          action={updateVersionDatesAction}
+                          submitLabel="Save dates"
+                          trigger={{
+                            label: "Dates",
+                            icon: "pencil",
+                            size: "xs",
+                            variant: "ghost",
+                          }}
+                        />
+                      )}
                       {writable && !version.isApproved && (
                         <ReasonAction
                           id={version.id}

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ScrollText, TriangleAlert } from "lucide-react";
+import { ScrollText, ShieldAlert, TriangleAlert } from "lucide-react";
 
 import { prisma } from "@/lib/prisma";
 import { requirePermission, can } from "@/lib/auth/session";
@@ -14,6 +14,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EVENT_LABEL, TRIGGER_EVENTS } from "@/lib/notifications/variables";
+import { carrierIdentity } from "@/lib/notifications/carrier";
+import { transportStatus } from "@/lib/notifications/transport";
 import {
   Table,
   TableBody,
@@ -70,6 +72,37 @@ export default async function NotificationTemplatesPage() {
     (row) => row.isActive && row.channel === "SMS" && !row.dltTemplateId,
   );
 
+  /**
+   * Why every SMS template is switched off.
+   *
+   * This used to be a fact you could only learn by reading the seed: SMS
+   * rows are created inactive because an Indian operator will not deliver a
+   * transactional template until it has been registered on DLT, and that
+   * takes one to three weeks per carrier. Nothing on the screen said so,
+   * which left the whole SMS half of the notification matrix looking like
+   * somebody had turned it off by accident — and left nobody able to tell
+   * whether the registration had been started, let alone finished.
+   *
+   * It matters more than it sounds: most consignors in this market have a
+   * phone and no email address, so SMS off is the difference between
+   * telling the customer and telling nobody.
+   */
+  const carrier = await carrierIdentity();
+  const pendingDlt = rows.filter(
+    (row) => !row.isActive && row.channel === "SMS" && !row.dltTemplateId,
+  );
+  const registered = rows.filter(
+    (row) => row.channel === "SMS" && row.dltTemplateId,
+  );
+
+  // Channels with nothing behind them at all. Separate from DLT: a
+  // registered template still delivers nothing while the gateway is a mock.
+  const dead = transportStatus().filter(
+    (row) =>
+      !row.live &&
+      rows.some((template) => template.isActive && template.channel === row.channel),
+  );
+
   return (
     <>
       <PageHeader
@@ -108,6 +141,77 @@ export default async function NotificationTemplatesPage() {
               </span>
               .
             </p>
+          </div>
+        </div>
+      )}
+
+      {pendingDlt.length > 0 && (
+        <div
+          data-testid="dlt-pending-banner"
+          className="mb-6 flex gap-3 rounded-lg border border-info/40 bg-info-muted px-4 py-3 text-sm text-info"
+        >
+          <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+          <div className="flex flex-col gap-1">
+            <p className="font-medium">
+              {`${pendingDlt.length} SMS template${pendingDlt.length === 1 ? " is" : "s are"} switched off pending DLT registration`}
+            </p>
+            <p className="leading-relaxed">
+              This is deliberate, not an oversight. An Indian operator will not
+              deliver a transactional SMS until both the sender header and the
+              exact template text are registered on the DLT portal, and it
+              accepts and drops an unregistered one without a delivery report.
+              Registration takes one to three weeks per carrier. Until it comes
+              back, these templates stay off and the customer hears nothing on
+              SMS — which for a consignor with no email address on file means
+              they hear nothing at all.
+            </p>
+            <p className="leading-relaxed">
+              Sender header for{" "}
+              <span className="font-medium">
+                {carrier?.brandName ?? "this carrier"}
+              </span>
+              :{" "}
+              {carrier?.dltSenderId ? (
+                <span className="font-mono">{carrier.dltSenderId}</span>
+              ) : (
+                <span className="font-medium">not registered yet</span>
+              )}
+              . {registered.length} of{" "}
+              {pendingDlt.length + registered.length} SMS templates have an
+              approved id.
+            </p>
+            <p className="font-mono text-[0.68rem] leading-relaxed">
+              {pendingDlt.map((row) => row.code).join(", ")}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {dead.length > 0 && (
+        <div
+          data-testid="no-transport-banner"
+          className="mb-6 flex gap-3 rounded-lg border border-warn/40 bg-warn-muted px-4 py-3 text-sm text-warn"
+        >
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          <div className="flex flex-col gap-1">
+            <p className="font-medium">
+              {dead.map((row) => row.channel).join(", ")} {dead.length === 1 ? "has" : "have"}{" "}
+              active templates but no gateway behind{" "}
+              {dead.length === 1 ? "it" : "them"}
+            </p>
+            <p className="leading-relaxed">
+              These templates render, are written to the send log as sent, and
+              go nowhere. Activating a template is not the same as connecting a
+              provider.
+            </p>
+            <ul className="mt-1 flex flex-col gap-0.5 text-[0.72rem] leading-relaxed">
+              {dead.map((row) => (
+                <li key={row.channel}>
+                  <span className="font-mono uppercase">{row.channel}</span> —{" "}
+                  {row.note}
+                </li>
+              ))}
+            </ul>
           </div>
         </div>
       )}

@@ -46,6 +46,15 @@ import {
 } from "../src/lib/pricing/resolve";
 import { calculateFreight } from "../src/lib/pricing/engine";
 import { coverageGaps } from "../src/lib/pricing/rerate";
+import { resolveRateCards } from "../src/lib/pricing/resolve";
+import {
+  approveVersion,
+  createRateCard,
+  createVersion,
+  saveSlab,
+  updateRateCard,
+  updateVersionDates,
+} from "../src/lib/pricing/rate-cards";
 import {
   billableShipments,
   cancelInvoice,
@@ -54,7 +63,7 @@ import {
   issueInvoice,
 } from "../src/lib/billing/invoice";
 import { createDebitNote, liveInvoiceForShipment } from "../src/lib/billing/debit-note";
-import { recordPayment } from "../src/lib/billing/receivables";
+import { allocateOnAccount, recordPayment } from "../src/lib/billing/receivables";
 import { totalInvoice } from "../src/lib/billing/totals";
 import { businessDay } from "../src/lib/time/business-day";
 
@@ -695,17 +704,71 @@ async function run() {
     );
   }
 
-  const gapScreen = await page(
-    HOST,
-    "/finance/coverage-gaps",
-    adminSession.jar,
-    unratedShipment.lrNumber,
+  /*
+    A consignment that is still a gap *right now*.
+
+    Not `unratedShipment`: the section above deliberately priced that one to
+    prove a priced lane leaves the report, so asserting it is still on the
+    screen asserts the opposite of what was just proved — the check failed
+    while the product was correct, which is the same trap
+    `verify-reweigh.ts` fell into. A second probe is booked here, on the
+    same unpriced service type, and nothing touches it afterwards.
+  */
+  const screenGap = await createBooking(
+    {
+      mode: "PTL",
+      serviceTypeId: unratedService.id,
+      bookingBranchId: ggnBranch.id,
+      originBranchId: ggnBranch.id,
+      destinationBranchId: jaipurHub.id,
+      consignorName: "Coverage Gap Probe",
+      consignorPhone: "9811100032",
+      consignorAddress: "Plot 14, Udyog Vihar",
+      consignorCityId: gurugram.id,
+      consignorPincode: "122015",
+      consigneeName: "Coverage Gap Receiver",
+      consigneePhone: "9811100033",
+      consigneeAddress: "22 Vaishali Nagar",
+      consigneeCityId: jaipur.id,
+      consigneePincode: "302013",
+      packageCount: 1,
+      actualWeight: 10,
+      goodsDescription: "Coverage gap screen probe — auto-generated",
+      paymentType: "PAID",
+    },
+    admin,
   );
+
   check(
-    "the unpriced consignment is on the screen, by LR number",
-    gapScreen.body.includes(unratedShipment.lrNumber),
-    unratedShipment.lrNumber,
+    "a second unpriced consignment books, to be read off the screen",
+    screenGap.ok,
+    screenGap.ok ? screenGap.lrNumber : screenGap.error,
   );
+
+  if (screenGap.ok) {
+    const screenGapLr = screenGap.lrNumber;
+
+    check(
+      "it is on the coverage-gap report the screen is drawn from",
+      (await coverageGaps({ orgId: admin.orgId, take: 400 }, admin)).some(
+        (row) => row.shipmentId === screenGap.shipmentId,
+      ),
+      screenGapLr,
+    );
+
+    const gapScreen = await page(HOST, "/finance/coverage-gaps", adminSession.jar, screenGapLr);
+    check(
+      "the unpriced consignment is on the screen, by LR number",
+      gapScreen.body.includes(screenGapLr),
+      `${screenGapLr} · HTTP ${gapScreen.status}`,
+    );
+    check(
+      "and the screen states why it could not be priced",
+      gapScreen.body.includes("No rate card resolved") ||
+        gapScreen.body.includes("No slab on any applicable rate card"),
+      "the reason is rendered beside the LR, not left blank",
+    );
+  }
 
   const rateCard = await prisma.rateCard.findFirstOrThrow({ select: { id: true, code: true } });
   const cardScreen = await page(
@@ -1341,6 +1404,511 @@ async function run() {
     } else {
       check(`signed in as ${bom.name}`, false, otherBranchGaps.detail);
     }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  section("A tariff can be retired, and a draft's dates corrected");
+  // ══════════════════════════════════════════════════════════
+
+  /*
+    Both of these were written, permission-checked, audited — and reachable
+    from no control on any screen. `resolveRateCards` filters on
+    `rateCard.isActive` and honours `version.effectiveTo`, and those were
+    the only two switches that take a tariff out of pricing. Neither could
+    be operated. A card raised against the wrong account priced it forever.
+
+    Driven against a probe card built here, so nothing in the published
+    tariff moves and the assertions name the card under test rather than
+    counting rows.
+  */
+  const probeCode = "ZZ-PROBE-RETIRE";
+  const existingProbe = await prisma.rateCard.findFirst({
+    where: { code: probeCode },
+    select: { id: true },
+  });
+
+  const probeCard = existingProbe
+    ? { ok: true as const, rateCardId: existingProbe.id }
+    : await createRateCard(
+        {
+          code: probeCode,
+          name: "Probe — retirement",
+          effectiveFrom: businessDay(new Date("2020-01-01")),
+        },
+        accounts,
+      );
+
+  check(
+    "a probe rate card exists to retire",
+    probeCard.ok,
+    probeCard.ok ? probeCard.rateCardId : probeCard.error,
+  );
+
+  if (probeCard.ok) {
+    const cardId = probeCard.rateCardId;
+
+    const inPricing = async () =>
+      (await resolveRateCards({ orgId: accounts.orgId, at: new Date() })).some(
+        (candidate) => candidate.rateCardId === cardId,
+      );
+
+    /*
+      v1 specifically, and never "the newest".
+
+      Picking the highest version made this section depend on what earlier
+      runs had left behind: the dates check below opens a fresh draft and
+      closes it in 2020, so the *second* run approved that one, found no
+      version in force today, and reported that retirement did not work —
+      a red line about the product caused entirely by the script's own
+      leftovers. The same trap `verify-reweigh.ts` fell into. v1 is the
+      one this fixture keeps open-ended and approved, and it is named.
+    */
+    const probeVersion = await prisma.rateCardVersion.findFirstOrThrow({
+      where: { rateCardId: cardId, version: 1 },
+      select: { id: true, isApproved: true, effectiveTo: true },
+    });
+
+    // A draft left closed by an earlier run is reopened, so "in force
+    // today" does not depend on when this last ran.
+    if (!probeVersion.isApproved && probeVersion.effectiveTo !== null) {
+      await updateVersionDates(
+        {
+          versionId: probeVersion.id,
+          effectiveFrom: businessDay(new Date("2020-01-01")),
+          effectiveTo: null,
+        },
+        accounts,
+      );
+    }
+
+    if (!probeVersion.isApproved) {
+      /*
+        A version with no slabs cannot be approved — approving one would
+        price every lane as unrated, and `approveVersion` says so. So the
+        probe gets exactly one slab, in a weight band no consignment on
+        this planet will match.
+
+        That matters: this is a *published* card, and a published card with
+        a real slab would compete with the carrier's actual tariff for the
+        rest of the run. Resolution returns it as a candidate either way —
+        which is what "in pricing" means here — while no freight can ever
+        be priced against it.
+      */
+      const slab = await saveSlab(
+        {
+          versionId: probeVersion.id,
+          basis: "PER_KG",
+          rate: "1.0000",
+          weightFromKg: "999000",
+          weightToKg: "999999",
+        },
+        accounts,
+      );
+      check(
+        "the probe version takes a slab nothing can match",
+        slab.ok,
+        slab.ok ? "999000–999999 kg" : slab.error,
+      );
+
+      const approved = await approveVersion(
+        { versionId: probeVersion.id, reason: "Probe — retirement check." },
+        accounts,
+      );
+      check(
+        "and it approves, so retiring it means something",
+        approved.ok,
+        approved.ok ? "approved" : approved.error,
+      );
+    }
+
+    check("the probe card is in pricing to begin with", await inPricing());
+
+    const retired = await updateRateCard({ rateCardId: cardId, isActive: false }, accounts);
+    check("it retires", retired.ok, retired.ok ? "retired" : retired.error);
+    check(
+      "and the engine stops considering it from the next booking",
+      !(await inPricing()),
+      "not among the resolved candidates",
+    );
+
+    const restored = await updateRateCard({ rateCardId: cardId, isActive: true }, accounts);
+    check("it comes back", restored.ok, restored.ok ? "restored" : restored.error);
+    check("and prices again", await inPricing());
+
+    /*
+      The dates on a draft.
+
+      `effectiveTo` is the only way to *close* a tariff, and it could only
+      ever be set at creation. A draft is used here because the service
+      refuses an approved version — moving a frozen version's dates would
+      silently reprice every consignment booked against it.
+    */
+    // Reused if an earlier run already opened one, so running this a
+    // hundred times does not leave a hundred draft versions behind.
+    const existingDraft = await prisma.rateCardVersion.findFirst({
+      where: { rateCardId: cardId, isApproved: false, version: { gt: 1 } },
+      orderBy: { version: "asc" },
+      select: { id: true, version: true },
+    });
+
+    const draftVersion = existingDraft
+      ? { ok: true as const, versionId: existingDraft.id, version: existingDraft.version }
+      : await createVersion(
+          {
+            rateCardId: cardId,
+            effectiveFrom: businessDay(new Date("2020-02-01")),
+          },
+          accounts,
+        );
+
+    check(
+      "a draft version opens to correct",
+      draftVersion.ok,
+      draftVersion.ok ? `v${draftVersion.version}` : draftVersion.error,
+    );
+
+    if (draftVersion.ok) {
+      const corrected = await updateVersionDates(
+        {
+          versionId: draftVersion.versionId,
+          effectiveFrom: businessDay(new Date("2020-03-15")),
+          effectiveTo: businessDay(new Date("2020-04-20")),
+        },
+        accounts,
+      );
+
+      check(
+        "its dates correct",
+        corrected.ok,
+        corrected.ok ? "corrected" : corrected.error,
+      );
+
+      const after = await prisma.rateCardVersion.findUniqueOrThrow({
+        where: { id: draftVersion.versionId },
+        select: { effectiveFrom: true, effectiveTo: true },
+      });
+
+      check(
+        "and the stored dates are the ones asked for, to the day",
+        after.effectiveFrom.toISOString().slice(0, 10) === "2020-03-15" &&
+          after.effectiveTo?.toISOString().slice(0, 10) === "2020-04-20",
+        `${after.effectiveFrom.toISOString().slice(0, 10)} → ${after.effectiveTo?.toISOString().slice(0, 10)}`,
+      );
+
+      // And an approved version refuses, having written nothing.
+      const approvedVersion = await prisma.rateCardVersion.findFirst({
+        where: { rateCardId: cardId, isApproved: true },
+        select: { id: true, effectiveFrom: true },
+      });
+
+      if (approvedVersion) {
+        const refused = await updateVersionDates(
+          {
+            versionId: approvedVersion.id,
+            effectiveFrom: businessDay(new Date("2019-01-01")),
+          },
+          accounts,
+        );
+
+        const unmoved = await prisma.rateCardVersion.findUniqueOrThrow({
+          where: { id: approvedVersion.id },
+          select: { effectiveFrom: true },
+        });
+
+        check(
+          "moving an approved version's dates is refused",
+          refused.ok === false,
+          refused.ok ? "it was moved" : refused.error,
+        );
+        check(
+          "and the frozen version's effective-from did not move",
+          unmoved.effectiveFrom.getTime() === approvedVersion.effectiveFrom.getTime(),
+          unmoved.effectiveFrom.toISOString().slice(0, 10),
+        );
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  section("A debit note cannot carry another account's consignment");
+  // ══════════════════════════════════════════════════════════
+
+  /*
+    `shipmentId` went onto the invoice line unverified, and the invoice
+    dialog never renders the field — but a server action does not pass the
+    dialog, and `createDebitNoteAction` reads it straight off the form.
+
+    It is not cosmetic. `liveInvoiceForShipment` resolves a consignment to
+    the invoice it sits on, so a forged line re-points the *next* re-weigh
+    of somebody else's consignment at this customer's invoice.
+  */
+  const foreignShipment = await prisma.shipment.findFirst({
+    where: { consignorId: { not: customer.id }, deletedAt: null },
+    select: { id: true, lrNumber: true, consignorId: true },
+  });
+
+  if (!foreignShipment) {
+    check("there is a consignment on another account to probe with", false, "none exists");
+  } else {
+    const notesBefore = await prisma.invoiceLine.count({
+      where: { shipmentId: foreignShipment.id },
+    });
+
+    const forged = await createDebitNote(
+      {
+        againstInvoiceId: invoiceId,
+        shipmentId: foreignShipment.id,
+        amount: "500.00",
+        reason: "Probe — another account's consignment.",
+      },
+      accounts,
+    );
+
+    check(
+      "attaching another account's consignment is refused",
+      forged.ok === false,
+      forged.ok ? "it was raised" : forged.error,
+    );
+
+    const notesAfter = await prisma.invoiceLine.count({
+      where: { shipmentId: foreignShipment.id },
+    });
+
+    check(
+      "and no line was written against that consignment",
+      notesAfter === notesBefore,
+      `${notesBefore} line(s) before, ${notesAfter} after`,
+    );
+
+    const invented = await createDebitNote(
+      {
+        againstInvoiceId: invoiceId,
+        shipmentId: "shp-does-not-exist",
+        amount: "500.00",
+        reason: "Probe — invented consignment.",
+      },
+      accounts,
+    );
+
+    check(
+      "and a consignment id that resolves to nothing is refused",
+      invented.ok === false,
+      invented.ok ? "it was raised" : invented.error,
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════
+  section("Money paid on account can be applied to an invoice");
+  // ══════════════════════════════════════════════════════════
+
+  /*
+    ── The loophole ───────────────────────────────────────────────────────
+
+    A customer sends a lump sum without naming an invoice. `recordPayment`
+    banks it and leaves it unallocated, the ledger nets it against the
+    ageing — and `allocateOnAccountAction` was reachable from no control on
+    any screen, so it could never be applied to anything.
+
+    That is not untidy, it is a stopped account. `checkCustomerCredit`
+    totals the *open invoices* and does not net what is sitting on account,
+    so the customer still had the full amount against their credit limit
+    and was refused at booking. The receivables screen said the money was
+    in; the booking desk said the account was over its limit. Both were
+    reading the same database.
+    ──────────────────────────────────────────────────────────────────────
+  */
+  /*
+    Note what the product does first: a receipt with *no* allocation named
+    is applied oldest-first automatically, which is right and is not the
+    hole. Money sits on account when the receipt covers more than was
+    named — an advance, or a remainder — and that is the state built here,
+    deliberately, by naming ₹100 of a ₹250 receipt.
+  */
+  const onAccountReceipt = await recordPayment(
+    {
+      customerId: customer.id,
+      amount: "250.00",
+      mode: "NEFT",
+      reference: "PROBE-BILLING-ONACCT",
+      receivedOn: businessDay(),
+      allocations: [{ invoiceId, amount: "100.00" }],
+    },
+    accounts,
+  );
+
+  check(
+    "a receipt covering more than was named leaves the remainder on account",
+    onAccountReceipt.ok,
+    onAccountReceipt.ok ? onAccountReceipt.number : onAccountReceipt.error,
+  );
+
+  if (onAccountReceipt.ok) {
+    const banked = await prisma.payment.findUniqueOrThrow({
+      where: { id: onAccountReceipt.paymentId },
+      select: { id: true, number: true, amount: true, unallocated: true },
+    });
+
+    check(
+      "and the ₹150 remainder is unapplied",
+      new Decimal(banked.unallocated.toString()).equals(new Decimal("150")),
+      `₹${banked.unallocated} of ₹${banked.amount} unapplied`,
+    );
+
+    const before = await snapshotInvoice(invoiceId);
+
+    // More than the receipt holds is refused, and banks nothing.
+    const tooMuch = await allocateOnAccount(
+      { paymentId: banked.id, allocations: [{ invoiceId, amount: "999999.00" }] },
+      accounts,
+    );
+    const afterRefusal = await prisma.payment.findUniqueOrThrow({
+      where: { id: banked.id },
+      select: { unallocated: true },
+    });
+
+    check(
+      "applying more than the receipt holds is refused",
+      tooMuch.ok === false,
+      tooMuch.ok ? "it was applied" : tooMuch.error,
+    );
+    check(
+      "and the refusal moved nothing on the receipt",
+      new Decimal(afterRefusal.unallocated.toString()).equals(
+        new Decimal(banked.unallocated.toString()),
+      ),
+      `still ₹${afterRefusal.unallocated} unapplied`,
+    );
+    check(
+      "nor on the invoice",
+      JSON.stringify(await snapshotInvoice(invoiceId)) === JSON.stringify(before),
+    );
+
+    const applied = await allocateOnAccount(
+      { paymentId: banked.id, allocations: [{ invoiceId, amount: "150.00" }] },
+      accounts,
+    );
+
+    check("applying it to an open invoice succeeds", applied.ok, applied.ok ? "applied" : applied.error);
+
+    if (applied.ok) {
+      const [receiptAfter, invoiceAfter] = await Promise.all([
+        prisma.payment.findUniqueOrThrow({
+          where: { id: banked.id },
+          select: { unallocated: true },
+        }),
+        snapshotInvoice(invoiceId),
+      ]);
+
+      check(
+        "the receipt is fully applied",
+        new Decimal(receiptAfter.unallocated.toString()).isZero(),
+        `₹${receiptAfter.unallocated} left on account`,
+      );
+      check(
+        "and the invoice owes exactly ₹150 less than it did",
+        new Decimal(before.amountDue)
+          .minus(new Decimal(invoiceAfter.amountDue))
+          .equals(new Decimal("150")),
+        `₹${before.amountDue} → ₹${invoiceAfter.amountDue}`,
+      );
+      check(
+        "and what it has been paid went up by the same ₹150",
+        new Decimal(invoiceAfter.amountPaid)
+          .minus(new Decimal(before.amountPaid))
+          .equals(new Decimal("150")),
+        `₹${before.amountPaid} → ₹${invoiceAfter.amountPaid}`,
+      );
+      check(
+        "the invoice total never moved — an allocation is not a re-bill",
+        invoiceAfter.total === before.total,
+        `₹${before.total} → ₹${invoiceAfter.total}`,
+      );
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  section("The screens that were reachable from nowhere");
+  // ══════════════════════════════════════════════════════════
+
+  /*
+    `/finance/coverage-gaps` is in no navigation group. It hung off
+    `/finance`, which is itself linked from nowhere in the product — so the
+    screen whose whole job is to surface unpriced lanes could only be
+    reached by typing the URL. The gap tile on `/finance/rate-cards` is now
+    the way in, and `/finance/rate-cards` *is* in the nav.
+  */
+  if (adminSession.signedIn) {
+    const cardsScreen = await page(HOST, "/finance/rate-cards", adminSession.jar, "Rate cards");
+
+    check(
+      "the rate-card screen offers a way through to the coverage gaps",
+      cardsScreen.status === 200 && cardsScreen.body.includes("/finance/coverage-gaps"),
+      `HTTP ${cardsScreen.status}`,
+    );
+
+    /*
+      And the tile counts what the screen behind it lists.
+
+      It used to count every unrated calculation ever written — not one per
+      consignment, not branch-scoped, and never dropping a lane that had
+      since been priced. It climbed for good, and a manager clicking a tile
+      reading forty-seven landed on three rows.
+    */
+    const gapRows = await coverageGaps({ orgId: admin.orgId, take: 400 }, admin);
+    check(
+      "and the number on that tile is the number of rows behind it",
+      cardsScreen.body.includes(`>${gapRows.length}<`),
+      `${gapRows.length} gap(s) on the report`,
+    );
+
+    if (probeCard.ok) {
+      const cardScreen = await page(
+        HOST,
+        `/finance/rate-cards/${probeCard.rateCardId}`,
+        adminSession.jar,
+        probeCode,
+      );
+
+      check(
+        "a rate card can be edited from its own screen — the retire switch is rendered",
+        cardScreen.status === 200 && cardScreen.body.includes("Edit card"),
+        `HTTP ${cardScreen.status}`,
+      );
+      check(
+        "and a draft version offers the control that corrects its dates",
+        cardScreen.body.includes("Dates"),
+        "the per-version date control is on the page",
+      );
+    }
+
+    /*
+      And the customer ledger offers the way to apply money on account.
+
+      Asserted on the rendered screen rather than on the action, because
+      the action was never the problem — it worked perfectly and no button
+      called it.
+    */
+    const ledgerScreen = await page(
+      HOST,
+      `/finance/receivables/${customer.id}`,
+      adminSession.jar,
+      customer.name,
+    );
+
+    check(
+      "the customer ledger renders",
+      ledgerScreen.status === 200,
+      `HTTP ${ledgerScreen.status}`,
+    );
+    check(
+      "and money sitting on account can be applied from it",
+      ledgerScreen.body.includes("On account")
+        ? ledgerScreen.body.includes("Apply")
+        : true,
+      ledgerScreen.body.includes("On account")
+        ? "the Apply control is beside the unapplied receipt"
+        : "nothing is on account right now — nothing to offer",
+    );
   }
 
   console.log(

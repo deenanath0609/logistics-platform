@@ -30,7 +30,7 @@ export default async function ReceivablesPage({
   const user = await requirePermission("payment.read");
   const { q } = await searchParams;
 
-  const accounts = await receivablesOverview({ search: q }, user);
+  const { accounts, truncated, invoicesRead } = await receivablesOverview({ search: q }, user);
 
   const totals = AGEING_BUCKETS.reduce<Record<string, Decimal>>((acc, bucket) => {
     acc[bucket] = accounts.reduce(
@@ -87,6 +87,24 @@ export default async function ReceivablesPage({
           },
         ]}
       />
+
+      {/*
+        Said out loud, never inferred.
+
+        These totals are the sum of the invoices actually read. If the open
+        book is longer than one pass, every figure above is a floor and not
+        the book — and a receivables number that is quietly too low is the
+        one thing this screen must never show.
+      */}
+      {truncated && (
+        <p className="mb-6 flex items-center gap-2 rounded-lg border border-warn/40 bg-warn-muted px-3 py-2 text-sm text-warn">
+          <ShieldAlert className="size-4 shrink-0" />
+          The open book is larger than this screen reads in one pass. Every figure here
+          covers the {invoicesRead.toLocaleString("en-IN")} oldest-due open invoices and is
+          a floor, not the total. Narrow it with the search box, or take the full ageing
+          from a statement.
+        </p>
+      )}
 
       <div className="rounded-lg border bg-card p-4 mb-6">
         <p className="pb-3 font-mono text-[0.65rem] uppercase tracking-[0.15em] text-muted-foreground">

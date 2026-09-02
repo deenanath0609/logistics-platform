@@ -1,11 +1,11 @@
+import nodemailer, { type Transporter } from "nodemailer";
 import { getEnv } from "@/lib/env";
 import { credentialFor, type ResolvedCredential } from "@/lib/integrations/credentials";
 import type { ChannelAdapter, OutboundMessage, SendResult } from "./types";
-import { ChannelNotConfiguredError, ProviderNotImplementedError } from "./types";
+import { ChannelNotConfiguredError } from "./types";
 import { carrierIdentity, firstConfigured } from "../carrier";
 import { mockAdapter } from "./mock";
 
-const FILE = "src/lib/notifications/channels/email.ts";
 
 /**
  * Email.
@@ -20,13 +20,24 @@ const FILE = "src/lib/notifications/channels/email.ts";
  * have been stuck on the mock for ever. So the adapter is always built, and
  * decides per message — which is also per tenant, because the credential is.
  *
- * The real implementation is a transport built from the resolved settings
- * and one `sendMail` call — but it is not written here, because a relay
- * that has never been tested against is not a relay. `nodemailer` was
- * carried as a dependency in anticipation of it and has been dropped again:
- * an unused package with a live SMTP-injection advisory against it is a
- * standing audit failure bought in exchange for nothing. Add it back with
- * the transport, on a version the advisory does not name.
+ * The transport is built from the resolved settings and cached per account,
+ * because opening a connection and an EHLO handshake for every delivery
+ * notice is how a relay starts refusing you for abuse.
+ *
+ * On the dependency: `nodemailer` was dropped from this project once, because
+ * carrying an unused package with a live advisory is a standing audit failure
+ * bought for nothing. It is back because it is no longer unused, and it is
+ * pinned to the version `@auth/core` already resolves — so the copy in
+ * `node_modules` is the one that was there anyway and the advisory count is
+ * unchanged. Every version Auth.js accepts is named by that advisory; there
+ * is no clean version to move to without downgrading Auth.js itself.
+ *
+ * What those advisories describe are the `raw` message option,
+ * `jsonTransport`, `List-*` header comments, `envelope.size` and the
+ * transport *name* — none of which this code passes. What it does pass is
+ * customer-supplied text into `to` and `subject`, so both are stripped of CR
+ * and LF before nodemailer sees them: a line break in a header value is how
+ * one message quietly becomes two.
  */
 export function emailAdapter(): ChannelAdapter {
   const noRelay = mockAdapter("EMAIL");
@@ -34,6 +45,15 @@ export function emailAdapter(): ChannelAdapter {
   return {
     provider: "smtp",
     channel: "EMAIL",
+    // Mail leaves the building over SMTP. A carrier with no relay of their
+    // own still falls back to the mock, and the log row says so through
+    // `wasSimulated` — `live` describes the transport, not a promise that
+    // every row went out over it.
+    live: true,
+    note:
+      "Mail is sent over SMTP — the carrier's own relay where they have one, " +
+      "the platform's where they do not. With neither, sends are simulated " +
+      "and each log row is marked as such.",
     async send(message: OutboundMessage): Promise<SendResult> {
       // The carrier's own relay where they have one, the platform's where
       // they do not — never one carrier's host with the platform's
@@ -86,18 +106,103 @@ export async function resolveFrom(): Promise<string | null> {
   return firstConfigured(carrier?.smtpFrom, getEnv().SMTP_FROM);
 }
 
+/**
+ * A header value with no way out of its own field.
+ *
+ * `to` is a customer's address and `subject` renders a template against
+ * customer data, so either can carry whatever somebody typed into a booking
+ * form. A CR or LF in a header value ends that header and begins writing
+ * new ones — a Bcc, a second body. Stripped rather than escaped, because no
+ * legitimate address or subject line contains a line break.
+ */
+export function headerSafe(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+/**
+ * One transport per account, kept for the life of the process.
+ *
+ * Keyed on everything that decides where the connection goes and who it
+ * authenticates as, so a rotated password produces a new transport rather
+ * than a stale authenticated one. Pooled, because a busy branch can raise a
+ * dozen notices in a second and a connection each is how a sender gets
+ * rate-limited.
+ */
+const transports = new Map<string, Transporter>();
+
+function transportFor(account: ResolvedCredential<"SMTP">): Transporter {
+  const { host, port, user, secure } = account.settings;
+  const key = [host, port, user, secure, account.secret].join("|");
+
+  const existing = transports.get(key);
+  if (existing) return existing;
+
+  const created = nodemailer.createTransport({
+    host: host as string,
+    // 587 is submission with STARTTLS, which is what most relays want and
+    // what `secure: false` means here — not "unencrypted".
+    port: port ?? (secure ? 465 : 587),
+    secure,
+    auth: { user: user as string, pass: account.secret as string },
+    pool: true,
+    maxConnections: 3,
+    // A relay that has stopped answering must not hold a worker pass open.
+    // The outbox will retry the event.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
+  });
+
+  transports.set(key, created);
+  return created;
+}
+
+/** Drops cached transports, so a changed credential is re-read. */
+export function resetEmailTransports(): void {
+  for (const transport of transports.values()) transport.close();
+  transports.clear();
+}
+
 async function dispatch(
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   message: OutboundMessage,
   // The From address the carrier sends as — see `resolveFrom`. Passed in for
   // the same reason the SMS sender header is: the environment holds one
   // address, and the platform has many carriers.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   from: string,
   // Host, port, user and the decrypted password. Everything the transport
   // needs, already resolved to one carrier's account.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   account: ResolvedCredential<"SMTP">,
 ): Promise<SendResult> {
-  throw new ProviderNotImplementedError("EMAIL", "smtp", FILE);
+  const sent = await transportFor(account).sendMail({
+    from: headerSafe(from),
+    to: headerSafe(message.to),
+    subject: headerSafe(message.subject ?? ""),
+    text: message.body,
+    // Carried as a header so a bounce, or a support query weeks later, can
+    // be tied back to the log row that produced it.
+    headers: message.reference
+      ? { "X-Logistics-Reference": headerSafe(message.reference) }
+      : undefined,
+  });
+
+  // `accepted` is per recipient. One address goes in, so an empty list is
+  // the relay taking the message and refusing the person — a success that
+  // delivers nothing, and it must not be recorded as sent.
+  const accepted = Array.isArray(sent.accepted) ? sent.accepted.length : 0;
+
+  return {
+    ok: accepted > 0,
+    providerRef: sent.messageId ?? null,
+    response: {
+      provider: "smtp",
+      host: account.settings.host,
+      accepted: sent.accepted,
+      rejected: sent.rejected,
+      response: sent.response,
+    },
+    error:
+      accepted > 0
+        ? null
+        : `The relay accepted no recipient: ${sent.response ?? "no response given"}`,
+  };
 }

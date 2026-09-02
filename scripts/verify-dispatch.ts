@@ -431,6 +431,13 @@ async function seed(admin: SessionUser) {
   const light = await consignment("LR0001", "200.000");
   const heavy = await consignment("LR0002", "200.000");
 
+  // Two more of the same weight, for the trip-level payload check. They
+  // go on *separate* manifests, each of which is comfortably inside the
+  // 300 kg class on its own — which is exactly why measuring one manifest
+  // at a time never caught the pair.
+  const splitA = await consignment("LR0004", "200.000");
+  const splitB = await consignment("LR0005", "200.000");
+
   // A full load, standing at a hub rather than where it was booked —
   // the case the trip screen posted the wrong branch for.
   const ftl = await consignment("LR0003", "250.000", {
@@ -476,6 +483,8 @@ async function seed(admin: SessionUser) {
     suspended,
     light,
     heavy,
+    splitA,
+    splitB,
     ftl,
     vendor,
     contract,
@@ -579,46 +588,16 @@ async function checkTripPlanning(admin: SessionUser, fx: Fixture) {
 async function checkFullTruck(admin: SessionUser, fx: Fixture) {
   section("The full-truck path, which skips the manifest");
 
-  // Booked at BR-BOM, standing at HO-DEL. The truck loads where the
-  // freight is, so HO-DEL is the only origin `createTrip` will accept.
-  const wrongOrigin = await createTrip(
-    {
-      vehicleId: fx.roadworthy.id,
-      originBranchId: fx.elsewhere.id,
-      destinationBranchId: fx.destination.id,
-      ftlShipmentId: fx.ftl.id,
-    },
-    admin,
-  );
-  check(
-    "a full load cannot start from a branch it is not standing at",
-    !wrongOrigin.ok,
-    wrongOrigin.ok ? "it was accepted" : wrongOrigin.error,
-  );
-
-  const wrongDestination = await createTrip(
-    {
-      vehicleId: fx.roadworthy.id,
-      originBranchId: fx.origin.id,
-      destinationBranchId: fx.elsewhere.id,
-      ftlShipmentId: fx.ftl.id,
-    },
-    admin,
-  );
-  check(
-    "nor go anywhere but where its consignment is going",
-    !wrongDestination.ok,
-    wrongDestination.ok ? "it was accepted" : wrongDestination.error,
-  );
-
-  const beforeBind = await prisma.trip.count({ where: { ftlShipmentId: fx.ftl.id } });
-  check(
-    "and nothing was written either side of those refusals",
-    beforeBind === 0,
-    `${beforeBind} trips bound`,
-  );
-
-  // A second lorry, because the first is loading a part-load.
+  // ── The lorry these refusals are tried with has to be a free one ──────
+  //
+  // This section originally reached for `fx.roadworthy`, which by the time
+  // it runs is LOADING on the part-load trip planned above. `createTrip`
+  // refuses a busy vehicle *before* it ever looks at the FTL binding, so
+  // both lane refusals below were answered with "VD-… is loading on
+  // TRIP-…" and passed on a rule they never reached — they would have
+  // passed just as well with the origin and destination rules deleted.
+  // The lorry is created first and used free, and each refusal is now
+  // pinned to the wording only that rule produces.
   const second = await prisma.vehicle.create({
     data: {
       orgId: admin.orgId,
@@ -631,6 +610,92 @@ async function checkFullTruck(admin: SessionUser, fx: Fixture) {
     },
     select: { id: true },
   });
+
+  // Booked at BR-BOM, standing at HO-DEL. The truck loads where the
+  // freight is, so HO-DEL is the only origin `createTrip` will accept.
+  const wrongOrigin = await createTrip(
+    {
+      vehicleId: second.id,
+      originBranchId: fx.elsewhere.id,
+      destinationBranchId: fx.destination.id,
+      ftlShipmentId: fx.ftl.id,
+    },
+    admin,
+  );
+  check(
+    "a full load cannot start from a branch it is not standing at",
+    !wrongOrigin.ok && /standing/i.test(wrongOrigin.ok ? "" : wrongOrigin.error),
+    wrongOrigin.ok ? "it was accepted" : wrongOrigin.error,
+  );
+
+  const wrongDestination = await createTrip(
+    {
+      vehicleId: second.id,
+      originBranchId: fx.origin.id,
+      destinationBranchId: fx.elsewhere.id,
+      ftlShipmentId: fx.ftl.id,
+    },
+    admin,
+  );
+  check(
+    "nor go anywhere but where its consignment is going",
+    !wrongDestination.ok &&
+      /goes where its consignment goes/i.test(
+        wrongDestination.ok ? "" : wrongDestination.error,
+      ),
+    wrongDestination.ok ? "it was accepted" : wrongDestination.error,
+  );
+
+  // ── The full load has to fit the lorry it is bound to ────────────────
+  //
+  // The gate weighs every trip, but for a full load the gate is too late
+  // to be the only place: the consignment *is* the load and it is chosen
+  // at planning. Tried before the good bind below, because "already on
+  // TRIP-…" is checked first and would mask this.
+  const tinyType = await prisma.vehicleType.create({
+    data: {
+      orgId: admin.orgId,
+      code: `${TAG}TINY${RUN}`,
+      name: "Verification three-wheeler — 100 kg",
+      capacityKg: "100.00",
+      isActive: true,
+    },
+    select: { id: true },
+  });
+  const tinyLorry = await prisma.vehicle.create({
+    data: {
+      orgId: admin.orgId,
+      registrationNumber: `${TAG}TNY${RUN}`,
+      vehicleTypeId: tinyType.id,
+      branchId: fx.origin.id,
+      ownership: "OWN",
+      status: "AVAILABLE",
+      isActive: true,
+    },
+    select: { id: true },
+  });
+
+  const tooHeavy = await createTrip(
+    {
+      vehicleId: tinyLorry.id,
+      originBranchId: fx.origin.id,
+      destinationBranchId: fx.destination.id,
+      ftlShipmentId: fx.ftl.id,
+    },
+    admin,
+  );
+  check(
+    "a 250 kg full load cannot be bound to a 100 kg three-wheeler",
+    !tooHeavy.ok && /rated for/i.test(tooHeavy.ok ? "" : tooHeavy.error),
+    tooHeavy.ok ? "it was accepted" : tooHeavy.error,
+  );
+
+  const beforeBind = await prisma.trip.count({ where: { ftlShipmentId: fx.ftl.id } });
+  check(
+    "and nothing was written either side of those refusals",
+    beforeBind === 0,
+    `${beforeBind} trips bound`,
+  );
 
   const bound = await createTrip(
     {
@@ -865,6 +930,162 @@ async function checkCapacity(admin: SessionUser, fx: Fixture, tripId: string | n
   return manifest.manifestId;
 }
 
+/**
+ * The payload asked of the lorry rather than of one sheet of paper.
+ *
+ * Every payload rule in this module weighed a single manifest, and a
+ * lorry carries as many manifests as are hung off its trip. Two of
+ * 200 kg each are both comfortably inside a 300 kg class on their own,
+ * and 400 kg is not — so this is the case that passed every check the
+ * module had while putting a truck on the road overloaded.
+ */
+async function checkTripPayload(admin: SessionUser, fx: Fixture) {
+  section("The payload, measured on the lorry and not on one manifest");
+
+  const lorry = await prisma.vehicle.create({
+    data: {
+      orgId: admin.orgId,
+      registrationNumber: `${TAG}PAY${RUN}`,
+      vehicleTypeId: fx.smallType.id,
+      branchId: fx.origin.id,
+      ownership: "OWN",
+      status: "AVAILABLE",
+      isActive: true,
+    },
+    select: { id: true },
+  });
+
+  const trip = await createTrip(
+    {
+      vehicleId: lorry.id,
+      originBranchId: fx.origin.id,
+      destinationBranchId: fx.destination.id,
+    },
+    admin,
+  );
+  if (!trip.ok) {
+    check("a lorry could be planned for the payload check", false, trip.error);
+    return;
+  }
+
+  // Two manifests on the same leg, one consignment each.
+  const first = await createManifest(
+    { originBranchId: fx.origin.id, destinationBranchId: fx.destination.id, remarks: `${TAG} payload one` },
+    admin,
+  );
+  const second = await createManifest(
+    { originBranchId: fx.origin.id, destinationBranchId: fx.destination.id, remarks: `${TAG} payload two` },
+    admin,
+  );
+  if (!first.ok || !second.ok) {
+    check("two manifests could be raised on the lane", false, "one of them was refused");
+    return;
+  }
+
+  const joinedFirst = await setManifestTrip(
+    { manifestId: first.manifestId, tripId: trip.tripId },
+    admin,
+  );
+  check(
+    "the first manifest goes onto the lorry",
+    joinedFirst.ok,
+    joinedFirst.ok ? "attached" : joinedFirst.error,
+  );
+
+  const loadedFirst = await addShipmentsToManifest(
+    { manifestId: first.manifestId, shipmentIds: [fx.splitA.id] },
+    admin,
+  );
+  check(
+    "200 kg on it, well inside a 300 kg class",
+    loadedFirst.added.length === 1,
+    loadedFirst.rejected.map((r) => `${r.lrNumber}: ${r.reason}`).join(" · ") || "added",
+  );
+
+  // The second manifest is built *before* it meets the lorry, so its own
+  // weight is never measured against anything — which is how the pair got
+  // past a per-manifest rule.
+  const loadedSecond = await addShipmentsToManifest(
+    { manifestId: second.manifestId, shipmentIds: [fx.splitB.id] },
+    admin,
+  );
+  check(
+    "a second manifest is built to 200 kg with no lorry under it yet",
+    loadedSecond.added.length === 1,
+    loadedSecond.rejected.map((r) => `${r.lrNumber}: ${r.reason}`).join(" · ") || "added",
+  );
+
+  const joinedSecond = await setManifestTrip(
+    { manifestId: second.manifestId, tripId: trip.tripId },
+    admin,
+  );
+  check(
+    "and it is refused the lorry — 200 and 200 do not go on a 300 kg tempo",
+    !joinedSecond.ok && /rated payload/i.test(joinedSecond.ok ? "" : joinedSecond.error),
+    joinedSecond.ok ? "it was attached" : joinedSecond.error,
+  );
+
+  const stillLoose = await prisma.manifest.findUnique({
+    where: { id: second.manifestId },
+    select: { tripId: true },
+  });
+  check(
+    "and nothing was written either side of that refusal",
+    stillLoose?.tripId === null,
+    `tripId ${stillLoose?.tripId}`,
+  );
+
+  // ── The gate is the second place it has to hold ──────────────────────
+  //
+  // A manifest closed within payload can be moved onto a smaller lorry
+  // afterwards, which invalidates the check `closeManifest` already
+  // passed. `gateOut` used to ask only whether anything was still in
+  // draft, and a closed manifest satisfies that however heavy it is.
+  const closedFirst = await closeManifest({ manifestId: first.manifestId }, admin);
+  check(
+    "the first manifest closes at 200 kg",
+    closedFirst.ok,
+    closedFirst.ok ? `${closedFirst.number} at ${closedFirst.load.percent}%` : closedFirst.error,
+  );
+
+  // Attach the second directly, behind the service's back, to reproduce
+  // the state a stale tab or an older build could leave.
+  await prisma.manifest.update({
+    where: { id: second.manifestId },
+    data: { tripId: trip.tripId, status: "CLOSED", closedAt: new Date() },
+  });
+
+  const overloadedGate = await gateOut({ tripId: trip.tripId }, admin);
+  check(
+    "the gate refuses the overloaded lorry even with every manifest closed",
+    !overloadedGate.ok && /rated payload/i.test(overloadedGate.ok ? "" : overloadedGate.error),
+    overloadedGate.ok ? "it went out" : overloadedGate.error,
+  );
+
+  const afterGate = await prisma.trip.findUnique({
+    where: { id: trip.tripId },
+    select: { status: true, actualDepartureAt: true },
+  });
+  check(
+    "and the trip did not depart",
+    afterGate?.status !== "DISPATCHED" && afterGate?.actualDepartureAt === null,
+    `${afterGate?.status} / ${afterGate?.actualDepartureAt}`,
+  );
+
+  // Take the second manifest back off and the same lorry goes out.
+  await prisma.manifest.update({
+    where: { id: second.manifestId },
+    data: { tripId: null },
+  });
+
+  const cleared = await gateOut({ tripId: trip.tripId }, admin);
+  check(
+    "within the payload the same lorry gates out — the refusal was the weight",
+    cleared.ok,
+    cleared.ok ? `${cleared.moved} moved` : cleared.error,
+  );
+}
+
 async function checkGate(admin: SessionUser, fx: Fixture, tripId: string | null) {
   section("The gate");
   if (!tripId) {
@@ -1010,8 +1231,20 @@ async function checkScope(fx: Fixture) {
   );
   check(
     "nor may they raise a manifest out of a branch they do not cover",
-    !foreign.ok,
+    !foreign.ok && /cannot dispatch from that branch/i.test(foreign.ok ? "" : foreign.error),
     foreign.ok ? "it was raised" : foreign.error,
+  );
+
+  // The refusal has to have refused, not merely reported. `createManifest`
+  // numbers inside its transaction, so a rule checked after the insert
+  // would leave the row and still return `{ ok: false }`.
+  const raised = await prisma.manifest.count({
+    where: { remarks: `${TAG} scope check` },
+  });
+  check(
+    "and no manifest was written by the refused attempt",
+    raised === 0,
+    `${raised} raised`,
   );
 }
 
@@ -1445,6 +1678,7 @@ async function main() {
       const tripId = await checkTripPlanning(fixture.admin, fixture.fx);
       await checkFullTruck(fixture.admin, fixture.fx);
       await checkCapacity(fixture.admin, fixture.fx, tripId);
+      await checkTripPayload(fixture.admin, fixture.fx);
       await checkGate(fixture.admin, fixture.fx, tripId);
       await checkScope(fixture.fx);
       await checkVendors(fixture.admin, fixture.fx);

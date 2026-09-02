@@ -3,6 +3,7 @@ import {
   escapeHtml,
   extractPlaceholders,
   missingVariables,
+  redactSecrets,
   renderSubject,
   renderTemplate,
   validateTemplate,
@@ -206,5 +207,33 @@ describe("escapeHtml", () => {
 
   it("covers both quote characters", () => {
     expect(escapeHtml(`"a" 'b'`)).toBe("&quot;a&quot; &#39;b&#39;");
+  });
+});
+
+describe("redactSecrets", () => {
+  const secrets = new Set(["otpCode"]);
+
+  it("replaces a secret's value without touching anything else", () => {
+    expect(
+      redactSecrets({ otpCode: "4821", lrNumber: "CL/001" }, secrets),
+    ).toEqual({ otpCode: "••••", lrNumber: "CL/001" });
+  });
+
+  it("does not invent a value for a secret that has none", () => {
+    // A redacted render has to report the same missing placeholders as the
+    // real one, or the log row would say the message went out when the
+    // dispatcher refused it.
+    expect(redactSecrets({ otpCode: null }, secrets)).toEqual({ otpCode: null });
+    expect(redactSecrets({}, secrets)).toEqual({});
+  });
+
+  it("renders a body that cannot carry the code", () => {
+    const body = "{{otpCode}} is your code for {{lrNumber}}.";
+    const rendered = renderTemplate(
+      body,
+      redactSecrets({ otpCode: "4821", lrNumber: "CL/001" }, secrets),
+    );
+    expect(rendered).not.toContain("4821");
+    expect(rendered).toContain("CL/001");
   });
 });

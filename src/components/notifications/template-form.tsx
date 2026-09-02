@@ -98,6 +98,25 @@ export function TemplateFormDialog({
   const [body, setBody] = useState(record?.body ?? "");
   const [dltTemplateId, setDltTemplateId] = useState(record?.dltTemplateId ?? "");
 
+  /**
+   * The trigger list, plus whatever this record is actually on.
+   *
+   * A `<select>` whose value matches no option does not stay empty — it
+   * falls back to the first one, and the next save quietly moves the
+   * template onto a different trigger. That is not hypothetical: the two
+   * seeded reweigh templates sat on `shipment.reweighed`, which was missing
+   * from this list, so opening either of them and pressing Save would have
+   * turned a revised-weight notice into a booking confirmation. The
+   * catalogue has the trigger now; this keeps the same thing from happening
+   * to the next one somebody adds by hand.
+   */
+  const triggers = useMemo(() => {
+    const known = TRIGGER_EVENTS.some((option) => option.value === eventType);
+    return known
+      ? TRIGGER_EVENTS
+      : [...TRIGGER_EVENTS, { value: eventType, label: `${eventType} (not in the matrix)` }];
+  }, [eventType]);
+
   const available = useMemo(() => variablesForEvent(eventType), [eventType]);
   const samples = useMemo(() => sampleVariables(eventType), [eventType]);
 
@@ -119,6 +138,17 @@ export function TemplateFormDialog({
 
   const needsDlt = channel === "SMS" && dltTemplateId.trim().length === 0;
 
+  /**
+   * `onSubmit` rather than `<form action={submit}>`.
+   *
+   * React 19 resets an uncontrolled form once the action passed to `action`
+   * resolves. This dialog stays open on a rejected save — a placeholder the
+   * trigger does not supply, an SMS switched on with no DLT id — and every
+   * uncontrolled field in it (code, name, recipient, language, sender id)
+   * was being wiped at exactly the moment the operator needed to read what
+   * they had typed and correct one word of it. Handling the event and
+   * building the FormData by hand keeps the values where they are.
+   */
   function submit(formData: FormData) {
     formData.set("variables", declared.join(","));
     startTransition(async () => {
@@ -167,7 +197,14 @@ export function TemplateFormDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form id={formId} action={submit} className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+        <form
+          id={formId}
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit(new FormData(event.currentTarget));
+          }}
+          className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]"
+        >
           {record?.id && <input type="hidden" name="id" value={record.id} />}
 
           <div className="flex flex-col gap-4">
@@ -196,7 +233,7 @@ export function TemplateFormDialog({
                   name="eventType"
                   value={eventType}
                   onChange={setEventType}
-                  options={TRIGGER_EVENTS}
+                  options={triggers}
                 />
               </Field>
 

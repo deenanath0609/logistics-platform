@@ -28,6 +28,10 @@ export function whatsappAdapter(): ChannelAdapter {
   return {
     provider,
     channel: "WHATSAPP",
+    live: false,
+    note:
+      `WHATSAPP_PROVIDER is "${provider}", but no client is implemented for ` +
+      "it. Every send is refused and recorded as skipped.",
     async send(message: OutboundMessage): Promise<SendResult> {
       const account = await credentialFor("WHATSAPP");
 

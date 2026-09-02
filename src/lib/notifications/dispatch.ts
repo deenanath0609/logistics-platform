@@ -18,8 +18,14 @@ import {
   type ShipmentContext,
 } from "./context";
 import { maskRecipient } from "./mask";
-import { missingVariables, renderSubject, renderTemplate } from "./render";
+import {
+  missingVariables,
+  redactSecrets,
+  renderSubject,
+  renderTemplate,
+} from "./render";
 import { dedupeKeyFor, isOptedOut, shouldAttempt, suppressReason } from "./rules";
+import { knownVariables, requiredVariables, SECRET_VARIABLES } from "./variables";
 
 /**
  * Turning outbox events into messages.
@@ -250,16 +256,50 @@ async function sendOne(
     return "skipped";
   }
 
-  const body = renderTemplate(template.body, variables);
+  // ── Placeholders with nothing behind them ───────────────
+  //
+  // Two very different things used to be treated the same way, and the
+  // second one was silencing the product. A name the trigger does not
+  // supply at all is a mistake in the template — `{{podUrl}}` on a booking
+  // confirmation — and the message must not go out reading as literal
+  // braces. A name the trigger *does* supply which happens to be empty for
+  // this consignment is a blank field, not a mistake: a parcel with no COD
+  // has no `codAmount`, a delivery run nobody planned has no `agentName`.
+  // Refusing the whole message over one of those is how 66 consignees came
+  // to be told nothing at all about a delivery that was on its way to them.
+  //
+  // So: unknown names refuse, known-but-empty names render as an em dash
+  // and the message goes. `required` in the catalogue is the override for
+  // the handful where a blank makes the message actively misleading — a
+  // delivery code, a tracking link.
+  const known = knownVariables(input.eventType);
+  const required = requiredVariables(input.eventType);
+  const source = `${template.body}\n${template.subject ?? ""}`;
+  const missing = missingVariables(source, variables);
+  const fatal = missing.filter((name) => !known.has(name) || required.has(name));
+  const blank = missing.filter((name) => !fatal.includes(name));
+
+  const filled: typeof variables =
+    blank.length === 0
+      ? variables
+      : { ...variables, ...Object.fromEntries(blank.map((name) => [name, "—"])) };
+
+  const body = renderTemplate(template.body, filled);
   const subject = template.subject
-    ? renderSubject(template.subject, variables)
+    ? renderSubject(template.subject, filled)
     : null;
 
-  // A placeholder nobody filled would go out as literal braces. Better to
-  // record the send as failed with the names in it: the template editor is
-  // where that gets fixed, and the log is where somebody notices.
-  const missing = missingVariables(template.body, variables);
-  if (missing.length > 0) {
+  // What the log keeps. Identical to the above except that a secret — the
+  // delivery OTP — is bullets, so the send log can answer "did we message
+  // them" without handing every holder of `master.read` the code that
+  // signs for the parcel.
+  const logged = redactSecrets(filled, SECRET_VARIABLES);
+  const logBody = renderTemplate(template.body, logged);
+  const logSubject = template.subject
+    ? renderSubject(template.subject, logged)
+    : null;
+
+  if (fatal.length > 0) {
     await writeLog({
       template,
       context,
@@ -267,9 +307,9 @@ async function sendOne(
       recipient,
       dedupeKey,
       status: "FAILED",
-      body,
-      subject,
-      error: `Template has no value for ${missing.join(", ")}. Fix the template or the trigger before re-sending.`,
+      body: logBody,
+      subject: logSubject,
+      error: `Template has no value for ${fatal.join(", ")}. Fix the template or the trigger before re-sending.`,
       existingId: existing?.id,
     });
     return "failed";
@@ -282,8 +322,8 @@ async function sendOne(
     recipient,
     dedupeKey,
     status: "QUEUED",
-    body,
-    subject,
+    body: logBody,
+    subject: logSubject,
     existingId: existing?.id,
   });
 
@@ -339,7 +379,10 @@ async function sendOne(
     console.warn(
       `[notify] ${template.channel} to ${maskRecipient(recipient.address)} failed: ${message}`,
     );
-    return "failed";
+    // The same distinction the row above records. A summary that counts an
+    // unconfigured channel as a failure disagrees with the log it is
+    // summarising, and it is the summary the drain prints.
+    return isConfiguration ? "skipped" : "failed";
   }
 }
 

@@ -35,7 +35,23 @@ export type DefaultTemplate = {
   isActive: boolean;
 };
 
-/** Keeps the declared variable list honest without hand-maintaining it. */
+/**
+ * Keeps the declared variable list honest without hand-maintaining it, and
+ * decides whether a default ships switched on.
+ *
+ * **SMS ships off, and this is where that is decided.** An Indian operator
+ * will not deliver a transactional SMS until the exact text is registered on
+ * the DLT portal, and it accepts an unregistered one and drops it without a
+ * delivery report — so a template switched on before its `dltTemplateId`
+ * comes back looks perfectly healthy and reaches nobody. Registration takes
+ * one to three weeks per carrier. Every other channel ships on.
+ *
+ * This used to live in `prisma/seed/notifications.ts` as a bare
+ * `isActive: tpl.channel !== "SMS"`, which meant this field was carried
+ * through the whole file and then ignored: setting `isActive: false` on a
+ * default here would have had no effect at all, silently. The seed now
+ * honours what this says, so the two cannot drift.
+ */
 function template(
   input: Omit<DefaultTemplate, "variables" | "language" | "isActive"> &
     Partial<Pick<DefaultTemplate, "language" | "isActive">>,
@@ -47,8 +63,8 @@ function template(
 
   return {
     language: "en",
-    isActive: true,
     ...input,
+    isActive: input.isActive ?? input.channel !== "SMS",
     variables: [...declared],
   };
 }
