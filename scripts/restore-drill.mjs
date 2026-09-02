@@ -37,10 +37,13 @@
  */
 import "dotenv/config";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
+
+/** Everything between the user and the `@` in a connection string. */
+const PASSWORD_IN_URL = /(postgres(?:ql)?:\/\/[^:\s]+:)[^@\s]+@/g;
 
 const KEEP = process.argv.includes("--keep");
 
@@ -160,12 +163,37 @@ async function main() {
     const dumpSize = statSync(dumpFile).size;
     check("a dump was taken", dumpSize > 0, `${(dumpSize / 1024).toFixed(0)} KB`);
 
-    // The half everybody forgets. `--globals-only` is roles and their
-    // passwords; without this file the restored policies name a role that
-    // does not exist.
-    run("pg_dumpall", ["--globals-only", "--file", globalsFile, "--dbname", urlFor("postgres")]);
+    /*
+      The half everybody forgets: `--globals-only` is the roles, without
+      which the restored policies name a role that does not exist.
+
+      `--no-role-passwords` is not optional here, and finding that out is
+      what this drill is for. Without it pg_dumpall reads `pg_authid`, which
+      only a superuser may read — and the application's owner role is
+      deliberately not one. On the real server this step failed outright,
+      which means the drill had never been run there: it was written against
+      a developer's superuser database and passed for the wrong reason.
+
+      Dropping the passwords costs nothing that matters. They are recreated
+      from `.env` by `apply-rls.mjs --apply`, which a restore runs anyway to
+      rebuild the role and its grants, and a nightly file full of password
+      hashes is a liability rather than an asset.
+    */
+    run("pg_dumpall", [
+      "--globals-only",
+      "--no-role-passwords",
+      "--file",
+      globalsFile,
+      "--dbname",
+      urlFor("postgres"),
+    ]);
     const globals = statSync(globalsFile).size;
     check("the cluster's roles were dumped too", globals > 0, `${(globals / 1024).toFixed(0)} KB`);
+
+    // A header with no roles under it is exactly what the failing run
+    // produced, so size alone is not the question.
+    const roleCount = (readFileSync(globalsFile, "utf8").match(/^CREATE ROLE /gm) ?? []).length;
+    check("and it actually contains them", roleCount > 0, `${roleCount} role(s)`);
 
     // ── What the source looks like ──────────────────────────
     const sourceCounts = await tableCounts(SOURCE_DB);
@@ -342,6 +370,14 @@ main()
     process.exit(failures > 0 ? 1 : 0);
   })
   .catch((error) => {
-    console.error("\nThe drill could not complete:\n", error.message ?? error);
+    /*
+      Scrubbed. `execFileSync` puts the whole command line into its message,
+      and every command here carries the owner's connection string — so an
+      ordinary failure printed the database password to the terminal, into
+      any CI log, and into whatever an operator pasted into a chat while
+      asking for help. Which is exactly how it was noticed.
+    */
+    const message = String(error?.message ?? error).replace(PASSWORD_IN_URL, "$1•••@");
+    console.error("\nThe drill could not complete:\n", message);
     process.exit(1);
   });
