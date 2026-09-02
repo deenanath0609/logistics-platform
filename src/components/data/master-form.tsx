@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import { businessDayString } from "@/lib/time/business-day";
 import {
   Dialog,
   DialogContent,
@@ -93,10 +94,25 @@ function renderIcon(name: keyof typeof ICONS) {
   return <Icon />;
 }
 
+/**
+ * A stored value as its form field should show it.
+ *
+ * The date branch used to be `toISOString().slice(0, 10)`, which is the UTC
+ * day. Nothing pins `process.env.TZ`, so on a UTC-clocked container every
+ * date field pre-filled from an existing record read **yesterday** between
+ * midnight and 05:30 IST — and re-saving a record without touching its date
+ * moved that date back a day, on columns with no zone to correct it later.
+ *
+ * The same defect was found and fixed in the finance twin
+ * (`components/finance/format.ts`); this is the same fix, drawn from the
+ * one business-calendar helper so the two cannot drift apart again.
+ */
 function valueOf(record: Record<string, unknown> | undefined, name: string) {
   const raw = record?.[name];
   if (raw === null || raw === undefined) return "";
-  if (raw instanceof Date) return raw.toISOString().slice(0, 10);
+  if (raw instanceof Date) {
+    return Number.isNaN(raw.getTime()) ? "" : businessDayString(raw);
+  }
   return String(raw);
 }
 

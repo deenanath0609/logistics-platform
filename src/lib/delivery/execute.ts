@@ -11,6 +11,7 @@ import { getEnv } from "@/lib/env";
 import { storeDataUrl } from "./assets";
 import { recalculateRunTotals } from "./runs";
 import { nextAction, validateAttemptCapture, type NextAction } from "./attempts";
+import { maskPhone } from "@/lib/notifications/mask";
 
 /**
  * What happens at the door.
@@ -180,11 +181,21 @@ export async function requestDeliveryOtp(
   };
 }
 
-/** `98765 43210` becomes `98•••43210` — enough to confirm, not to dial. */
-export function maskPhone(phone: string): string {
-  if (phone.length < 6) return "•".repeat(phone.length);
-  return `${phone.slice(0, 2)}${"•".repeat(phone.length - 7)}${phone.slice(-5)}`;
-}
+/*
+  ── Was a second copy, and the copy was wrong ──────────────────────────
+
+  This file carried its own `maskPhone`, and on a short number it published
+  the lot: head and tail were taken independently, so at seven characters
+  `slice(0, 2)` and `slice(-5)` covered all of it and `repeat(length - 7)`
+  hid nothing. A ten-digit mobile masked correctly, which is why it stood —
+  a landline written without its STD code did not.
+
+  `notifications/mask.ts` was fixed to keep head and tail from meeting and
+  to hide at least three characters whatever the length. Re-exported rather
+  than re-implemented: two maskings of the same value that disagree is how
+  one of them stays wrong.
+*/
+export { maskPhone };
 
 // ────────────────────────────────────────────────────────────
 // Delivered
