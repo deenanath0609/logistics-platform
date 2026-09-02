@@ -1,5 +1,6 @@
 import { getCurrentUser, can } from "@/lib/auth/session";
-import { buildTemplateCsv, TEMPLATE_FILENAME } from "@/lib/bulk/template";
+import { buildTemplateCsv, templateFilename } from "@/lib/bulk/template";
+import { currentTenant } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +20,7 @@ export async function GET(): Promise<Response> {
   return new Response(buildTemplateCsv(), {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${TEMPLATE_FILENAME}"`,
+      "Content-Disposition": `attachment; filename="${templateFilename(currentTenant()?.slug)}"`,
       "Cache-Control": "no-store",
     },
   });

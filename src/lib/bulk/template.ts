@@ -10,7 +10,24 @@ import { COLUMNS } from "./columns";
  * here, because there is no second copy to go stale.
  */
 
-export const TEMPLATE_FILENAME = "city-logistics-bulk-booking-template.csv";
+/**
+ * What the downloaded file is called, for the carrier asking for it.
+ *
+ * This was a constant reading `city-logistics-…`, which is the demo
+ * carrier's slug. On a white-label platform that put one carrier's name on
+ * a file every customer of every *other* carrier downloaded — the one place
+ * in the portal where the tenant's own branding was replaced by somebody
+ * else's, on a file they then keep on their desktop.
+ *
+ * Falls back to a neutral name rather than to a slug when there is no
+ * tenant, because a file called `undefined-...csv` is worse than a generic
+ * one.
+ */
+export function templateFilename(slug?: string | null): string {
+  const carrier = (slug ?? "").trim().toLowerCase();
+  const safe = carrier.replace(/[^a-z0-9-]/g, "");
+  return safe ? `${safe}-bulk-booking-template.csv` : "bulk-booking-template.csv";
+}
 
 /** RFC 4180 quoting: always quote, double any embedded quote. */
 function csvCell(value: string): string {

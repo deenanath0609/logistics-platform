@@ -79,10 +79,15 @@ export function PortalBulkUploadCard() {
           variant="outline"
           className="w-full sm:w-auto"
           render={
-            <a
-              href="/portal/bulk/template"
-              download="city-logistics-booking-template.csv"
-            />
+            /*
+              `download` with no value, deliberately. Named, it overrode the
+              route's own `Content-Disposition` for a same-origin link — and
+              what it named was the demo carrier's slug, so every carrier's
+              customers downloaded a file called `city-logistics-…`. Bare, it
+              still forces a download and lets the server decide the name,
+              which is the only place that knows whose carrier this is.
+            */
+            <a href="/portal/bulk/template" download />
           }
         >
           <Download />
