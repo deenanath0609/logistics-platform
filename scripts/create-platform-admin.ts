@@ -14,10 +14,19 @@
  * it is rare, it is dangerous, and it is far easier to review as code than
  * as a form. Whoever can run it already has the database.
  *
- * The row is always written with `mustChangePassword: true`. A password
- * typed into a terminal has been in a shell history, a scrollback buffer
- * and probably a chat message; it is a handover token, not a credential,
- * and the console refuses to do anything until it is replaced.
+ * A generated password is written with `mustChangePassword: true`. It has
+ * been in a shell history, a scrollback buffer and probably a chat message;
+ * it is a handover token, not a credential, and the console refuses to do
+ * anything until it is replaced.
+ *
+ * `--password` is the exception, and only because of what it is for: a
+ * console a *script* has to sign into afterwards — CI, a fixture, a
+ * demonstration. A password the caller chose was never handed to anybody, so
+ * there is nobody for it to have travelled to, and forcing a change would
+ * only park that script on a form it cannot fill in. The same reasoning, and
+ * the same flag, as `--owner-password` on `provision-tenant.ts`.
+ *
+ * Do not use it to onboard a real operator.
  */
 import "dotenv/config";
 import bcrypt from "bcryptjs";
@@ -96,8 +105,10 @@ async function main() {
       name,
       role,
       passwordHash: await bcrypt.hash(password, 12),
-      // Never false, whatever was passed on the command line.
-      mustChangePassword: true,
+      // See the note at the top: a generated secret has been read by
+      // whoever ran this and must be replaced; one the caller chose has not
+      // travelled anywhere.
+      mustChangePassword: !args.password,
     },
     select: { id: true, email: true, role: true },
   });
@@ -123,7 +134,11 @@ async function main() {
   console.log(`  role       ${admin.role}`);
   if (!args.password) console.log(`  password   ${password}`);
   console.log(`\nSign in at http://admin.${root}:3010/platform/login`);
-  console.log("The console will require a new password before anything else.\n");
+  console.log(
+    args.password
+      ? "The password you supplied. No change is forced at first sign-in.\n"
+      : "The console will require a new password before anything else.\n",
+  );
 }
 
 main()

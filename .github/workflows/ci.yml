@@ -137,6 +137,19 @@ jobs:
               .catch((e) => { console.error(e.message); process.exit(1); });
           "
 
+      # The operator console has no self-registration and must not have any —
+      # a sign-up form on the platform host is a sign-up form for the whole
+      # estate — and no seed creates this row. So the console smoke found no
+      # operator and stopped, which is what this job failed on once the plan
+      # gating above was fixed. The password is given rather than generated
+      # for the same reason as the carrier owner's: nothing here can read a
+      # secret that is printed once.
+      - name: Create a platform operator
+        run: |
+          npx tsx scripts/create-platform-admin.ts \
+            --email ci@platform.test --name "CI Operator" --role OWNER \
+            --password 'ci-operator-password'
+
       - name: Types
         run: npm run typecheck
 
