@@ -5,17 +5,31 @@ import { ArrowLeft } from "lucide-react";
 import { PageHeader } from "@/components/shell/page-header";
 import { TenantStatusBadge } from "@/components/platform/status-badge";
 import { getPlan } from "@/lib/platform/plans";
-import { operatorCan, requireCapability } from "@/lib/platform/session";
+import {
+  getCurrentOperator,
+  operatorCan,
+  requireCapability,
+} from "@/lib/platform/session";
 import { PlanForm } from "../plan-form";
 import { DeletePlanButton } from "./delete-plan-button";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Guarded for the same reason the tenant page's title is: metadata runs
+ * before the page, so an unguarded read here puts the answer into the
+ * `<head>` of the response that refuses the caller. A plan name is a
+ * smaller thing to leak than a carrier's, and it is still the platform's
+ * commercial shape handed to anyone who can reach the console host.
+ */
 export async function generateMetadata({
   params,
 }: {
   params: Promise<{ planId: string }>;
 }): Promise<Metadata> {
+  const operator = await getCurrentOperator();
+  if (!operator || !operatorCan(operator, "plan.read")) return { title: "Plan" };
+
   const { planId } = await params;
   const plan = await getPlan(planId);
   return { title: plan?.name ?? "Plan" };

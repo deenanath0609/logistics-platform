@@ -64,6 +64,21 @@ export type NavItem = {
    * therefore ungated by construction.
    */
   permission: string | null;
+  /**
+   * Further permissions that also open this entry.
+   *
+   * A screen whose own guard is `canAny([...])` cannot be described by one
+   * code, and gating the link on the first of them hides it from everybody
+   * who holds one of the others. That is what happened to the scan console:
+   * the page admits `scan.inbound`, `scan.sort` or `scan.outbound`, the link
+   * asked for `scan.inbound` alone, and a dispatch manager holding only
+   * `scan.outbound` could use the console but was never shown the way in.
+   *
+   * `permission` stays the primary code — it is what
+   * `modules.test.ts` checks route ownership against — and this is the rest
+   * of the same `canAny`.
+   */
+  orPermissions?: string[];
 };
 
 export type NavGroup = {
@@ -130,7 +145,12 @@ export const NAV: NavGroup[] = [
         label: "Scan console",
         href: "/hub/scan",
         icon: ScanLine,
+        // The page admits any of the three scan codes (`canAny` in
+        // `/hub/scan/page.tsx`), so the link has to as well. Gated on
+        // `scan.inbound` alone, a dispatch manager holding only
+        // `scan.outbound` could work the console and had no link to it.
         permission: "scan.inbound",
+        orPermissions: ["scan.sort", "scan.outbound"],
       },
       {
         label: "Weighment",
@@ -330,6 +350,24 @@ export const NAV: NavGroup[] = [
     label: "Finance",
     items: [
       {
+        // `/finance` was linked from nowhere, and it is the only page that
+        // links `/finance/profitability` and `/finance/coverage-gaps` —
+        // both were therefore reachable only by typing the URL. The landing
+        // page admits anyone who can read one of its cards, so the link
+        // does the same.
+        label: "Overview",
+        href: "/finance",
+        icon: Gauge,
+        permission: "invoice.read",
+        orPermissions: [
+          "ratecard.read",
+          "payment.read",
+          "settlement.read",
+          "vendor.read",
+          "report.financial",
+        ],
+      },
+      {
         label: "Invoices",
         href: "/finance/invoices",
         icon: Receipt,
@@ -457,9 +495,14 @@ export function visibleNavGroups(
   return NAV.map((group) => ({
     ...group,
     items: group.items.filter(
-      (item) =>
-        (item.permission === null || permissions.has(item.permission)) &&
-        moduleGateFor(item.href, modules).allowed,
+      (item) => holds(permissions, item) && moduleGateFor(item.href, modules).allowed,
     ),
   })).filter((group) => group.items.length > 0);
+}
+
+/** The link's own `canAny`: the primary code, or any of its alternatives. */
+function holds(permissions: ReadonlySet<string>, item: NavItem): boolean {
+  if (item.permission === null) return true;
+  if (permissions.has(item.permission)) return true;
+  return (item.orPermissions ?? []).some((code) => permissions.has(code));
 }

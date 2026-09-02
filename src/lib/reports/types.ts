@@ -1,5 +1,5 @@
 import type { SessionUser } from "@/lib/auth/session";
-import type { ShipmentMode } from "@/generated/prisma/client";
+import type { ShipmentMode, SlaState } from "@/generated/prisma/client";
 
 /**
  * The shape every report in the library shares.
@@ -21,6 +21,8 @@ export type FilterKey =
   | "lane"
   | "serviceType"
   | "mode"
+  /** SLA state, so a dashboard tile can link to the rows it counted. */
+  | "sla"
   | "search";
 
 export type ReportFilters = {
@@ -34,6 +36,16 @@ export type ReportFilters = {
   destinationBranchId: string | null;
   serviceTypeId: string | null;
   mode: ShipmentMode | null;
+  /**
+   * The SLA verdict, when a reader asked for one slice of it.
+   *
+   * Exists because the operations dashboard counts "SLA breached" and had
+   * nowhere to send anyone who clicked it: the nearest report showed
+   * everything in the network, so the tile said 14 and the page it opened
+   * said 900. A tile that cannot be drilled into is a tile nobody trusts
+   * twice.
+   */
+  slaState: SlaState | null;
   q: string | null;
 };
 

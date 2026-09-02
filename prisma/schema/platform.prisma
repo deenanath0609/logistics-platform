@@ -41,6 +41,20 @@ model AuditLog {
   ipAddress String?
   userAgent String?
   deviceId  String?
+  /// Set when the change was made inside a platform support session.
+  ///
+  /// `userId` names the carrier's own staff member, and it has to — the
+  /// column is a foreign key into their user table, and an operator has no
+  /// row there. Without this column the carrier's trail therefore read as
+  /// that person's own work, and the only record that a stranger did it
+  /// lived in `PlatformAuditLog`, which no tenant can see. A carrier
+  /// cannot be expected to spot an unexplained approval in their own name.
+  ///
+  /// A plain column, not a relation: `ImpersonationGrant` is
+  /// operator-owned and outside this tenant's row-level security, so a
+  /// foreign key would let a tenant-scoped read join out of its own
+  /// tenant. The id is enough for the trail to say "this was support".
+  impersonationGrantId String?
   createdAt DateTime    @default(now())
 
   user User? @relation(fields: [userId], references: [id])

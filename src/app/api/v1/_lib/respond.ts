@@ -16,6 +16,11 @@ export const REQUEST_ID_HEADER = "X-Request-Id";
 export type ApiErrorCode =
   | "unauthorized"
   | "forbidden"
+  // Distinct from `forbidden` on purpose. "Your key may not do that" is
+  // something the partner can fix by asking for a wider key; "the carrier
+  // does not buy this any more" is not, and a partner who cannot tell the
+  // two apart spends a day on the wrong one.
+  | "not_on_plan"
   | "not_found"
   | "invalid_request"
   | "rate_limited"
@@ -25,6 +30,7 @@ export type ApiErrorCode =
 const STATUS_FOR: Record<ApiErrorCode, number> = {
   unauthorized: 401,
   forbidden: 403,
+  not_on_plan: 403,
   not_found: 404,
   invalid_request: 422,
   rate_limited: 429,

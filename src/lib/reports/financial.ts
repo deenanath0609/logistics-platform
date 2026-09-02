@@ -189,9 +189,20 @@ export async function outstandingAgeing(
     ],
   };
 
+  /**
+   * A ceiling, so one bad month cannot pull the whole ledger into memory.
+   *
+   * Ageing has to be computed across every open invoice before it can be
+   * grouped by customer and paged, so this one genuinely cannot be done a
+   * page at a time — but "genuinely cannot be paged" is not the same as
+   * "may be unbounded", and this had no `take` at all.
+   */
+  const MAX_OPEN_INVOICES = 20_000;
+
   const invoices = await prisma.invoice.findMany({
     where,
     orderBy: { invoiceDate: "asc" },
+    take: MAX_OPEN_INVOICES,
     select: {
       customerId: true,
       invoiceDate: true,
@@ -274,7 +285,10 @@ export async function outstandingAgeing(
         .toDecimalPlaces(2)
         .toNumber(),
     },
-    note: "A snapshot of what is owed today, aged from the due date. The report's date range does not apply.",
+    note:
+      invoices.length >= MAX_OPEN_INVOICES
+        ? `A snapshot of what is owed today, aged from the due date. The report's date range does not apply. Built from the ${MAX_OPEN_INVOICES.toLocaleString("en-IN")} oldest open invoices — there are more, so these totals are a floor, not the whole ledger. Filter by customer or branch for an exact figure.`
+        : "A snapshot of what is owed today, aged from the due date. The report's date range does not apply.",
   };
 }
 
@@ -299,31 +313,57 @@ export async function revenueByLane(
   // Phase 6, and saying which half is which is more useful than waiting.
   const live = await billingIsLive();
 
-  const grouped = await prisma.shipment.groupBy({
-    by: ["originBranchId", "destinationBranchId"],
-    where: {
-      deletedAt: null,
-      bookedAt: { gte: ctx.filters.from, lte: ctx.filters.to },
-      ...(ctx.user.branchIds === null
+  const laneWhereClause: Prisma.ShipmentWhereInput = {
+    AND: [
+      { deletedAt: null },
+      { bookedAt: { gte: ctx.filters.from, lte: ctx.filters.to } },
+      ctx.user.branchIds === null
         ? {}
         : {
             OR: [
               { originBranchId: { in: ctx.user.branchIds } },
               { destinationBranchId: { in: ctx.user.branchIds } },
             ],
-          }),
-      ...(ctx.filters.serviceTypeId
+          },
+      ctx.filters.serviceTypeId
         ? { serviceTypeId: ctx.filters.serviceTypeId }
-        : {}),
-      ...(ctx.filters.mode ? { mode: ctx.filters.mode } : {}),
-      ...(ctx.filters.customerId ? { consignorId: ctx.filters.customerId } : {}),
-    },
-    _count: { _all: true },
-    _sum: { chargeableWeight: true, grandTotal: true },
-    orderBy: { _sum: { grandTotal: "desc" } },
-    skip: (ctx.page - 1) * ctx.pageSize,
-    take: ctx.pageSize,
-  });
+        : {},
+      ctx.filters.mode ? { mode: ctx.filters.mode } : {},
+      ctx.filters.customerId ? { consignorId: ctx.filters.customerId } : {},
+    ],
+  };
+
+  const [grouped, everyLane] = await Promise.all([
+    prisma.shipment.groupBy({
+      by: ["originBranchId", "destinationBranchId"],
+      where: laneWhereClause,
+      _count: { _all: true },
+      _sum: { chargeableWeight: true, grandTotal: true },
+      orderBy: { _sum: { grandTotal: "desc" } },
+      skip: (ctx.page - 1) * ctx.pageSize,
+      take: ctx.pageSize,
+    }),
+
+    /**
+     * How many lanes there actually are.
+     *
+     * `total` used to be `rows.length` — the size of the page just
+     * fetched. Two things followed. The header said "50 row(s)" for a
+     * network with three hundred lanes, and the pagination control, which
+     * only draws when `total > PAGE_SIZE`, never drew at all: every lane
+     * past the fiftieth was unreachable on screen while the CSV export,
+     * which pages through the same runner, contained all of them. A report
+     * and its own export disagreeing is the worst version of this bug,
+     * because both look authoritative.
+     *
+     * Bounded by the number of branch pairs, not by shipment volume.
+     */
+    prisma.shipment.groupBy({
+      by: ["originBranchId", "destinationBranchId"],
+      where: laneWhereClause,
+      _count: { _all: true },
+    }),
+  ]);
 
   const branchIds = [
     ...new Set(grouped.flatMap((g) => [g.originBranchId, g.destinationBranchId])),
@@ -359,7 +399,7 @@ export async function revenueByLane(
   return {
     columns,
     rows,
-    total: rows.length,
+    total: everyLane.length,
     note: live
       ? "Booked value is what the consignment note carried. Invoiced revenue arrives once Phase 6 links invoice lines to lanes."
       : "Booked value is real — it comes from the consignment note. The invoiced column stays blank until billing is live; it is not zero, it is unknown.",
@@ -599,7 +639,9 @@ export async function tripExpenseRegister(
  * table that looks like "no vendors owed anything", this reports what it
  * is waiting for.
  */
-export async function vendorPayable(): Promise<ReportResult> {
+export async function vendorPayable(
+  ctx: ReportContext,
+): Promise<ReportResult> {
   const columns: ReportResult["columns"] = [
     { key: "vendor", label: "Vendor" },
     { key: "bills", label: "Bills", type: "number" },
@@ -622,13 +664,32 @@ export async function vendorPayable(): Promise<ReportResult> {
     };
   }
 
-  const rows = await prisma.vendorBill.groupBy({
-    by: ["vendorId"],
-    _count: { _all: true },
-    _sum: { total: true },
-    orderBy: { _sum: { total: "desc" } },
-    take: 100,
-  });
+  /**
+   * Paged, and counted.
+   *
+   * This took `take: 100` with no `skip` and reported `total: rows.length`.
+   * Every consequence of that was invisible from the screen: the header
+   * said "100 row(s)" whatever the vendor list held, the pagination
+   * control never appeared because 100 is not more than a page, and the
+   * exporter — which walks the runner page by page — was handed the same
+   * first hundred vendors on every page it asked for.
+   */
+  const [rows, everyVendor] = await Promise.all([
+    prisma.vendorBill.groupBy({
+      by: ["vendorId"],
+      _count: { _all: true },
+      _sum: {
+        total: true,
+        amountPaid: true,
+        amountDue: true,
+        varianceAmount: true,
+      },
+      orderBy: { _sum: { total: "desc" } },
+      skip: (ctx.page - 1) * ctx.pageSize,
+      take: ctx.pageSize,
+    }),
+    prisma.vendorBill.groupBy({ by: ["vendorId"], _count: { _all: true } }),
+  ]);
 
   const vendors = await prisma.vendor.findMany({
     where: { id: { in: rows.map((r) => r.vendorId) } },
@@ -644,13 +705,20 @@ export async function vendorPayable(): Promise<ReportResult> {
         vendor: nameById.get(row.vendorId) ?? "Unknown vendor",
         bills: row._count._all,
         billed: moneyCell(row._sum.total),
+        // Still unknown: attributing a rate contract to a bill is Phase 6
+        // work and there is nothing to read it from.
         contracted: null,
-        variance: null,
-        paid: null,
-        outstanding: null,
+        // These three were blank too, and they should never have been:
+        // `amountPaid`, `amountDue` and `varianceAmount` are columns on
+        // the very rows being grouped. "Outstanding — unknown" next to a
+        // billed figure is what sends somebody to the ledger to work out a
+        // number the report was already holding.
+        variance: moneyCell(row._sum.varianceAmount),
+        paid: moneyCell(row._sum.amountPaid),
+        outstanding: moneyCell(row._sum.amountDue),
       },
     })),
-    total: rows.length,
-    note: "Reconciliation against the rate contract fills in with Phase 6. Blank columns are unknown, not zero.",
+    total: everyVendor.length,
+    note: "Billed, paid, outstanding and variance are the vendor bills themselves. Per contract stays blank — reconciling against the rate contract arrives with Phase 6, and blank means unknown, not zero. Vendor bills carry no branch, so this report is scoped to the organisation and the branch filter does not apply. The date range does not apply either: it is what is owed today.",
   };
 }

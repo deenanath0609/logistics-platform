@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { getGpsProvider } from "@/lib/tracking/providers";
 import { ingestPings } from "@/lib/tracking/ingest";
 import { verifySignature } from "@/lib/tracking/signature";
+import { modulesForOrg } from "@/lib/modules/tenant-modules";
 import {
   runCrossTenant,
   runWithTenant,
@@ -137,6 +138,30 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const { resolved } = resolution;
+
+  // Whose vehicles these are is settled; whether this carrier still buys a
+  // vehicle map is a separate question, and it is asked here because a route
+  // handler runs no layout and so passes no URL guard. Every screen that
+  // reads GPS is behind the `tracking` module and every permission that
+  // touches it is narrowed out of the session — but the pings arrive from a
+  // vendor, not from a person, so none of that reaches this door. Left open,
+  // a carrier who dropped tracking went on paying for a table of positions
+  // they cannot see, and geofence and signal-loss events kept firing behind
+  // a section of the product that is no longer theirs.
+  //
+  // 403 with a permanent-sounding code, not the 503 above: 503 says "try
+  // again", and a vendor that retries this one retries it for ever.
+  if (!(await modulesForOrg(resolved.org.id)).has("tracking")) {
+    console.warn(
+      `[tracking/webhook] refused a batch for "${resolved.org.slug}": GPS tracking ` +
+        "is not on that carrier's plan. Remove the provider configuration, or " +
+        "put the module back on the plan.",
+    );
+    return json(403, {
+      error: "not_on_plan",
+      message: "GPS tracking is not part of this organisation's plan.",
+    });
+  }
 
   const tenant = tenantContextFor(resolved.org, "job");
   if (!tenant || tenant.readOnly) {

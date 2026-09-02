@@ -552,6 +552,93 @@ async function probeRlsDirectly(a: Fixture) {
   );
 }
 
+/**
+ * The two things that make row-level security real rather than decorative.
+ *
+ * Both are absences, which is why neither had ever shown up: a policy that
+ * was never created and a role that quietly owns the tables both look
+ * exactly like a working system from inside the application.
+ *
+ * The coverage half caught a live one. `tenant_credential` — every
+ * carrier's encrypted SMS, SMTP, WhatsApp and GPS account keys — was added
+ * by a migration three days after `apply-rls.mjs` was last run by hand, so
+ * it had the Prisma extension's filter and no policy at all. Nothing
+ * noticed, because the extension covered every query the ORM issued and
+ * the second mechanism is only ever load-bearing when the first one fails.
+ * The policies are a migration now; this is what says so next time.
+ */
+async function probeRlsCoverage() {
+  console.log("\nRow-level security, as a property of the database");
+
+  /** Carry `orgId` but belong to the operator, who reads across tenants. */
+  const OPERATOR_OWNED = [
+    "impersonation_grant",
+    "tenant_usage_snapshot",
+    "tenant_onboarding_task",
+  ];
+
+  const uncovered = await basePrisma.$queryRaw<Array<{ table_name: string }>>`
+    SELECT c.table_name
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+    JOIN pg_class pc ON pc.relname = c.table_name
+    JOIN pg_namespace ns ON ns.oid = pc.relnamespace AND ns.nspname = 'public'
+    WHERE c.table_schema = 'public'
+      AND c.column_name = 'orgId'
+      AND t.table_type = 'BASE TABLE'
+      AND c.table_name <> ALL (${OPERATOR_OWNED}::text[])
+      AND (
+        NOT pc.relrowsecurity
+        OR NOT EXISTS (
+          SELECT 1 FROM pg_policies p
+          WHERE p.schemaname = 'public'
+            AND p.tablename = c.table_name
+            AND p.policyname = 'tenant_isolation'
+        )
+      )
+    ORDER BY c.table_name
+  `;
+
+  check(
+    "every tenant-owned table has row-level security and a tenant_isolation policy",
+    uncovered.length === 0,
+    uncovered.length === 0
+      ? ""
+      : `no policy on ${uncovered.map((r) => r.table_name).join(", ")} — ` +
+        "run `npx prisma migrate deploy`",
+  );
+
+  // The whole mechanism is void if the application owns the tables: RLS
+  // does not apply to a table's owner, and `BYPASSRLS` says so out loud.
+  // Read from the connection actually in use rather than from `.env`, so a
+  // deployment that points `DATABASE_URL` at the owner cannot pass this.
+  const [role] = await basePrisma.$queryRaw<
+    Array<{ me: string; superuser: boolean; bypass: boolean; owns: number }>
+  >`
+    SELECT current_user AS me,
+           r.rolsuper AS superuser,
+           r.rolbypassrls AS bypass,
+           (SELECT count(*)::int FROM pg_tables
+             WHERE schemaname = 'public' AND tableowner = current_user) AS owns
+    FROM pg_roles r
+    WHERE r.rolname = current_user
+  `;
+
+  const applies =
+    Boolean(role) && !role.superuser && !role.bypass && role.owns === 0;
+  check(
+    "the application's own connection is subject to those policies",
+    applies,
+    role
+      ? `connected as ${role.me}` +
+        (role.superuser ? ", which is a superuser" : "") +
+        (role.bypass ? ", which has BYPASSRLS" : "") +
+        (role.owns > 0 ? `, which owns ${role.owns} of the tables` : "")
+      : "could not read the current role",
+  );
+}
+
 /** With no tenant established at all, nothing may be read. */
 async function probeNoContext(b: Fixture) {
   console.log("\nWith no tenant established");
@@ -1035,6 +1122,7 @@ async function main() {
   // Outside runWithTenant, and outside any request: there is no tenant.
   await probeNoContext(b);
   await probeRlsDirectly(a);
+  await probeRlsCoverage();
   probeObjectKeyShape([a, b]);
   await probeHttp(a, b);
   await probeStorageRoutes(a, b);

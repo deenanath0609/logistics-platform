@@ -253,12 +253,15 @@ async function loadTenantUser(userId: string): Promise<SessionUser | null> {
  *
  * - With `asUserId`, `getCurrentUser()` returns *that person's* session,
  *   loaded through `loadTenantUser` — the same query, roles, branch scope
- *   and id their own login produces. The operator sees exactly what the
- *   person they are helping sees, no more, and cannot acquire a permission
- *   nobody at the carrier has because the set is that person's set. It is
+ *   and id their own login produces. The operator sees what the person
+ *   they are helping sees, less the three codes in
+ *   `IMPERSONATION_WITHHELD` below, and cannot acquire a permission nobody
+ *   at the carrier has because the set is that person's set. It is
  *   also what makes a write attributable: `AuditLog.userId` is a foreign
  *   key into the carrier's staff table, so the adopted user is the only
- *   actor an impersonated write *can* name. The operator half of that
+ *   actor an impersonated write *can* name — which is why the row also
+ *   carries `impersonationGrantId`, so the carrier can tell the two apart.
+ *   The operator half of that
  *   attribution is the `impersonation.enter` row in `PlatformAuditLog`,
  *   which pins the window those rows fall in.
  *
@@ -277,15 +280,59 @@ async function loadTenantUser(userId: string): Promise<SessionUser | null> {
  * by the ops layout reads the tenant context, not this object.
  * ────────────────────────────────────────────────────────────────────────
  */
+/**
+ * ── The three things a support session may never do ─────────────────────
+ *
+ * Everything else an adopted session can do is bounded by the grant: it
+ * expires, it is announced by the banner, it is refused once the row is
+ * ended, and every change it makes is now marked `via support` in the
+ * carrier's own trail. These three are not bounded by any of that, because
+ * what they produce **outlives the grant**:
+ *
+ * - `user.manage` — create a login, or reset somebody's password. A user
+ *   added at minute two of a thirty-minute session is still there next
+ *   year, and it is a way back in that no expiry closes.
+ * - `role.manage` — grant a permission to a role. The same, one level up:
+ *   it widens what every holder of that role can do, permanently.
+ * - `apikey.manage` — mint an API key. A bearer credential for the
+ *   carrier's whole API, valid until somebody notices it.
+ *
+ * Support does not need them. Reproducing a customer's problem, reading
+ * what they see, correcting a status, approving the invoice they are
+ * stuck on — none of that touches identity. And an operator who genuinely
+ * must add a user for a customer can ask the customer to, which is the
+ * conversation that should be happening anyway.
+ *
+ * Subtracted rather than special-cased, exactly like `narrowToModules`:
+ * the adopted session is that person's permission set minus these, so no
+ * call site has to learn that impersonation exists, and a permission check
+ * written tomorrow inherits the rule.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+const IMPERSONATION_WITHHELD = new Set([
+  "user.manage",
+  "role.manage",
+  "apikey.manage",
+]);
+
 async function impersonatedUser(grant: LiveGrant): Promise<SessionUser | null> {
   if (grant.asUserId) {
     const adopted = await loadTenantUser(grant.asUserId);
-    // The forced password change is the adopted person's to do, not the
-    // operator's. Left set, `requireUser` would pin the whole support
-    // session on `/password` — a screen whose write the read-only
-    // impersonation context refuses anyway, so the operator would be stuck
-    // on a form that cannot succeed and cannot be left.
-    return adopted ? { ...adopted, mustChangePassword: false } : null;
+    if (!adopted) return null;
+
+    const permissions = new Set(adopted.permissions);
+    for (const code of IMPERSONATION_WITHHELD) permissions.delete(code);
+
+    return {
+      ...adopted,
+      permissions,
+      // The forced password change is the adopted person's to do, not the
+      // operator's. Left set, `requireUser` would pin the whole support
+      // session on `/password` — a screen whose write the read-only
+      // impersonation context refuses anyway, so the operator would be
+      // stuck on a form that cannot succeed and cannot be left.
+      mustChangePassword: false,
+    };
   }
   return tenantWideSupportUser(grant);
 }

@@ -136,6 +136,8 @@ async function main(): Promise<void> {
     retention: retention.retentionBanner(retentionMs),
   });
 
+  await warnAboutOtherWorkers(prismaBase.basePrisma);
+
   const supervisor = new Supervisor();
   supervisor.start(jobs);
 
@@ -174,6 +176,60 @@ function banner(
   ];
 
   console.info(lines.join("\n"));
+}
+
+/**
+ * Says so when this is the second worker on this database.
+ *
+ * Two of these is not a crash and not an error — it is a Tuesday, because
+ * `npm run worker` in a second terminal looks exactly like `npm run worker`
+ * in the first. What it costs is invisible: every GPS poll, SLA scan and
+ * retention pass runs twice per interval, two drains race for the same
+ * outbox rows, and any measurement of the outbox becomes untrustworthy.
+ * That last one is not theoretical. A row left `PROCESSING` — a second
+ * worker's live claim, caught mid-drain — was recorded as a shutdown defect
+ * and hunted for weeks. `scripts/verify-worker.ts` now refuses to run at all
+ * while this is true; this is the same fact said at the other end, where
+ * somebody can act on it in the second before they wonder why.
+ *
+ * A warning and not a refusal. A rolling restart legitimately overlaps two
+ * workers for a few seconds, and a worker that refused to start during a
+ * deploy would be a far worse failure than the one being prevented.
+ */
+async function warnAboutOtherWorkers(base: {
+  $queryRaw: <T>(strings: TemplateStringsArray, ...values: unknown[]) => Promise<T>;
+}): Promise<void> {
+  try {
+    // `pid <> pg_backend_pid()` excludes the connection asking the question.
+    const rows = await base.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*)::bigint AS n FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND application_name = ${WORKER_APP_NAME}
+         AND pid <> pg_backend_pid()`;
+
+    const others = Number(rows[0]?.n ?? 0);
+    if (others === 0) return;
+
+    console.warn(
+      [
+        "",
+        `[worker] another worker is already connected to this database ` +
+          `(${others} connection(s)).`,
+        "",
+        "  Two workers means every pass runs twice and two drains race the same",
+        "  outbox rows. Nothing is lost — the claim is atomic — but the second",
+        "  worker's in-flight claim is what makes `verify-worker.ts` unreadable,",
+        "  and it has been mistaken for a stranded row before.",
+        "",
+        "  If this is a rolling restart, ignore it. If it is a second terminal,",
+        "  stop one of them.",
+        "",
+      ].join("\n"),
+    );
+  } catch {
+    // A worker must start whether or not it can read `pg_stat_activity`;
+    // some managed Postgres roles cannot. Nothing depends on the answer.
+  }
 }
 
 /**

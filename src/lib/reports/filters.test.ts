@@ -6,6 +6,7 @@ import {
   filtersToParams,
   parseFilters,
   rangeDays,
+  restrictToDeclared,
   toDayString,
   trendBuckets,
 } from "./filters";
@@ -141,5 +142,69 @@ describe("trend buckets", () => {
     expect(buckets[1].from.getTime() - buckets[0].from.getTime()).toBe(
       7 * 86_400_000,
     );
+  });
+});
+
+describe("the SLA-state filter", () => {
+  it("reads a known state and drops one it has never heard of", () => {
+    // Passed straight through, an unknown value reaches Prisma as an enum
+    // it cannot parse and a mistyped URL becomes a 500 rather than an
+    // unfiltered report.
+    expect(parseFilters({ sla: "BREACHED" }, NOW).slaState).toBe("BREACHED");
+    expect(parseFilters({ sla: "breached" }, NOW).slaState).toBeNull();
+    expect(parseFilters({ sla: "OVERDUE" }, NOW).slaState).toBeNull();
+    expect(parseFilters({}, NOW).slaState).toBeNull();
+  });
+
+  it("survives the round trip through the query string", () => {
+    const filters = parseFilters({ sla: "AT_RISK" }, NOW);
+    expect(filtersToParams(filters).sla).toBe("AT_RISK");
+    expect(describeFilters(filters)).toContain("SLA At risk");
+  });
+});
+
+describe("restricting filters to the ones a report offers", () => {
+  const everything = parseFilters(
+    {
+      from: "2026-08-01",
+      to: "2026-08-27",
+      branchId: "br_1",
+      customerId: "cu_1",
+      originBranchId: "br_2",
+      destinationBranchId: "br_3",
+      serviceTypeId: "sv_1",
+      mode: "FTL",
+      sla: "BREACHED",
+      q: "LR123",
+    },
+    NOW,
+  );
+
+  it("drops everything the report draws no control for", () => {
+    // Several runners share `shipmentWhere`, so a hidden `?mode=` really
+    // did narrow a table whose filter bar showed no mode control to
+    // explain it or clear it.
+    const restricted = restrictToDeclared(everything, ["dates", "branch"]);
+
+    expect(restricted.branchId).toBe("br_1");
+    expect(restricted.customerId).toBeNull();
+    expect(restricted.originBranchId).toBeNull();
+    expect(restricted.destinationBranchId).toBeNull();
+    expect(restricted.serviceTypeId).toBeNull();
+    expect(restricted.mode).toBeNull();
+    expect(restricted.slaState).toBeNull();
+    expect(restricted.q).toBeNull();
+  });
+
+  it("keeps the dates, which every runner decides about for itself", () => {
+    const restricted = restrictToDeclared(everything, ["branch"]);
+    expect(restricted.from.getTime()).toBe(everything.from.getTime());
+    expect(restricted.to.getTime()).toBe(everything.to.getTime());
+  });
+
+  it("keeps both ends of a lane together", () => {
+    const restricted = restrictToDeclared(everything, ["lane"]);
+    expect(restricted.originBranchId).toBe("br_2");
+    expect(restricted.destinationBranchId).toBe("br_3");
   });
 });

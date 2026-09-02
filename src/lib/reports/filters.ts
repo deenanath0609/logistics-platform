@@ -1,5 +1,10 @@
-import type { ShipmentMode } from "@/generated/prisma/client";
-import { IST_OFFSET_MINUTES, fromLocal, toLocal } from "@/lib/sla/policy";
+import type { ShipmentMode, SlaState } from "@/generated/prisma/client";
+import {
+  IST_OFFSET_MINUTES,
+  SLA_STATE_LABEL,
+  fromLocal,
+  toLocal,
+} from "@/lib/sla/policy";
 import type { FilterKey, ReportFilters } from "./types";
 import { SHIPMENT_MODES } from "@/lib/shipment/modes";
 
@@ -24,6 +29,9 @@ export const MAX_RANGE_DAYS = 400;
 // From the single list, so a new mode is filterable in reports the day
 // it is bookable rather than the day somebody notices.
 const MODES: readonly ShipmentMode[] = SHIPMENT_MODES;
+
+/** From the label table, so a new SLA state is filterable the day it exists. */
+export const SLA_STATES = Object.keys(SLA_STATE_LABEL) as SlaState[];
 
 export type RawParams = Record<string, string | string[] | undefined>;
 
@@ -75,6 +83,7 @@ export function parseFilters(params: RawParams, now: Date = new Date()): ReportF
   }
 
   const mode = one(params.mode);
+  const sla = one(params.sla);
 
   return {
     from,
@@ -85,6 +94,11 @@ export function parseFilters(params: RawParams, now: Date = new Date()): ReportF
     destinationBranchId: one(params.destinationBranchId),
     serviceTypeId: one(params.serviceTypeId),
     mode: mode && MODES.includes(mode as ShipmentMode) ? (mode as ShipmentMode) : null,
+    // An unrecognised value is dropped rather than passed through to
+    // Prisma, which would throw on the enum and turn a mistyped URL into a
+    // five-hundred instead of an unfiltered report.
+    slaState:
+      sla && SLA_STATES.includes(sla as SlaState) ? (sla as SlaState) : null,
     q: one(params.q),
   };
 }
@@ -105,12 +119,47 @@ export function filtersToParams(
     ["destinationBranchId", filters.destinationBranchId],
     ["serviceTypeId", filters.serviceTypeId],
     ["mode", filters.mode],
+    ["sla", filters.slaState],
     ["q", filters.q],
   ];
 
   for (const [key, value] of optional) if (value) params[key] = value;
 
   return params;
+}
+
+/**
+ * The filters a given report actually offers, and nothing else.
+ *
+ * `ReportDef.filters` decides which controls a report draws. Everything
+ * else parsed out of the query string used to be handed to the runner
+ * anyway — several runners share `shipmentWhere`, so `?mode=FTL` on
+ * Pending POD silently narrowed the table while the filter bar showed no
+ * mode control to explain it or to clear it. A saved view or a pasted URL
+ * could therefore hold a filter the screen could neither display nor
+ * remove, and the header sentence would announce a customer name on a
+ * report that ignores customers.
+ *
+ * Dates are left alone: they are not nullable, and each runner already
+ * says in its own note whether it honours the range.
+ */
+export function restrictToDeclared(
+  filters: ReportFilters,
+  declared: readonly FilterKey[],
+): ReportFilters {
+  const has = (key: FilterKey) => declared.includes(key);
+
+  return {
+    ...filters,
+    branchId: has("branch") ? filters.branchId : null,
+    customerId: has("customer") ? filters.customerId : null,
+    originBranchId: has("lane") ? filters.originBranchId : null,
+    destinationBranchId: has("lane") ? filters.destinationBranchId : null,
+    serviceTypeId: has("serviceType") ? filters.serviceTypeId : null,
+    mode: has("mode") ? filters.mode : null,
+    slaState: has("sla") ? filters.slaState : null,
+    q: has("search") ? filters.q : null,
+  };
 }
 
 /** The filters, in words, for the report header and the export sheet. */
@@ -135,6 +184,7 @@ export function describeFilters(
   }
   if (names.serviceType) parts.push(names.serviceType);
   if (filters.mode) parts.push(filters.mode);
+  if (filters.slaState) parts.push(`SLA ${SLA_STATE_LABEL[filters.slaState]}`);
   if (filters.q) parts.push(`"${filters.q}"`);
 
   return parts.join(" · ");
@@ -185,5 +235,6 @@ export const FILTER_LABEL: Record<FilterKey, string> = {
   lane: "Lane",
   serviceType: "Service type",
   mode: "Mode",
+  sla: "SLA state",
   search: "Search",
 };

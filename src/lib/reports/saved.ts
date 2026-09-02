@@ -38,7 +38,50 @@ export async function listSavedReports(
   user: SessionUser,
   reportKey?: string,
 ): Promise<SavedReportSummary[]> {
-  const rows = await prisma.savedReport.findMany({
+  const rows = await listRows(user, reportKey);
+
+  /**
+   * Only views this reader could actually open.
+   *
+   * Shared is org-wide, which used to mean a Branch Manager saw a
+   * colleague's "Vendor payable — March" on their own index: its title,
+   * its filters, and a link that answered 403. The permission on the
+   * report decides, exactly as it does everywhere else — and a report key
+   * that has since been removed from the library drops out rather than
+   * rendering as its own raw key.
+   */
+  const visible = rows.filter((row) => {
+    const report = reportFor(row.reportKey);
+    return report ? user.permissions.has(report.permission) : false;
+  });
+
+  const ownerIds = [
+    ...new Set(visible.map((row) => row.ownerId).filter((id): id is string => Boolean(id))),
+  ];
+  const owners = ownerIds.length
+    ? await prisma.user.findMany({
+        where: { id: { in: ownerIds } },
+        select: { id: true, name: true },
+      })
+    : [];
+  const nameById = new Map(owners.map((owner) => [owner.id, owner.name]));
+
+  return visible.map((row) => ({
+    id: row.id,
+    reportKey: row.reportKey,
+    reportTitle: reportFor(row.reportKey)?.title ?? row.reportKey,
+    name: row.name,
+    query: toQueryString(row.filters),
+    isShared: row.isShared,
+    isMine: row.ownerId === user.id,
+    ownerName: row.ownerId ? (nameById.get(row.ownerId) ?? null) : null,
+    lastRunAt: row.lastRunAt,
+    createdAt: row.createdAt,
+  }));
+}
+
+async function listRows(user: SessionUser, reportKey?: string) {
+  return prisma.savedReport.findMany({
     where: {
       orgId: user.orgId,
       ...(reportKey ? { reportKey } : {}),
@@ -57,30 +100,6 @@ export async function listSavedReports(
       createdAt: true,
     },
   });
-
-  const ownerIds = [
-    ...new Set(rows.map((row) => row.ownerId).filter((id): id is string => Boolean(id))),
-  ];
-  const owners = ownerIds.length
-    ? await prisma.user.findMany({
-        where: { id: { in: ownerIds } },
-        select: { id: true, name: true },
-      })
-    : [];
-  const nameById = new Map(owners.map((owner) => [owner.id, owner.name]));
-
-  return rows.map((row) => ({
-    id: row.id,
-    reportKey: row.reportKey,
-    reportTitle: reportFor(row.reportKey)?.title ?? row.reportKey,
-    name: row.name,
-    query: toQueryString(row.filters),
-    isShared: row.isShared,
-    isMine: row.ownerId === user.id,
-    ownerName: row.ownerId ? (nameById.get(row.ownerId) ?? null) : null,
-    lastRunAt: row.lastRunAt,
-    createdAt: row.createdAt,
-  }));
 }
 
 /** `SavedReport.filters` is JSON; only string values survive the trip. */
@@ -168,15 +187,32 @@ export async function deleteSavedReport(
   return { ok: true, id, message: `Removed "${saved.name}".` };
 }
 
-/** Stamped when a saved report is opened, so stale ones are visible. */
-export async function touchSavedReport(id: string): Promise<void> {
+/**
+ * Stamped when a saved report is opened, so stale ones are visible.
+ *
+ * Nothing called this. The index renders "Last opened …" from `lastRunAt`
+ * and no code path ever wrote the column, so every saved view in the
+ * product read "Never opened" for ever — including one somebody had opened
+ * that morning. The report page now calls it with the `saved` id its own
+ * link carries.
+ *
+ * Scoped by organisation, because the id arrives in a query string: an
+ * unscoped `update` by id would let a pasted URL stamp another carrier's
+ * row, which is a small thing to write and a bad thing to be able to write.
+ */
+export async function touchSavedReport(
+  id: string,
+  user: SessionUser,
+): Promise<void> {
   try {
-    await prisma.savedReport.update({
-      where: { id },
+    await prisma.savedReport.updateMany({
+      where: { id, orgId: user.orgId },
       data: { lastRunAt: new Date() },
     });
-  } catch {
+  } catch (error) {
     // Opening a saved report that has since been deleted is not an error
-    // worth showing anyone — the report still runs.
+    // worth showing anyone — the report still runs. Logged rather than
+    // swallowed: a silent catch here is how a broken write stays broken.
+    console.error("[reports] could not stamp a saved view as opened", error);
   }
 }

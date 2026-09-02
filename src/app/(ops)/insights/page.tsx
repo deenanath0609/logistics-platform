@@ -12,9 +12,15 @@ import {
   VolumeTrend,
 } from "@/components/reports/charts";
 import { ReportFilterBar } from "@/components/reports/filter-bar";
-import { describeFilters, filtersToParams, parseFilters } from "@/lib/reports/filters";
-import { gatherInsights } from "@/lib/reports/insights";
+import {
+  describeFilters,
+  filtersToParams,
+  parseFilters,
+  restrictToDeclared,
+} from "@/lib/reports/filters";
+import { DAMAGE_CAPTURE_CAVEAT, gatherInsights } from "@/lib/reports/insights";
 import { scopeNote } from "@/lib/reports/scope";
+import type { FilterKey } from "@/lib/reports/types";
 import {
   KPI_THRESHOLDS,
   formatMinutes,
@@ -24,6 +30,15 @@ import {
 
 export const metadata: Metadata = { title: "Insights" };
 export const dynamic = "force-dynamic";
+
+/** One list, so the bar and the parser cannot disagree about what applies. */
+const INSIGHT_FILTERS: FilterKey[] = [
+  "dates",
+  "branch",
+  "customer",
+  "serviceType",
+  "mode",
+];
 
 /**
  * The management dashboard — docs/BRD.html §A.17.
@@ -43,7 +58,10 @@ export default async function InsightsPage({
   const user = await requirePermission("report.management");
 
   const raw = await searchParams;
-  const filters = parseFilters(raw);
+  // The same narrowing the report pages do: the bar below draws five
+  // controls, so a pasted `?sla=` or `?q=` must be neither applied nor
+  // announced in the header sentence.
+  const filters = restrictToDeclared(parseFilters(raw), INSIGHT_FILTERS);
 
   const [insights, options] = await Promise.all([
     gatherInsights(user, filters),
@@ -75,7 +93,7 @@ export default async function InsightsPage({
       </p>
 
       <ReportFilterBar
-        filters={["dates", "branch", "customer", "serviceType", "mode"]}
+        filters={INSIGHT_FILTERS}
         options={options}
         current={filtersToParams(filters)}
       />
@@ -86,6 +104,23 @@ export default async function InsightsPage({
           {insights.sampleSize.toLocaleString("en-IN")} deliveries in the window,
           not all of them. Narrow the date range or pick a branch for exact
           numbers — a sampled KPI quoted as an exact one is worse than no KPI.
+        </p>
+      )}
+
+      {(insights.truncated.cod ||
+        insights.truncated.trips ||
+        insights.truncated.dwell) && (
+        <p className="mb-4 rounded-lg border border-warn/40 bg-warn-muted px-3 py-2 text-xs text-warn">
+          Some supporting samples hit their ceiling in this window:{" "}
+          {[
+            insights.truncated.cod && "COD ageing buckets",
+            insights.truncated.trips && "truck utilisation",
+            insights.truncated.dwell && "hub dwell",
+          ]
+            .filter(Boolean)
+            .join(", ")}
+          . Narrow the range or pick a branch. The COD rupee total and count
+          are exact whatever the buckets hold.
         </p>
       )}
 
@@ -161,6 +196,10 @@ export default async function InsightsPage({
           value={formatPercent(insights.damageLoss.percent)}
           grade={gradeKpi(insights.damageLoss.percent, KPI_THRESHOLDS.damageLoss)}
           detail={`${insights.damageLoss.numerator.toLocaleString("en-IN")} of ${insights.damageLoss.denominator.toLocaleString("en-IN")} handled`}
+          // Permanent until damage capture exists. The label is §A.17's and
+          // the measurement is narrower than the label, which is the sort of
+          // gap a reader has no way to spot from the number.
+          caveat={DAMAGE_CAPTURE_CAVEAT}
           better="lower"
         />
 
@@ -228,7 +267,7 @@ export default async function InsightsPage({
       <section className="mt-8">
         <Panel
           title={`Open exceptions — ${insights.openExceptions.toLocaleString("en-IN")}`}
-          hint="What is wrong right now, by kind. The tower has the detail."
+          hint="What is open right now in the branch this screen is filtered to — the date range above does not apply to it, because an exception raised last month and still open is a problem today. The tower has the detail."
           action={
             <Button variant="outline" size="sm" render={<Link href="/exceptions" />}>
               Open the tower

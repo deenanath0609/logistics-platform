@@ -16,7 +16,11 @@ import { firstOwnerName } from "@/lib/platform/provisioning";
 import { getTenant } from "@/lib/platform/tenants";
 import { listTenantCredentials } from "@/lib/platform/tenant-credentials";
 import { credentialsKeyConfigured } from "@/lib/integrations/secrets";
-import { operatorCan, requireCapability } from "@/lib/platform/session";
+import {
+  getCurrentOperator,
+  operatorCan,
+  requireCapability,
+} from "@/lib/platform/session";
 import { tenantOrigin } from "@/lib/tenant/host";
 import { TenantIdentityForm } from "./identity-form";
 import { TenantBrandingForm } from "./branding-form";
@@ -30,11 +34,32 @@ import { EnterSessionButton } from "../../impersonation/enter-session-button";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * The title, and why it is guarded.
+ *
+ * `generateMetadata` runs *before* the page, so the page's own
+ * `requireCapability("tenant.read")` has not happened yet. Reading the
+ * carrier here unconditionally put its name into the `<title>` of the very
+ * response that refuses an anonymous caller — a 307 to the sign-in form
+ * carrying `Acme Freight · Operator console` in its head. Walking the id
+ * space of `/platform/tenants/<id>` signed out was therefore a way to read
+ * off the customer list of the whole platform.
+ *
+ * The guard cannot redirect from here (metadata has nowhere to render a
+ * redirect into, and the page below does it properly a moment later), so
+ * it answers with the same generic title an unknown id gets. A refusal
+ * must not tell a stranger which of the two happened.
+ */
 export async function generateMetadata({
   params,
 }: {
   params: Promise<{ orgId: string }>;
 }): Promise<Metadata> {
+  const operator = await getCurrentOperator();
+  if (!operator || !operatorCan(operator, "tenant.read")) {
+    return { title: "Tenant" };
+  }
+
   const { orgId } = await params;
   const detail = await getTenant(orgId);
   return { title: detail?.org.name ?? "Tenant" };

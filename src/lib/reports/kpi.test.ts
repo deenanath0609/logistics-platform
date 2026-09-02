@@ -7,6 +7,9 @@ import {
   codAgeing,
   damageLossRate,
   firstAttemptDelivery,
+  firstDepartureAfter,
+  HUB_ARRIVAL_EVENTS,
+  HUB_DEPARTURE_EVENTS,
   formatMinutes,
   formatPercent,
   gradeKpi,
@@ -411,5 +414,54 @@ describe("formatting", () => {
     expect(formatPercent(66.67)).toBe("66.7%");
     expect(formatPercent(0)).toBe("0.0%");
     expect(formatPercent(null)).toBe("—");
+  });
+});
+
+describe("pairing a hub arrival with its departure", () => {
+  const at = (iso: string) => new Date(iso);
+
+  it("matches the departure from the same hub, not merely the next one", () => {
+    // A consignment gate-out at the onward hub used to close the previous
+    // hub's dwell: the slow hub read fast and the delay was charged to
+    // whoever handled the freight afterwards.
+    const arrival = {
+      shipmentId: "s1",
+      occurredAt: at("2026-08-27T04:00:00.000Z"),
+      branchId: "hub_del",
+    };
+
+    const departures = [
+      { shipmentId: "s1", occurredAt: at("2026-08-27T05:00:00.000Z"), branchId: "hub_jai" },
+      { shipmentId: "s1", occurredAt: at("2026-08-27T09:00:00.000Z"), branchId: "hub_del" },
+    ];
+
+    expect(firstDepartureAfter(departures, arrival)?.occurredAt.toISOString()).toBe(
+      "2026-08-27T09:00:00.000Z",
+    );
+  });
+
+  it("ignores another consignment's departure and anything before the arrival", () => {
+    const arrival = {
+      shipmentId: "s1",
+      occurredAt: at("2026-08-27T04:00:00.000Z"),
+      branchId: "hub_del",
+    };
+
+    expect(
+      firstDepartureAfter(
+        [
+          { shipmentId: "s2", occurredAt: at("2026-08-27T06:00:00.000Z"), branchId: "hub_del" },
+          { shipmentId: "s1", occurredAt: at("2026-08-27T03:00:00.000Z"), branchId: "hub_del" },
+        ],
+        arrival,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("agrees with the arrival and departure event lists both readers use", () => {
+    // One list, so the dashboard KPI and the dwell report cannot be
+    // measured off different events.
+    expect(HUB_ARRIVAL_EVENTS).toContain("UNLOADED");
+    expect(HUB_DEPARTURE_EVENTS).toContain("GATE_OUT");
   });
 });

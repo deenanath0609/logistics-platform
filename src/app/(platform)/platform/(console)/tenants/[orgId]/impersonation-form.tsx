@@ -93,8 +93,11 @@ export function OpenSupportSessionForm({
         <span className="text-warn">
           Allow writes. Without this the session can look but not touch, which
           is what support needs almost every time. Ticking it means anything
-          done shows up in the carrier&rsquo;s own audit trail as work nobody
-          there did.
+          done lands in the carrier&rsquo;s own audit trail under the name of
+          the person whose view you adopted, marked{" "}
+          <span className="font-mono">via support</span> — visible to them.
+          Adding users, changing roles and minting API keys stay refused
+          whatever this says.
         </span>
       </label>
 

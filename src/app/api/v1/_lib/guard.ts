@@ -19,6 +19,9 @@ import {
   noteAuthFailure,
 } from "@/lib/webhooks/rate-limit";
 import { requireTenantOrgId, resolveTenant } from "@/lib/tenant";
+import { MODULES } from "@/lib/modules/modules";
+import { narrowToModules } from "@/lib/modules/registry";
+import { modulesForOrg } from "@/lib/modules/tenant-modules";
 import { fail, ok, requestIdFrom } from "./respond";
 
 /**
@@ -127,7 +130,22 @@ async function actorForKey(
   // until this was fixed — checked nowhere, so `withApiKey` admitted a
   // request on the strength of the key's own `scopes` column alone and the
   // narrowed set only ever reached handlers that happened to consult it.
-  const permissions = effectiveScopes(key.scopes, held);
+  //
+  // Narrowed twice, and the second one is the module gate. `getCurrentUser`
+  // subtracts the permissions of every module the carrier did not buy, which
+  // is what makes an `authorize()` in a server action plan-aware without the
+  // call site knowing plans exist. A key built its actor from the raw role
+  // grants instead, so the partner API was the one door into this product
+  // that a plan could not close: an endpoint gated on a module's permission
+  // answered a carrier who had never bought the module. Applied here rather
+  // than in `effectiveScopes` because that function is about the *key*, and
+  // this is about the *company* — the same distinction the registry draws.
+  const granted = await modulesForOrg(user.orgId);
+  const permissions = narrowToModules(
+    effectiveScopes(key.scopes, held),
+    granted,
+    MODULES,
+  );
 
   const scope = activeRoles.reduce<DataScope>(
     (widest, role) => (SCOPE_RANK[role.scope] > SCOPE_RANK[widest] ? role.scope : widest),
@@ -359,6 +377,29 @@ export async function withApiKey(
       "That API key has no active owner. Ask an administrator to reissue it.",
       requestId,
       { headers: rateHeaders },
+    );
+  }
+
+  // Is the partner API part of what this carrier bought at all?
+  //
+  // `integrations` is the module that sells it — "issue API keys and push
+  // webhook events" — and switching a module off has to remove the whole
+  // capability, not just the screen that administers it. Without this the
+  // console at `/integrations` went dark on a downgrade while every key
+  // already issued kept working, which is the worst of both: the carrier
+  // could no longer see the keys, could no longer revoke them, and they
+  // carried on booking consignments.
+  //
+  // After the key has verified, so a stranger guessing keys still learns
+  // only that the key is unknown. A 403 rather than a 404: the caller is a
+  // proven partner of this carrier, and "your plan no longer includes this"
+  // is something they should be able to take back to the carrier and act on.
+  if (!(await modulesForOrg(actor.orgId)).has("integrations")) {
+    return fail(
+      "not_on_plan",
+      "The partner API is not part of this carrier's plan.",
+      requestId,
+      { status: 403, headers: rateHeaders },
     );
   }
 

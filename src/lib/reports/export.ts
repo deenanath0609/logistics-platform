@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 import { recordAudit } from "@/server/services/audit";
 import type { SessionUser } from "@/lib/auth/session";
-import { describeFilters, filtersToParams, toDayString } from "./filters";
+import { filtersToParams, toDayString } from "./filters";
 import { exportValue } from "./format";
 import type {
   Cell,
@@ -45,10 +45,6 @@ export const MAX_CSV_ROWS = 100_000;
  * memory before a byte goes out. Half the CSV limit, deliberately.
  */
 export const MAX_XLSX_ROWS = 50_000;
-
-export function exportLimit(format: ExportFormat): number {
-  return format === "xlsx" ? MAX_XLSX_ROWS : MAX_CSV_ROWS;
-}
 
 // ────────────────────────────────────────────────────────────
 // The trail
@@ -329,9 +325,4 @@ export async function buildXlsx(input: {
   await finishReportRun(input.runId, rowCount, Date.now() - startedAt);
 
   return { buffer: new Uint8Array(buffer), rowCount };
-}
-
-/** The filter sentence written into the workbook and the CSV filename. */
-export function describeForExport(filters: ReportFilters): string {
-  return describeFilters(filters);
 }

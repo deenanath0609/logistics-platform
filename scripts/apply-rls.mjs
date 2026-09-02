@@ -4,6 +4,22 @@
  *   node scripts/apply-rls.mjs             print the SQL, change nothing
  *   node scripts/apply-rls.mjs --apply     create the role and the policies
  *
+ * ── What this is, and what it is not, since 2 Sep 2026 ──────────────────
+ *
+ * The **policies** are a migration now —
+ * `20260902090000_p9_rls_policies` — and `prisma migrate deploy` is what
+ * reproduces them. They lived only here for a while, and drifted: every
+ * table a later migration added got an `orgId`, got the Prisma extension's
+ * filter, and got no policy, because nobody re-ran this script.
+ * `tenant_credential` — every carrier's encrypted gateway keys — spent
+ * three days like that.
+ *
+ * What stays here is the half that is a deployment decision rather than a
+ * schema fact: creating the application role and granting it. The policy
+ * statements below are kept, and kept identical to the migration, so this
+ * remains a way to inspect and to revoke — but it is no longer the thing
+ * that has to be remembered.
+ *
  * ADR 001 §1 asks for two independent mechanisms, and this is the one the
  * application cannot bypass. The Prisma extension is the ergonomic layer —
  * it covers every query the ORM issues, which is almost all of them. This

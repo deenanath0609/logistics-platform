@@ -195,6 +195,41 @@ export type DwellLeg = {
 };
 
 /**
+ * The events that open a hub visit, and the ones that close it.
+ *
+ * Here rather than in either caller because both the dashboard KPI and the
+ * dwell report have to read the same ones. They did not: the report counted
+ * `UNLOADED` as an arrival and the dashboard did not, so the two produced
+ * different averages off the same event log — exactly the "the dashboard
+ * says 6 h and the report says 8 h" argument the KPI module exists to
+ * prevent.
+ */
+export const HUB_ARRIVAL_EVENTS = ["INBOUND_SCAN", "GATE_IN", "UNLOADED"] as const;
+export const HUB_DEPARTURE_EVENTS = ["GATE_OUT", "RUN_STARTED"] as const;
+
+/**
+ * The departure that closes one arrival.
+ *
+ * At the same branch, and after it. Matching on time alone closed a hub's
+ * dwell with the *next* hub's gate-out, which makes a slow hub look fast
+ * and moves the delay onto whichever branch handled the consignment next.
+ * Callers pass departures sorted ascending, so the first match is the one.
+ */
+export function firstDepartureAfter<
+  T extends { shipmentId: string; occurredAt: Date; branchId: string | null },
+>(
+  departures: readonly T[],
+  arrival: { shipmentId: string; occurredAt: Date; branchId: string | null },
+): T | undefined {
+  return departures.find(
+    (departure) =>
+      departure.shipmentId === arrival.shipmentId &&
+      departure.branchId === arrival.branchId &&
+      departure.occurredAt.getTime() > arrival.occurredAt.getTime(),
+  );
+}
+
+/**
  * Hub dwell time: inbound scan → outbound load.
  *
  * Open legs are excluded by default. Including them requires a `now`,

@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { requireTenantOrgId } from "@/lib/tenant";
+import { resolveTenant } from "@/lib/tenant/resolve";
 import { getEnv } from "@/lib/env";
 import { clientIpFrom } from "@/lib/net/client-ip";
 import type { AuditAction } from "@/generated/prisma/client";
@@ -44,13 +45,18 @@ function sanitise(value: unknown): unknown {
 }
 
 /**
- * Writes one audit row.
+ * Where the change came from, or nothing.
  *
- * Auditing must never be the reason a valid operation fails, so a failure
- * here is logged and swallowed. The database grants no UPDATE or DELETE on
- * this table — corrections are new rows.
+ * Its own try, and that is the whole point of extracting it. `headers()`
+ * throws outside a request, and it used to be the first statement inside
+ * the single `try` below — so a call from a background pass, a queue
+ * worker or a script threw on line one, was swallowed by the catch, and
+ * wrote **no row at all**. The trail lost the entry and logged a line
+ * nobody reads. Losing the address is acceptable; losing the row is not.
+ * Same shape, and the same reasoning, as `requestMeta()` in
+ * `lib/platform/audit.ts`.
  */
-export async function recordAudit(input: AuditInput): Promise<void> {
+async function origin(): Promise<{ ipAddress?: string; userAgent?: string }> {
   try {
     const headerList = await headers();
 
@@ -61,10 +67,45 @@ export async function recordAudit(input: AuditInput): Promise<void> {
     // person it is about is worse than one with a blank column.
     const ip = clientIpFrom(headerList, getEnv().TRUSTED_PROXY_HOPS);
 
+    return {
+      ipAddress: (ip.trusted ? ip.value : null) ?? undefined,
+      userAgent: headerList.get("user-agent") ?? undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Writes one audit row.
+ *
+ * Auditing must never be the reason a valid operation fails, so a failure
+ * here is logged and swallowed. The database grants no UPDATE or DELETE on
+ * this table — corrections are new rows.
+ */
+export async function recordAudit(input: AuditInput): Promise<void> {
+  try {
+    const from = await origin();
+
     // `user` is null for the things that happen before anyone is signed in —
     // a failed login, an OTP request — and those still belong to the tenant
     // whose host the request arrived on.
     const orgId = input.user?.orgId ?? (await requireTenantOrgId());
+
+    /*
+      Whether a platform operator was the one acting.
+
+      `userId` above names the carrier's own staff member and cannot name
+      anybody else — the column is a foreign key into their user table and
+      an operator has no row there. So a support session's writes used to
+      land in this trail as that person's own work, and the only record
+      that a stranger made them was in `PlatformAuditLog`, which no tenant
+      can read. Reading it from the tenant context rather than from a
+      parameter is what makes it unforgettable: every caller of
+      `recordAudit` gets it without knowing impersonation exists.
+    */
+    const tenant = await resolveTenant();
+    const impersonationGrantId = tenant?.impersonation?.grantId ?? null;
 
     await prisma.auditLog.create({
       data: {
@@ -78,8 +119,9 @@ export async function recordAudit(input: AuditInput): Promise<void> {
         before: (sanitise(input.before) ?? undefined) as never,
         after: (sanitise(input.after) ?? undefined) as never,
         reason: input.reason,
-        ipAddress: (ip.trusted ? ip.value : null) ?? undefined,
-        userAgent: headerList.get("user-agent") ?? undefined,
+        impersonationGrantId: impersonationGrantId ?? undefined,
+        ipAddress: from.ipAddress,
+        userAgent: from.userAgent,
       },
     });
   } catch (error) {

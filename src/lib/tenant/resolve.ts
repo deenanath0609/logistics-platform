@@ -80,14 +80,58 @@ async function lookupOrg(host: string): Promise<ResolvedOrg | null> {
  * can reach the app directly name whichever carrier they liked, which is
  * the whole boundary handed over in one header.
  */
-function clientFacingHost(headers: Headers): string | null {
-  if (getEnv().TRUSTED_PROXY_HOPS > 0) {
-    // A chain appends, so the first entry is the one the browser asked for.
-    const forwarded = headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+export function clientFacingHost(headers: Headers): string | null {
+  const hops = getEnv().TRUSTED_PROXY_HOPS;
+  if (hops > 0) {
+    const forwarded = trustedForwardedHost(headers.get("x-forwarded-host"), hops);
     if (forwarded) return forwarded;
   }
 
   return headers.get("host");
+}
+
+/**
+ * The entry of an `X-Forwarded-Host` chain that a configured proxy wrote.
+ *
+ * ── Which end of the chain, and why it matters ──────────────────────────
+ *
+ * This used to take `split(",")[0]` — the leftmost entry — on the grounds
+ * that "a chain appends, so the first entry is the one the browser asked
+ * for". Both halves of that sentence are true and the conclusion does not
+ * follow: if the chain appends, then a *client* that sends its own
+ * `X-Forwarded-Host` occupies position zero and every proxy in front of us
+ * adds itself after it. The leftmost entry is therefore the one value in
+ * the whole header that the caller controls, and reading it would have let
+ * anyone name whichever carrier they liked — the exact boundary this
+ * switch exists to protect, handed over by the reading of it.
+ *
+ * It never bit, because nginx here replaces the header rather than
+ * appending to it, so the chain has one entry and both ends are the same
+ * value. That is a property of one deployment's configuration, not of the
+ * header, and it stops being true the day a CDN goes in front.
+ *
+ * So it is counted from the right, exactly as `deriveClientIp` counts
+ * `X-Forwarded-For`, and for exactly the same reason: the rightmost entry
+ * was written by the proxy nearest to us, the one before it by the proxy
+ * before that, and `TRUSTED_PROXY_HOPS` says how far back we may believe.
+ * A chain shorter than the configured hop count means the request did not
+ * come through the proxies at all — which is what bypassing an internal
+ * load balancer looks like — and is refused rather than half-believed.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+export function trustedForwardedHost(
+  header: string | null | undefined,
+  hops: number,
+): string | null {
+  if (!header || hops <= 0) return null;
+
+  const chain = header
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+
+  if (chain.length < hops) return null;
+  return chain[chain.length - hops] || null;
 }
 
 /** Host → organisation, or null when no tenant owns that host. */

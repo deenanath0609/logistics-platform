@@ -13,7 +13,13 @@ import {
   sumDecimal,
   weightCell,
 } from "./format";
+import {
+  firstDepartureAfter,
+  HUB_ARRIVAL_EVENTS,
+  HUB_DEPARTURE_EVENTS,
+} from "./kpi";
 import { laneWhere, shipmentWhere, singleBranchWhere } from "./scope";
+import { toDayString } from "./filters";
 import type { ReportContext, ReportResult, ReportRow } from "./types";
 
 /**
@@ -324,7 +330,14 @@ export async function dispatchManifest(
 // In-transit status
 // ────────────────────────────────────────────────────────────
 
-const MOVING: ShipmentStatus[] = [
+/**
+ * Still in the network.
+ *
+ * Exported so the operations dashboard's SLA tiles count the same set the
+ * in-transit report lists. They did not, which is how a tile said one
+ * number and the page behind it said another.
+ */
+export const MOVING: ShipmentStatus[] = [
   ...STATUS_GROUPS.inNetwork,
   ...STATUS_GROUPS.moving,
   ...STATUS_GROUPS.lastMile,
@@ -338,7 +351,14 @@ export async function inTransitStatus(
   // on the last status change would hide anything that has not moved.
   const base = shipmentWhere(ctx.user, ctx.filters, "bookedAt") as Prisma.ShipmentWhereInput;
   const where: Prisma.ShipmentWhereInput = {
-    AND: [base, { currentStatus: { in: MOVING } }],
+    AND: [
+      base,
+      { currentStatus: { in: MOVING } },
+      // Whatever the operations dashboard counted, this can list. The
+      // tiles link straight in here with `?sla=`, and the two agree
+      // because they are now the same query.
+      ctx.filters.slaState ? { sla: { state: ctx.filters.slaState } } : {},
+    ],
   };
 
   const now = new Date();
@@ -792,7 +812,9 @@ export async function hubDwell(ctx: ReportContext): Promise<ReportResult> {
   const where: Prisma.ShipmentEventWhereInput = {
     AND: [
       { occurredAt: { gte: ctx.filters.from, lte: ctx.filters.to } },
-      { eventType: { in: ["INBOUND_SCAN", "GATE_IN", "UNLOADED"] } },
+      // The same list the dashboard's dwell KPI uses. Keeping two lists
+      // meant the two disagreed on the same event log.
+      { eventType: { in: [...HUB_ARRIVAL_EVENTS] } },
       { branchId: { not: null } },
       branchClause,
     ],
@@ -836,7 +858,7 @@ export async function hubDwell(ctx: ReportContext): Promise<ReportResult> {
       : await prisma.shipmentEvent.findMany({
           where: {
             shipmentId: { in: arrivals.map((a) => a.shipmentId) },
-            eventType: { in: ["GATE_OUT", "RUN_STARTED"] },
+            eventType: { in: [...HUB_DEPARTURE_EVENTS] },
             occurredAt: { gte: new Date(earliest) },
           },
           orderBy: { occurredAt: "asc" },
@@ -846,11 +868,11 @@ export async function hubDwell(ctx: ReportContext): Promise<ReportResult> {
   const now = new Date();
 
   const rows: ReportRow[] = arrivals.map((arrival) => {
-    const departure = departures.find(
-      (d) =>
-        d.shipmentId === arrival.shipmentId &&
-        d.occurredAt.getTime() > arrival.occurredAt.getTime(),
-    );
+    // Same hub, not merely later. `branchId` was already being selected
+    // here and never compared, so a consignment's gate-out at the *next*
+    // hub closed this hub's dwell — which makes a slow hub read fast and
+    // charges the delay to whoever handled it afterwards.
+    const departure = firstDepartureAfter(departures, arrival);
 
     const dwell = minutesBetween(arrival.occurredAt, departure?.occurredAt ?? now);
 
@@ -1040,12 +1062,24 @@ export async function documentExpiry(
     },
   };
 
+  /**
+   * Both tables, up to the end of the requested page.
+   *
+   * The merge has to happen before the slice. Taking one page from each
+   * table and sorting the two pages together produced a "closest expiry
+   * first" ordering that was only true inside a page: with 300 vehicle
+   * documents and 3 driver ones, page one showed 53 rows — the header
+   * promised 50 — and every driver document sat on page one however far
+   * away it expired. Reading to the end of the page and slicing once costs
+   * `page × pageSize` rows and is the only ordering that survives paging.
+   */
+  const upTo = ctx.page * ctx.pageSize;
+
   const [vehicleDocs, driverDocs, vehicleCount, driverCount] = await Promise.all([
     prisma.vehicleDocument.findMany({
       where: vehicleWhere,
       orderBy: { expiresOn: "asc" },
-      take: ctx.pageSize,
-      skip: (ctx.page - 1) * ctx.pageSize,
+      take: upTo,
       select: {
         id: true,
         kind: true,
@@ -1062,8 +1096,7 @@ export async function documentExpiry(
     prisma.driverDocument.findMany({
       where: driverWhere,
       orderBy: { expiresOn: "asc" },
-      take: ctx.pageSize,
-      skip: (ctx.page - 1) * ctx.pageSize,
+      take: upTo,
       select: {
         id: true,
         kind: true,
@@ -1078,10 +1111,18 @@ export async function documentExpiry(
     prisma.driverDocument.count({ where: driverWhere }),
   ]);
 
-  const today = new Date();
-  const startOfToday = new Date(
-    Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()),
-  );
+  /**
+   * Today, as the `date` column stores it.
+   *
+   * `expiresOn` is `@db.Date` — UTC midnight of a calendar day — so "today"
+   * has to be the *branch-local* calendar day expressed the same way.
+   * Building it from the UTC parts of `new Date()` made every evening in
+   * India read yesterday's date: between 18:30 and midnight IST, "Days
+   * left" was one too high and a certificate expiring today was labelled
+   * Valid. Six of these have been found in this repo; this was the seventh.
+   */
+  const [year, month, day] = toDayString(new Date()).split("-").map(Number);
+  const startOfToday = new Date(Date.UTC(year, month - 1, day));
 
   const rows: ReportRow[] = [
     ...vehicleDocs.map((doc) => ({
@@ -1111,7 +1152,15 @@ export async function documentExpiry(
       tones: { state: "muted" as const },
     })),
   ]
-    .sort((a, b) => Number(a.cells.days ?? 0) - Number(b.cells.days ?? 0))
+    // Sorted across both tables, then cut to the page the reader asked
+    // for. `key` breaks ties so two documents expiring on the same day do
+    // not swap places between page loads and appear twice, or not at all.
+    .sort(
+      (a, b) =>
+        Number(a.cells.days ?? 0) - Number(b.cells.days ?? 0) ||
+        a.key.localeCompare(b.key),
+    )
+    .slice((ctx.page - 1) * ctx.pageSize, upTo)
     .map((row) => {
       const days = Number(row.cells.days ?? 0);
       return {

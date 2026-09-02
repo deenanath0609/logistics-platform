@@ -77,6 +77,7 @@ export async function listOnboardingTasks(orgId: string) {
  * that only moves one way stops being believed.
  */
 export async function setTaskDone(
+  orgId: string,
   taskId: string,
   isDone: boolean,
   actor: PlatformOperator,
@@ -86,6 +87,13 @@ export async function setTaskDone(
     select: { id: true, orgId: true, key: true, label: true, isDone: true },
   });
   if (!task) return fail("That task no longer exists.");
+  // The id arrives from a hidden field on a checklist rendered for one
+  // carrier, and `tenant_onboarding_task` is operator-owned and outside
+  // row-level security — so nothing else would have noticed a task id from
+  // another carrier's page. It cannot leak anything (the row is audited
+  // against its own tenant either way), but a checklist that silently ticks
+  // a different company's box is not a state worth leaving reachable.
+  if (task.orgId !== orgId) return fail("That task belongs to another tenant.");
   if (task.isDone === isDone) return ok(null);
 
   const org = await platformDb.organization.findUnique({

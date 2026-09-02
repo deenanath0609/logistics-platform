@@ -175,6 +175,22 @@ export default async function AuditPage({
                     {row.user?.name ?? (
                       <span className="text-muted-foreground">System</span>
                     )}
+                    {/*
+                      A row written during a platform support session names
+                      the staff member whose view was adopted — the column
+                      is a foreign key into this carrier's own user table,
+                      so it can name nobody else. Saying so here is the only
+                      place this company can learn that the change in their
+                      employee's name was not made by their employee.
+                    */}
+                    {row.impersonationGrantId && (
+                      <span
+                        className="ml-1.5 rounded-sm bg-warn-muted px-1.5 py-0.5 font-mono text-[0.6rem] uppercase tracking-wider text-warn"
+                        title="Made during a platform support session, by the vendor acting as this user."
+                      >
+                        via support
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {row.ipAddress ?? "—"}

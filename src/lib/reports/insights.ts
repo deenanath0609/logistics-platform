@@ -1,16 +1,19 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "@/lib/prisma";
 import type { SessionUser } from "@/lib/auth/session";
-import type { Prisma, SlaState } from "@/generated/prisma/client";
+import type { Prisma } from "@/generated/prisma/client";
 import { LIVE_STATUSES, kindLabel } from "@/lib/exceptions/kinds";
 import {
   averageHubDwell,
   averageTransit,
   codAgeing,
   firstAttemptDelivery,
+  firstDepartureAfter,
   onTimeDelivery,
   ratio,
   truckUtilisation,
+  HUB_ARRIVAL_EVENTS,
+  HUB_DEPARTURE_EVENTS,
   type DeliveryFact,
   type Ratio,
 } from "./kpi";
@@ -42,6 +45,25 @@ export const MAX_FACTS = 20_000;
 const MAX_TRIPS = 2_000;
 const MAX_DWELL_LEGS = 2_000;
 const MAX_COD = 5_000;
+
+/**
+ * What "damage and loss" can actually be counted from today.
+ *
+ * `SHORT_RECEIVED` is raised by the hub receipt when a manifest arrives
+ * light. `DAMAGED` is in the catalogue with a seeded escalation ladder and
+ * is raised by nothing: the only producer would be a damaged-package flag
+ * at inbound scan, and `HubScan.isDamaged` has no writer, which also
+ * leaves `InboundReceipt.damagedPackages` permanently zero. Counting a
+ * kind nothing writes is free, and dropping it would silently change the
+ * figure on the day capture lands — but the card must not claim to measure
+ * damage while it cannot, so the caveat below travels with the number.
+ */
+export const DAMAGE_LOSS_KINDS = ["DAMAGED", "SHORT_RECEIVED"] as const;
+
+/** Said on the card, because the label is wider than the measurement. */
+export const DAMAGE_CAPTURE_CAVEAT =
+  "Shortages only — nothing in the product records damage yet, so no DAMAGED exception can be raised.";
+
 
 type Fact = DeliveryFact & {
   lane: string;
@@ -86,6 +108,15 @@ export type Insights = {
   /** True when the projection hit its cap and the figures are a sample. */
   sampled: boolean;
   sampleSize: number;
+  /**
+   * The supporting samples that hit their own ceiling.
+   *
+   * Only the delivery projection used to say so. A COD ageing table built
+   * from the first five thousand of eight thousand collections looks
+   * exactly like a complete one, and it is the sort of figure that gets
+   * read out in a cash meeting.
+   */
+  truncated: { cod: boolean; trips: boolean; dwell: boolean };
 };
 
 export async function gatherInsights(
@@ -119,8 +150,55 @@ export async function gatherInsights(
   const window = { gte: filters.from, lte: filters.to };
   const span = filters.to.getTime() - filters.from.getTime();
   const previousWindow = {
+    // `lt`, not `lte`. The window is inclusive at both ends, so a `lte`
+    // here put anything delivered on the boundary millisecond into both
+    // periods and made the "since last period" delta wrong by that row.
     gte: new Date(filters.from.getTime() - span),
-    lte: filters.from,
+    lt: filters.from,
+  };
+
+  /**
+   * The branch a reader picked, expressed against whichever model.
+   *
+   * Every panel on this screen sits under one filter bar, so every panel
+   * has to honour it. Three of them did not — the exception mix, the
+   * utilisation card and the damage numerator were scoped to the reader's
+   * branches and nothing else — which put a network figure next to a
+   * branch figure in the same grid, under one heading that named a branch.
+   */
+  const chosenBranchId = filters.branchId;
+
+  /**
+   * Open exceptions, for this reader and this branch.
+   *
+   * ANDed rather than spread: a chosen branch narrows the reader's scope
+   * and must never replace it, or a pasted `?branchId=` for somebody
+   * else's branch would answer with somebody else's exceptions.
+   */
+  const openExceptionWhere: Prisma.ExceptionWhereInput = {
+    AND: [
+      { status: { in: LIVE_STATUSES } },
+      user.branchIds === null ? {} : { ownerBranchId: { in: user.branchIds } },
+      chosenBranchId ? { ownerBranchId: chosenBranchId } : {},
+    ],
+  };
+
+  /** The same shape for the event log, which scopes on `branchId`. */
+  const eventBranchWhere: Prisma.ShipmentEventWhereInput = {
+    AND: [
+      { branchId: { not: null } },
+      user.branchIds === null ? {} : { branchId: { in: user.branchIds } },
+      chosenBranchId ? { branchId: chosenBranchId } : {},
+    ],
+  };
+
+  /** And for COD, which is held at a branch. */
+  const codWhere: Prisma.CodCollectionWhereInput = {
+    AND: [
+      { state: { not: "REMITTED" } },
+      user.branchIds === null ? {} : { branchId: { in: user.branchIds } },
+      chosenBranchId ? { branchId: chosenBranchId } : {},
+    ],
   };
 
   const [
@@ -136,6 +214,7 @@ export async function gatherInsights(
     trips,
     arrivals,
     codRows,
+    codTotals,
   ] = await Promise.all([
     // The one projection everything else leans on. Six columns wide, so
     // twenty thousand rows is a few megabytes rather than a few hundred.
@@ -184,36 +263,30 @@ export async function gatherInsights(
     prisma.shipment.count({ where: { AND: [common, { bookedAt: window }] } }),
 
     // Damage and loss: consignments with a damage or shortage exception,
-    // deduplicated, plus anything written off.
+    // deduplicated.
+    //
+    // Scoped through the shipment rather than through the exception's
+    // owner branch, so the numerator and the `handled` denominator below
+    // count over the same population. They did not: the denominator
+    // honoured the branch, customer, service and mode filters and the
+    // numerator honoured none of them, so filtering to one branch divided
+    // the network's shortages by that branch's bookings — a rate that can
+    // and did exceed anything a rate is allowed to be.
     prisma.exception.groupBy({
       by: ["shipmentId"],
       where: {
         detectedAt: window,
-        kind: { in: ["DAMAGED", "SHORT_RECEIVED"] },
+        kind: { in: [...DAMAGE_LOSS_KINDS] },
         shipmentId: { not: null },
-        ...(user.branchIds === null
-          ? {}
-          : { ownerBranchId: { in: user.branchIds } }),
+        shipment: { is: common },
       },
       _count: { _all: true },
     }),
 
-    prisma.exception.count({
-      where: {
-        status: { in: LIVE_STATUSES },
-        ...(user.branchIds === null
-          ? {}
-          : { ownerBranchId: { in: user.branchIds } }),
-      },
-    }),
+    prisma.exception.count({ where: openExceptionWhere }),
     prisma.exception.groupBy({
       by: ["kind"],
-      where: {
-        status: { in: LIVE_STATUSES },
-        ...(user.branchIds === null
-          ? {}
-          : { ownerBranchId: { in: user.branchIds } }),
-      },
+      where: openExceptionWhere,
       _count: { _all: true },
     }),
 
@@ -222,6 +295,14 @@ export async function gatherInsights(
         AND: [
           { createdAt: window },
           anyBranchScope(user, ["originBranchId", "destinationBranchId"]),
+          chosenBranchId
+            ? {
+                OR: [
+                  { originBranchId: chosenBranchId },
+                  { destinationBranchId: chosenBranchId },
+                ],
+              }
+            : {},
         ],
       },
       take: MAX_TRIPS,
@@ -237,24 +318,31 @@ export async function gatherInsights(
 
     prisma.shipmentEvent.findMany({
       where: {
-        occurredAt: window,
-        eventType: { in: ["INBOUND_SCAN", "GATE_IN"] },
-        branchId: { not: null },
-        ...(user.branchIds === null ? {} : { branchId: { in: user.branchIds } }),
+        AND: [
+          { occurredAt: window },
+          { eventType: { in: [...HUB_ARRIVAL_EVENTS] } },
+          eventBranchWhere,
+        ],
       },
       orderBy: { occurredAt: "desc" },
       take: MAX_DWELL_LEGS,
-      select: { shipmentId: true, occurredAt: true },
+      select: { shipmentId: true, occurredAt: true, branchId: true },
     }),
 
     prisma.codCollection.findMany({
-      where: {
-        state: { not: "REMITTED" },
-        ...(user.branchIds === null ? {} : { branchId: { in: user.branchIds } }),
-        ...(filters.branchId ? { branchId: filters.branchId } : {}),
-      },
+      where: codWhere,
+      orderBy: { collectedAt: "asc" },
       take: MAX_COD,
       select: { amountCollected: true, collectedAt: true },
+    }),
+
+    // The exact held total and count, whatever the ageing sample holds.
+    // The card quotes a rupee figure that goes into a cash meeting; it must
+    // not quietly be the first five thousand collections of eight thousand.
+    prisma.codCollection.aggregate({
+      where: codWhere,
+      _sum: { amountCollected: true },
+      _count: { _all: true },
     }),
   ]);
 
@@ -279,21 +367,16 @@ export async function gatherInsights(
       : await prisma.shipmentEvent.findMany({
           where: {
             shipmentId: { in: [...new Set(arrivals.map((a) => a.shipmentId))] },
-            eventType: { in: ["GATE_OUT", "RUN_STARTED"] },
+            eventType: { in: [...HUB_DEPARTURE_EVENTS] },
             occurredAt: { gte: filters.from },
           },
           orderBy: { occurredAt: "asc" },
-          select: { shipmentId: true, occurredAt: true },
+          select: { shipmentId: true, occurredAt: true, branchId: true },
         });
 
   const legs = arrivals.map((arrival) => ({
     arrivedAt: arrival.occurredAt,
-    departedAt:
-      departures.find(
-        (departure) =>
-          departure.shipmentId === arrival.shipmentId &&
-          departure.occurredAt.getTime() > arrival.occurredAt.getTime(),
-      )?.occurredAt ?? null,
+    departedAt: firstDepartureAfter(departures, arrival)?.occurredAt ?? null,
   }));
 
   const ageing = codAgeing(
@@ -329,8 +412,11 @@ export async function gatherInsights(
     ),
     damageLoss: ratio(damagedShipments.length, handled),
     cod: {
-      total: ageing.total,
-      count: ageing.count,
+      // From the aggregate, not from the sample: the buckets below may be
+      // the first `MAX_COD` collections, but the headline rupee figure is
+      // every one of them.
+      total: new Decimal((codTotals._sum.amountCollected ?? 0).toString()),
+      count: codTotals._count._all,
       oldestBucket: oldest?.label ?? null,
       aged: ageing.buckets.map((bucket) => ({
         label: bucket.label,
@@ -350,6 +436,11 @@ export async function gatherInsights(
     byService: cutBy(facts, (fact) => fact.service),
     sampled: rows.length >= MAX_FACTS,
     sampleSize: rows.length,
+    truncated: {
+      cod: codRows.length >= MAX_COD,
+      trips: trips.length >= MAX_TRIPS,
+      dwell: arrivals.length >= MAX_DWELL_LEGS,
+    },
   };
 }
 
@@ -420,5 +511,3 @@ function cutBy(facts: Fact[], key: (fact: Fact) => string): Cut[] {
     .sort((a, b) => (a.value ?? 0) - (b.value ?? 0) || b.volume - a.volume)
     .slice(0, 10);
 }
-
-export type SlaSnapshotRow = { state: SlaState; count: number };

@@ -25,6 +25,15 @@ export type SavedRow = {
   isMine: boolean;
   ownerName: string | null;
   lastRunAt: string | null;
+  /**
+   * Whether this reader may remove it.
+   *
+   * The service already allowed `settings.manage` to clear up somebody
+   * else's shared view; only the owner was ever offered the control, so
+   * that capability had no way in and a shared view left behind by someone
+   * who has since left could not be removed by anyone.
+   */
+  canRemove: boolean;
 };
 
 export function SavedReportList({
@@ -65,7 +74,10 @@ export function SavedReportList({
           className="flex items-start justify-between gap-3 rounded-lg border bg-card px-3 py-2.5"
         >
           <Link
-            href={`/reports/${row.reportKey}${row.query ? `?${row.query}` : ""}`}
+            // `saved` rides along so the report page can stamp it as
+            // opened. The filter parser ignores anything it does not know,
+            // so it changes nothing about what the report returns.
+            href={`/reports/${row.reportKey}?${row.query ? `${row.query}&` : ""}saved=${row.id}`}
             className="flex min-w-0 flex-col gap-0.5"
           >
             <span className="flex items-center gap-1.5 truncate text-sm font-medium underline-offset-4 hover:underline">
@@ -90,7 +102,7 @@ export function SavedReportList({
                 aria-label="Shared with the team"
               />
             )}
-            {row.isMine && (
+            {row.canRemove && (
               <Button
                 variant="ghost"
                 size="icon-xs"

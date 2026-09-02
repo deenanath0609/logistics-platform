@@ -238,7 +238,7 @@ export async function toggleOnboardingTask(
     const isDone = formData.get("isDone") === "true";
     if (!taskId) return { error: "Which task?" };
 
-    const result = await setTaskDone(taskId, isDone, actor);
+    const result = await setTaskDone(orgId, taskId, isDone, actor);
     if (!result.ok) return { error: result.error };
 
     revalidatePath(pathFor(orgId));

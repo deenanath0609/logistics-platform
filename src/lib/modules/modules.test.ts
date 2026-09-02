@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { MODULES } from "@/lib/modules/modules";
@@ -195,15 +195,22 @@ describe("navigation agrees with the registry", () => {
     // cheapest place to catch that.
     const mismatched: string[] = [];
     for (const item of items) {
-      // A null permission is an entry shown to everybody — Help — and there
-      // is nothing for a module to own.
-      const owner = item.permission
-        ? OWNER_OF_PERMISSION.get(item.permission)
-        : undefined;
-      if (!owner) continue; // Unowned permissions are core's, and core is universal.
-      const key = moduleForRoute(item.href, MODULES);
-      if (!key || !withRequires(key).has(owner)) {
-        mismatched.push(`${item.href} needs ${item.permission} (${owner}), sits in ${key}`);
+      // Every code that opens the entry, not just the primary one: an
+      // alternative belonging to another module would let the link survive
+      // for a carrier who did not buy the section it sits in, which is the
+      // same disagreement this test exists to catch.
+      const codes = [item.permission, ...(item.orPermissions ?? [])].filter(
+        (code): code is string => Boolean(code),
+      );
+      for (const code of codes) {
+        // A null permission is an entry shown to everybody — Help — and
+        // there is nothing for a module to own.
+        const owner = OWNER_OF_PERMISSION.get(code);
+        if (!owner) continue; // Unowned permissions are core's, and core is universal.
+        const key = moduleForRoute(item.href, MODULES);
+        if (!key || !withRequires(key).has(owner)) {
+          mismatched.push(`${item.href} needs ${code} (${owner}), sits in ${key}`);
+        }
       }
     }
     expect(mismatched).toEqual([]);
@@ -343,5 +350,145 @@ describe("narrowToModules", () => {
     // analytics do not, and the server action checking `invoice.approve`
     // never learns why.
     expect([...kept]).toEqual(["shipment.read"]);
+  });
+});
+
+/**
+ * The drift that a URL guard cannot catch.
+ *
+ * `requireModuleForPath()` runs in the ops layout, and a layout is rendered
+ * for pages. A **server action** and a **route handler** render no layout:
+ * they are addressed directly and they answer directly. What gates those is
+ * the other half of enforcement — the session's permission set has already
+ * had the unbought modules subtracted — and that half only works when the
+ * permission the action checks is one some module actually owns.
+ *
+ * A permission no module owns is never withheld from anybody. So an action
+ * sitting inside a module's routes and guarded by an unowned permission is
+ * ungated, however carefully the screen above it was gated. That is not a
+ * hypothetical: `settlement.prepare` shipped that way, and `testLane` on the
+ * SLA policy screen was found the same week.
+ *
+ * This walks the app directory rather than listing the files, for the same
+ * reason the route inventory above does: the next one will be written by
+ * somebody who was not thinking about plans.
+ */
+describe("doors that run no layout", () => {
+  const ACTION_DIRS = ["(ops)", "(field)"];
+
+  /**
+   * Actions whose permission is core *and correctly so*, inside a module's
+   * routes. Each is a core capability that happens to be administered from a
+   * module's screen — not a module capability reached by the wrong door.
+   */
+  const CORE_WORK_ON_A_MODULE_SCREEN: Record<string, string> = {
+    // Setting a customer's credit limit and terms is a party capability: it
+    // governs whether a booking may go out on credit, which every carrier
+    // does whether or not they invoice through us. It is edited from the
+    // receivables screen because that is where somebody thinks about it, and
+    // `/finance` is the only screen that offers it — worth revisiting, but
+    // gating it on billing would take a core capability away.
+    "(ops)/finance/receivables/actions.ts": "customer.manage_credit",
+  };
+
+  function sourceFilesUnder(dir: string): string[] {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) found.push(...sourceFilesUnder(full));
+      else if (/\.tsx?$/.test(entry.name) && !entry.name.includes(".test.")) {
+        found.push(full);
+      }
+    }
+    return found;
+  }
+
+  function routeOf(file: string): string {
+    const segments = path
+      .relative(APP_DIR, path.dirname(file))
+      .split(path.sep)
+      .filter((segment) => !(segment.startsWith("(") && segment.endsWith(")")));
+    return `/${segments.join("/")}`;
+  }
+
+  const files = ACTION_DIRS.flatMap((group) =>
+    sourceFilesUnder(path.join(APP_DIR, group)),
+  );
+
+  it("finds the action files on disk at all", () => {
+    expect(files.length).toBeGreaterThan(50);
+  });
+
+  it("gates every action inside a module on that module", () => {
+    const holes: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const isServerAction = /["']use server["']/.test(source);
+      const isRouteHandler = path.basename(file) === "route.ts";
+      if (!isServerAction && !isRouteHandler) continue;
+
+      const key = moduleForRoute(routeOf(file), MODULES);
+      // No module, or an always-on one: nothing is withheld either way.
+      if (!key || MODULES[key].alwaysOn) continue;
+
+      // An explicit `hasModule("x")` is the other correct answer, and the
+      // one `testLane` uses: the action names the module itself rather than
+      // relying on a permission to stand for it.
+      if (source.includes("hasModule(")) continue;
+
+      const allowed = withRequires(key);
+      const relative = path.relative(APP_DIR, file).split(path.sep).join("/");
+
+      const codes = new Set(
+        [...source.matchAll(/\b(?:authorize|requirePermission)\(\s*["']([^"']+)["']/g)].map(
+          (match) => match[1],
+        ),
+      );
+
+      for (const code of codes) {
+        if (CORE_WORK_ON_A_MODULE_SCREEN[relative] === code) continue;
+        const owner = OWNER_OF_PERMISSION.get(code);
+        if (owner && allowed.has(owner)) continue;
+        holes.push(
+          `${relative} is inside "${key}" but is gated on "${code}", which ` +
+            `${owner ? `belongs to "${owner}"` : "no module owns"}`,
+        );
+      }
+    }
+
+    expect(holes).toEqual([]);
+  });
+
+  /**
+   * Route handlers under `/api` sit outside every module's route prefixes,
+   * so the walk above cannot reach them and `moduleForRoute` answers null —
+   * which means "ungated", correctly, only when the door really is core.
+   *
+   * Listed rather than inferred, because there is nothing in the path to
+   * infer from. A new handler here has to be classified by whoever adds it.
+   */
+  it("classifies every handler under /api as core or module-gated", () => {
+    const CORE_APIS = [
+      "api/auth", // Signing in is not an upsell.
+      "api/health", // Liveness, no tenant data.
+      "api/pincodes", // Serviceability lookup for the booking form.
+      "api/v1", // Gated inside `_lib/guard.ts`, for every endpoint at once.
+    ];
+
+    const unclassified: string[] = [];
+
+    for (const file of sourceFilesUnder(path.join(APP_DIR, "api"))) {
+      if (path.basename(file) !== "route.ts") continue;
+      const relative = path.relative(APP_DIR, file).split(path.sep).join("/");
+      if (CORE_APIS.some((prefix) => relative.startsWith(prefix))) continue;
+
+      const source = readFileSync(file, "utf8");
+      if (/modulesForOrg\(|hasModule\(/.test(source)) continue;
+
+      unclassified.push(relative);
+    }
+
+    expect(unclassified).toEqual([]);
   });
 });

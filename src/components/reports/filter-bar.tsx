@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { FilterKey } from "@/lib/reports/types";
+import { SLA_STATES } from "@/lib/reports/filters";
+import { SLA_STATE_LABEL } from "@/lib/sla/policy";
 import { SHIPMENT_MODES, SHIPMENT_MODE_SHORT } from "@/lib/shipment/modes";
 
 /**
@@ -34,6 +36,11 @@ export type FilterOptions = {
 const MODES: Option[] = SHIPMENT_MODES.map((mode) => ({
   value: mode,
   label: SHIPMENT_MODE_SHORT[mode],
+}));
+
+const SLA_OPTIONS: Option[] = SLA_STATES.map((state) => ({
+  value: state,
+  label: SLA_STATE_LABEL[state],
 }));
 
 const SELECT_CLASS =
@@ -176,6 +183,18 @@ export function ReportFilterBar({
               value={draft.mode ?? ""}
               options={MODES}
               onChange={(value) => set("mode", value)}
+            />
+          </Field>
+        )}
+
+        {show("sla") && (
+          <Field label="SLA state" htmlFor="filter-sla">
+            <Select
+              id="filter-sla"
+              placeholder="Every SLA state"
+              value={draft.sla ?? ""}
+              options={SLA_OPTIONS}
+              onChange={(value) => set("sla", value)}
             />
           </Field>
         )}

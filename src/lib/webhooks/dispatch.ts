@@ -5,6 +5,7 @@ import { currentOrgId } from "@/lib/tenant/context";
 import { forEachTenant } from "@/lib/tenant/for-each-tenant";
 import type { Prisma } from "@/generated/prisma/client";
 import { onOutbox } from "@/server/services/outbox";
+import { modulesForOrg } from "@/lib/modules/tenant-modules";
 import { toWebhookBody } from "./public-payload";
 import {
   DELIVERY_HEADER,
@@ -83,6 +84,23 @@ export async function fanOutEvent(event: {
     matchesEvent(subscription.events, event.eventType),
   );
   if (interested.length === 0) return 0;
+
+  // Does this carrier still buy webhooks?
+  //
+  // The fan-out runs in the worker, off an outbox row — no session to
+  // narrow, no layout to guard, no URL to refuse. Every other door to the
+  // `integrations` module is shut for a carrier who does not have it: the
+  // console 404s, `apikey.manage` is subtracted from the session, and the
+  // partner API answers `not_on_plan`. This one stayed open, so a carrier
+  // dropped from a plan with integrations went on posting their events to a
+  // partner's endpoint — from a screen they could no longer reach to switch
+  // it off.
+  //
+  // Asked after the `interested` filter rather than before it, so a carrier
+  // with no webhook subscriptions — which is most of them — pays nothing
+  // for this on every event that passes through the drain.
+  const orgId = interested[0].orgId;
+  if (!(await modulesForOrg(orgId)).has("integrations")) return 0;
 
   // A subscription tied to a customer only hears about that customer's
   // consignments. Resolved once, and only if somebody actually asked.

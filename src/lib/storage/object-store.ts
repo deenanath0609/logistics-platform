@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertSafeObjectKey } from "@/lib/storage/keys";
 
@@ -70,10 +71,38 @@ export class FilesystemObjectStore implements ObjectStore {
     return path.join(this.root, ...key.split("/"));
   }
 
+  /**
+   * Written to a neighbouring temporary name and renamed into place.
+   *
+   * `writeFile` straight to the destination is not atomic: a crash, a full
+   * disk or a container killed mid-write leaves a file that exists, has the
+   * right name, and is half a JPEG. Every reader downstream — the POD route,
+   * the invoice document route — treats "the object is there" as "the object
+   * is whole", and a truncated proof of delivery is worse than a missing one
+   * because nobody goes looking for it.
+   *
+   * `rename` within the same directory is atomic on both Windows and POSIX,
+   * so a reader sees either no object or the finished one. The temporary
+   * name is a sibling rather than a system temp file for exactly that
+   * reason: a rename across volumes is a copy, and a copy is not atomic.
+   *
+   * S3 has this property natively — a PUT is not visible until it completes
+   * — so the adapter that replaces this one inherits the guarantee for free.
+   */
   async put(input: PutObjectInput): Promise<void> {
     const destination = this.pathFor(input.key);
     await mkdir(path.dirname(destination), { recursive: true });
-    await writeFile(destination, input.bytes);
+
+    const staging = `${destination}.${randomUUID()}.part`;
+    try {
+      await writeFile(staging, input.bytes);
+      await rename(staging, destination);
+    } catch (error) {
+      // The half-written file must not survive the failure that produced it,
+      // and a failure to clean up must not replace the error that matters.
+      await rm(staging, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async get(key: string): Promise<Buffer | null> {

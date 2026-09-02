@@ -2,7 +2,6 @@
 
 import { useState, useTransition } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import { BookmarkPlus, Download, Loader2, Table2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -22,10 +21,12 @@ import {
 /**
  * Export and save, on every report page.
  *
- * The export links carry the current query string, so what downloads is
- * exactly what is on screen — the alternative, re-deriving the filters
- * server-side from something else, is how an export quietly stops
- * matching the table above it.
+ * The export links carry the query the server built the table from, handed
+ * down as a prop — not `useSearchParams()`. The two are not the same: the
+ * address bar can hold a filter this report draws no control for, a page
+ * number, or the id of the saved view somebody arrived through, and none
+ * of those produced the rows on screen. Downloading whatever happens to be
+ * in the URL is how an export quietly stops matching the table above it.
  *
  * Both formats are plain links rather than fetches: the CSV is streamed
  * and the browser's own download handling is better than anything worth
@@ -40,17 +41,17 @@ export function ReportActions({
   reportKey,
   canExport,
   exportNote,
+  query,
   saveAction,
 }: {
   reportKey: string;
   canExport: boolean;
   /** Row ceiling, spelled out before somebody waits for a truncated file. */
   exportNote: string;
+  /** The canonical filters behind the table, as a query string. */
+  query: string;
   saveAction: (formData: FormData) => Promise<SaveState>;
 }) {
-  const params = useSearchParams();
-  const query = params.toString();
-
   return (
     <div className="flex flex-wrap items-center gap-2">
       <SaveDialog reportKey={reportKey} query={query} action={saveAction} />
@@ -63,7 +64,7 @@ export function ReportActions({
             title={exportNote}
             render={
               <Link
-                href={`/reports/${reportKey}/export?format=csv&${query}`}
+                href={`/reports/${reportKey}/export?format=csv${query ? `&${query}` : ""}`}
                 prefetch={false}
               />
             }
@@ -77,7 +78,7 @@ export function ReportActions({
             title={exportNote}
             render={
               <Link
-                href={`/reports/${reportKey}/export?format=xlsx&${query}`}
+                href={`/reports/${reportKey}/export?format=xlsx${query ? `&${query}` : ""}`}
                 prefetch={false}
               />
             }

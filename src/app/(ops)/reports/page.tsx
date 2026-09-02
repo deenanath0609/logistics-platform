@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/shell/page-header";
 import { ReportIcon } from "@/components/reports/icon";
 import { SavedReportList } from "@/components/reports/saved-list";
 import { listSavedReports } from "@/lib/reports/saved";
-import { REPORTS, REPORT_GROUPS } from "@/lib/reports/registry";
+import { REPORT_GROUPS, visibleReports } from "@/lib/reports/registry";
 import { GROUP_DESCRIPTION, GROUP_LABEL } from "@/lib/reports/types";
 import { scopeNote } from "@/lib/reports/scope";
 import { deleteSavedReportAction } from "./actions";
@@ -26,9 +26,10 @@ export const dynamic = "force-dynamic";
 export default async function ReportsIndexPage() {
   const user = await requireUser();
 
-  const visible = REPORTS.filter((report) =>
-    user.permissions.has(report.permission),
-  );
+  // From the registry's own helper rather than a second copy of the same
+  // filter, so the index and anything else that asks "what may they run?"
+  // cannot drift apart.
+  const visible = visibleReports(user.permissions);
 
   if (visible.length === 0) {
     return (
@@ -94,6 +95,9 @@ export default async function ReportsIndexPage() {
             lastRunAt: row.lastRunAt
               ? formatDistanceToNow(row.lastRunAt, { addSuffix: true })
               : null,
+            // Mirrors `deleteSavedReport`'s own rule, rather than the
+            // narrower "mine only" the list used to draw.
+            canRemove: row.isMine || can(user, "settings.manage"),
           }))}
           deleteAction={deleteSavedReportAction}
         />

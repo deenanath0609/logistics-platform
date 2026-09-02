@@ -213,6 +213,57 @@ async function workerConnections(): Promise<number> {
   return Number(rows[0].n);
 }
 
+/**
+ * Refuses to run at all while another worker is draining this database.
+ *
+ * ── The measurement bug this exists to end ───────────────────────────────
+ *
+ * Everything below counts rows in one shared table and attributes what it
+ * finds to the one worker this script started. That reasoning only holds if
+ * this script's worker is the *only* thing draining. It very often is not:
+ * a developer leaves `npm run worker` running in another terminal, and it
+ * keeps claiming and completing rows throughout.
+ *
+ * The symptom was recorded as a defect for weeks — "a graceful stop still
+ * strands a single outbox row in PROCESSING, root cause never found". It is
+ * not a defect. `drainOutbox` claims one row at a time, so a second live
+ * worker has exactly one row claimed at any instant, and sampling the table
+ * the moment this script's worker exits catches it. Always one row, always
+ * "recovered within five minutes" — because the other worker finished it
+ * milliseconds later, long before any lease expired. The shutdown path was
+ * correct the whole time.
+ *
+ * So this is a precondition and not a `check`. A contaminated run must not
+ * produce a report at all, because a report that reads as a product defect
+ * is worse than no report.
+ */
+async function refuseIfAnotherWorkerIsRunning(): Promise<void> {
+  const connected = await workerConnections();
+  if (connected === 0) return;
+
+  console.error(
+    [
+      "",
+      "Another background worker is already connected to this database " +
+        `(${connected} connection(s) named "${WORKER_APP_NAME}" in pg_stat_activity).`,
+      "",
+      "  This script has to be the only thing draining the outbox: it starts a",
+      "  worker of its own, stops it, and then reads the outbox table to say what",
+      "  that worker left behind. A second worker claims and completes rows the",
+      "  whole time, and its in-flight claim — always exactly one row, because the",
+      "  drain claims one at a time — is then read as a row this script's worker",
+      "  stranded. That is a false defect, and it has been reported as a real one.",
+      "",
+      "  Stop the other worker and run this again:",
+      "",
+      "      Ctrl-C in the terminal running `npm run worker`",
+      "",
+    ].join("\n"),
+  );
+
+  throw new Error("another worker is running; refusing to measure a shared table");
+}
+
 // ────────────────────────────────────────────────────────────
 // The proofs
 // ────────────────────────────────────────────────────────────
@@ -225,11 +276,6 @@ async function provesItDrains(tenant: TenantContext): Promise<void> {
 
   const before = await probeCounts(tenant);
   check("the event is queued and untouched", before.PENDING === 1, "status PENDING");
-  check(
-    "nothing is draining it yet",
-    (await workerConnections()) === 0,
-    "no worker connected",
-  );
 
   const worker = await startWorker();
 
@@ -288,14 +334,46 @@ async function provesShutdownStrandsNothing(tenant: TenantContext): Promise<void
   const final = await probeCounts(tenant);
 
   // The assertion this whole exercise exists for.
+  //
+  // A row still PROCESSING here is only a stranded row if *nobody* is
+  // working on it. The discriminator is time: a genuinely abandoned claim
+  // cannot move until its five-minute lease expires, while a claim held by
+  // another live process is finished within a second. Asking the question
+  // that way means this can never again report a second worker's in-flight
+  // row as a defect in the shutdown path.
+  let stranded = final.PROCESSING;
+  if (stranded > 0) {
+    const cleared = await until(
+      async () => (await probeCounts(tenant)).PROCESSING === 0,
+      8_000,
+      200,
+    );
+    if (cleared) {
+      note(
+        "the claimed row completed on its own with our worker stopped — something " +
+          "else is draining this database, so this measurement is not about the " +
+          "worker under test. Stop the other worker.",
+      );
+    } else {
+      stranded = (await probeCounts(tenant)).PROCESSING;
+    }
+  }
+
   check(
     "no event was left claimed but unprocessed",
-    final.PROCESSING === 0,
-    `${final.PROCESSING} PROCESSING`,
+    stranded === 0,
+    `${stranded} PROCESSING with nobody working on it`,
   );
+
+  // Every row is accounted for under some status. Deliberately not
+  // `PENDING + DONE === total`: a row another process happens to hold at
+  // this instant is not a lost row, and an assertion that says it is turns
+  // a busy database into a red gate.
+  const accounted =
+    final.PENDING + final.DONE + final.PROCESSING + final.DEAD + final.FAILED;
   check(
     "no event was lost",
-    final.PENDING + final.DONE === total,
+    accounted === total,
     `${final.DONE} done, ${final.PENDING} still queued for the next worker`,
   );
   check(
@@ -377,6 +455,8 @@ async function main(): Promise<void> {
     `\nBackground worker — verified against ${process.env.DATABASE_URL?.replace(/\/\/[^@]*@/, "//")}\n` +
       `Acting as "${tenant.slug}".\n`,
   );
+
+  await refuseIfAnotherWorkerIsRunning();
 
   try {
     await provesItDrains(tenant);

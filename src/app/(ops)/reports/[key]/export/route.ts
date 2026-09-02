@@ -1,5 +1,9 @@
 import { getCurrentUser } from "@/lib/auth/session";
-import { parseFilters, describeFilters } from "@/lib/reports/filters";
+import {
+  parseFilters,
+  describeFilters,
+  restrictToDeclared,
+} from "@/lib/reports/filters";
 import { reportFor } from "@/lib/reports/registry";
 import {
   beginReportRun,
@@ -50,7 +54,9 @@ export async function GET(
   const url = new URL(request.url);
   const params = Object.fromEntries(url.searchParams.entries());
   const format: ExportFormat = params.format === "xlsx" ? "xlsx" : "csv";
-  const filters = parseFilters(params);
+  // The same narrowing the screen applies, so the file and the table it
+  // was downloaded from cannot have been produced by different filters.
+  const filters = restrictToDeclared(parseFilters(params), report.filters);
 
   const first = await firstExportPage(report, filters, user);
 

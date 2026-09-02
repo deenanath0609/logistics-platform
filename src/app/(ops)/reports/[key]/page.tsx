@@ -10,10 +10,16 @@ import { Button } from "@/components/ui/button";
 import { ReportFilterBar } from "@/components/reports/filter-bar";
 import { ReportActions } from "@/components/reports/actions-bar";
 import { ReportTable } from "@/components/reports/report-table";
-import { describeFilters, filtersToParams, parseFilters } from "@/lib/reports/filters";
+import {
+  describeFilters,
+  filtersToParams,
+  parseFilters,
+  restrictToDeclared,
+} from "@/lib/reports/filters";
 import { reportFor } from "@/lib/reports/registry";
 import { scopeNote } from "@/lib/reports/scope";
 import { MAX_CSV_ROWS, MAX_XLSX_ROWS } from "@/lib/reports/export";
+import { touchSavedReport } from "@/lib/reports/saved";
 import { PAGE_SIZE } from "@/lib/reports/types";
 import { saveReportViewAction } from "../actions";
 
@@ -53,8 +59,18 @@ export default async function ReportPage({
   if (!user.permissions.has(report.permission)) redirect("/forbidden");
 
   const raw = await searchParams;
-  const filters = parseFilters(raw);
+  // Only the filters this report draws a control for. A query string can
+  // carry anything; the bar has to be the whole truth about what narrowed
+  // the table, or the reader has no way to see it and no way to clear it.
+  const filters = restrictToDeclared(parseFilters(raw), report.filters);
   const page = Math.max(1, Number(raw.page ?? 1) || 1);
+
+  // Opened from a saved view. Stamped here because this is the only place
+  // that knows a saved view was actually run — nothing called
+  // `touchSavedReport` at all, so every saved view on the index said
+  // "Never opened" for ever, including ones opened that morning.
+  const savedId = Array.isArray(raw.saved) ? raw.saved[0] : raw.saved;
+  if (savedId) await touchSavedReport(savedId, user);
 
   const [result, options, names] = await Promise.all([
     report.run({ user, filters, page, pageSize: PAGE_SIZE }),
@@ -102,6 +118,7 @@ export default async function ReportPage({
         <ReportActions
           reportKey={report.key}
           canExport={canExport}
+          query={new URLSearchParams(query).toString()}
           exportNote={`CSV exports up to ${MAX_CSV_ROWS.toLocaleString("en-IN")} rows and streams; XLSX is capped at ${MAX_XLSX_ROWS.toLocaleString("en-IN")} because the whole workbook has to be built in memory.`}
           saveAction={saveReportViewAction}
         />

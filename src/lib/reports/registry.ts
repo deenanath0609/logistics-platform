@@ -86,7 +86,16 @@ export const REPORTS: ReportDef[] = [
     group: "operations",
     permission: "report.operations",
     icon: "Navigation",
-    filters: ["dates", "branch", "customer", "lane", "serviceType", "mode", "search"],
+    filters: [
+      "dates",
+      "branch",
+      "customer",
+      "lane",
+      "serviceType",
+      "mode",
+      "sla",
+      "search",
+    ],
     run: inTransitStatus,
   },
   {
@@ -216,7 +225,7 @@ export const REPORTS: ReportDef[] = [
     key: "vendor-payable",
     title: "Vendor payable & reconciliation",
     description:
-      "What each transporter is owed against the rate contract. Arrives with Phase 6.",
+      "What each transporter is owed: billed, paid and outstanding per vendor. Reconciliation against the rate contract arrives with Phase 6.",
     group: "financial",
     permission: "report.financial",
     icon: "Handshake",
@@ -296,10 +305,6 @@ const BY_KEY = new Map(REPORTS.map((report) => [report.key, report]));
 
 export function reportFor(key: string): ReportDef | undefined {
   return BY_KEY.get(key);
-}
-
-export function reportsInGroup(group: ReportGroup): ReportDef[] {
-  return REPORTS.filter((report) => report.group === group);
 }
 
 /** The reports this user may actually run. The index shows nothing else. */
