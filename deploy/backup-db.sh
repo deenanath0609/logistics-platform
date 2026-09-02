@@ -29,7 +29,10 @@
 #   pg_restore -U postgres -d logistics_restored --no-owner \
 #     --role=postgres logistics-YYYY-MM-DD.dump
 #
-# Roles first, always. The restore references them.
+# Roles first, always. The restore references them. The globals carry no
+# passwords (see below), so set the application role's from `.env` after —
+# or simply run `node scripts/apply-rls.mjs --apply`, which creates the role
+# and its grants from the same source of truth the live server uses.
 
 set -euo pipefail
 
@@ -63,13 +66,34 @@ GLOBALS="$DEST/globals-$STAMP.sql"
 # `--format=custom` so a single table can be pulled back without replaying
 # the whole file, which is what an accidental delete actually needs.
 pg_dump --format=custom --no-owner --file="$DATA" "$OWNER_URL"
-pg_dumpall --globals-only --file="$GLOBALS" --dbname="$OWNER_URL"
+
+# `--no-role-passwords` because this connects as `logistics_owner`, which is
+# not a superuser and so cannot read `pg_authid`. Without the flag pg_dumpall
+# fails — and it fails *loudly to stderr while still exiting zero*, which is
+# how the first run of this script wrote a 229-byte globals file, reported
+# success, and left a backup that could not have been restored.
+#
+# It is also the better answer on its own terms: role passwords do not belong
+# in a nightly file on disk. The application role's password lives in `.env`
+# and `scripts/apply-rls.mjs --apply` recreates the role from it, which the
+# restore procedure above already runs.
+pg_dumpall --globals-only --no-role-passwords --file="$GLOBALS" --dbname="$OWNER_URL"
 
 # A dump that cannot be listed is not a dump. This reads the archive's own
 # table of contents, which catches a truncated write here rather than during
 # a restore three weeks from now.
 if ! pg_restore --list "$DATA" > /dev/null 2>&1; then
   echo "backup: $DATA is not a readable archive — removing it" >&2
+  rm -f "$DATA" "$GLOBALS"
+  exit 1
+fi
+
+# The globals half, checked the same way and for the same reason. A file
+# that exists is not a dump: the failing run produced a well-formed header
+# and no roles at all, which is exactly what a restore would not notice
+# until the application could not connect.
+if ! grep -q '^CREATE ROLE ' "$GLOBALS"; then
+  echo "backup: $GLOBALS contains no roles — removing both" >&2
   rm -f "$DATA" "$GLOBALS"
   exit 1
 fi
