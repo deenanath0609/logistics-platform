@@ -58,26 +58,51 @@ host.
 
 ### Phases
 
-| # | Scope | Built | Tested |
-|---|---|---|---|
-| 0 | Foundation | done | done |
-| 1 | Identity, network, masters | done | done |
-| 2 | Booking, pickup, event spine | done | done |
-| 3 | Hub operations & transport | done | done |
-| 4 | Last mile, POD, COD | done | done |
-| 5 | Portal, tracking, notifications | done | done |
-| 6 | Rating, billing, settlement | done | done |
-| 7 | GPS, geofencing, live map | done, PostGIS deferred | done |
-| 8 | SLA, exception tower, reports | done | done |
-| 9 | Multi-tenancy, RLS, operator console | done | done |
-| — | Commit the work | done | done |
-| 10 | Coverage for phases 0–9 | done | is the test |
-| 11 | Modules and plans | done | done |
-| 12 | Worker, object storage, PostGIS | 2 of 3 | partial |
-| 13 | Per-tenant integration credentials | done | done |
-| 14 | Hardening | done | CI has never run on GitHub |
-| 15 | Five manuals and UAT | not started | — |
-| 16 | Deployment | GitHub done, server not started | — |
+**"Tested" used to mean "somebody ran it once."** Every phase below read
+`done / done` on 1 September, and the audit that followed found a real defect
+in every single module it touched — a search box that dropped the branch
+filter, shortages that never reached the control tower, a COD shortfall
+overwritten so money vanished reconciled, route deviation switching itself off
+ten minutes into every trip. None of them had a failing test.
+
+So the column now says what was actually done, and there are three answers,
+not two:
+
+- **audited** — somebody read the code against the process it is supposed to
+  serve, fixed what they found, and left a `verify:*` script behind that fails
+  if the rule is deleted.
+- **green** — an existing suite passes. That is worth something and it is not
+  the same thing; every module in the audited list was green first.
+- **—** — nothing.
+
+| # | Scope | Built | Tested | Proof |
+|---|---|---|---|---|
+| 0 | Foundation | done | green | the rest of the table |
+| 1 | Identity, network, masters | done | **audited** | `verify:core` 42 |
+| 2 | Booking, pickup, event spine | done | **audited** | `verify:branch-flow` 112, `verify:spine`, `verify:pickup` 34 |
+| 3 | Hub operations & transport | done | **audited** | `verify:hub` 117, `verify:dispatch` 83 |
+| 4 | Last mile, POD, COD | done | **audited** | `verify:lastmile` 75, `verify:field` |
+| 5 | Portal, tracking, notifications | done | **audited** | `verify:portal` 81, `verify:tracking-sla` 46, `verify:notifications:screens` 34 |
+| 6 | Rating, billing, settlement | done | **audited** | `verify:billing` 119, `verify:reweigh` |
+| 7 | GPS, geofencing, live map | done, PostGIS deferred | **audited** | `verify:gps` 14, `verify:tracking-privacy` 29 values |
+| 8 | SLA, exception tower, reports | done | **audited** | `verify:reports` 61, `verify:sla` |
+| 9 | Multi-tenancy, RLS, operator console | done | **audited** | `verify:tenancy-console` 77, tenant isolation 31 probes |
+| 10 | Coverage for phases 0–9 | done | **audited** | `coverage:map` — and it says 58.9% of exports are dark |
+| 11 | Modules and plans | done | **audited** | `verify:plan-gating` 27, `verify:modules-worker` 29 |
+| 12 | Worker, object storage, PostGIS | 2 of 3 | **audited** | `verify:worker` — and see below, the old open item was never a bug |
+| 13 | Per-tenant integration credentials | done | green | `verify:gps` |
+| 14 | Hardening | done | **green** | CI is green on GitHub, every step, first time on 2 Sep 2026 |
+| 15 | Five manuals and UAT | not started | — | |
+| 16 | Deployment | done | green | live at `lms.credohrms.com`, 85 screens smoked |
+
+Phase 10's own number is the one to keep in view: **1,726 tests pass, and only
+22.9% of the 1,364 runtime exports carry an assertion that would fail if the
+rule were deleted.** Two examples of what that bought: the two-person rule on
+settlement approval — one line, the only thing stopping one person preparing
+and approving the same payout — could be deleted with every test still green;
+and the outbound-leak suite built its fixture from the allowlist, so it had
+nothing forbidden to leak and proved only that a clean object stayed clean.
+Both are now covered. `npm run coverage:map` prints the rest.
 
 The live version of this table, with what proves each row, is the **Road to
 Go-Live** artifact: <https://claude.ai/code/artifact/4f222412-26b8-4e47-87e1-613a75ee8fd9>
@@ -85,10 +110,23 @@ Update that same URL rather than publishing a new one.
 
 ### The open items
 
-1. **Worker shutdown leaves one row claimed.** A graceful stop still strands a
-   single outbox row in `PROCESSING`. The claim lease recovers it within five
-   minutes so nothing is lost. Root cause never found — say so, do not paper
-   over it.
+1. **~~Worker shutdown leaves one row claimed.~~ Closed 2 Sep 2026 — it was
+   never a defect.** It was two `npm run worker` processes on the same
+   database. One claims a row, the other finishes it in milliseconds. Always
+   *exactly one* because the drain claims one row at a time, so a second live
+   worker holds exactly one claim at any instant; and "recovered within five
+   minutes" because it was recovered in under a second and the lease never
+   came into it. The shutdown path was correct the whole time.
+
+   Worth remembering for the next one of these: the observation was accurate
+   and the explanation was invented to fit it. What settled it was killing the
+   observing worker and watching the row clear anyway.
+
+   `verify-worker.ts` now refuses to run while another worker is connected,
+   rather than producing the contaminated result that was recorded as this
+   bug; it waits to see whether a claimed row clears before calling it
+   stranded; and the worker warns at startup when it is the second one on a
+   database.
 2. **PostGIS and Redis are absent locally.** Geofences evaluate in JavaScript
    and the outbox drains on a lease rather than BullMQ. Both are correct as
    written; the parity tests come with the switch on the server, not before.
